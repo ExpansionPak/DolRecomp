@@ -262,6 +262,66 @@ static int test_bla(void) {
     CHECK(strstr(buf, "bla") != NULL, "disasm should contain 'bla', got '%s'", buf);
     return 1;
 }
+
+static int test_current_opcode_count(void) {
+    printf("  current opcode count is 30\n");
+    CHECK(PPC_OP_COUNT - 1 == 30, "should expose 30 opcodes, got %d", PPC_OP_COUNT - 1);
+    return 1;
+}
+
+static int test_current_opcode_decode_table(void) {
+    printf("  decode every opcode in the current 30-opcode set\n");
+
+    typedef struct {
+        u32 raw;
+        PPCOpcode op;
+        const char* name;
+    } OpcodeDecode;
+
+    static const OpcodeDecode opcodes[] = {
+        { 0x38610010, PPC_OP_ADDI,  "addi" },
+        { 0x3084FFFF, PPC_OP_ADDIC, "addic" },
+        { 0x3CA01234, PPC_OP_ADDIS, "addis" },
+        { 0x2C03FFFF, PPC_OP_CMPI,  "cmpi" },
+        { 0x28038000, PPC_OP_CMPLI, "cmpli" },
+        { 0x6064FF00, PPC_OP_ORI,   "ori" },
+        { 0x64851234, PPC_OP_ORIS,  "oris" },
+        { 0x68A6FFFF, PPC_OP_XORI,  "xori" },
+        { 0x6CC78000, PPC_OP_XORIS, "xoris" },
+        { 0x70E800FF, PPC_OP_ANDI,  "andi." },
+        { 0x74E900FF, PPC_OP_ANDIS, "andis." },
+        { 0x80610000, PPC_OP_LWZ,   "lwz" },
+        { 0x84810004, PPC_OP_LWZU,  "lwzu" },
+        { 0x88A10008, PPC_OP_LBZ,   "lbz" },
+        { 0x8CC1000C, PPC_OP_LBZU,  "lbzu" },
+        { 0x90610018, PPC_OP_STW,   "stw" },
+        { 0x9481001C, PPC_OP_STWU,  "stwu" },
+        { 0x98A10020, PPC_OP_STB,   "stb" },
+        { 0x9CC10024, PPC_OP_STBU,  "stbu" },
+        { 0xA0E10010, PPC_OP_LHZ,   "lhz" },
+        { 0xA5010014, PPC_OP_LHZU,  "lhzu" },
+        { 0xA921FFFC, PPC_OP_LHA,   "lha" },
+        { 0xB0E10028, PPC_OP_STH,   "sth" },
+        { 0xB501002C, PPC_OP_STHU,  "sthu" },
+        { 0x48000018, PPC_OP_B,     "b" },
+        { 0x41820014, PPC_OP_BC,    "bc" },
+        { 0x4E800020, PPC_OP_BCLR,  "bclr" },
+        { 0x4E800420, PPC_OP_BCCTR, "bcctr" },
+        { 0x7D4802A6, PPC_OP_MFSPR, "mfspr" },
+        { 0x7D4803A6, PPC_OP_MTSPR, "mtspr" },
+    };
+
+    int count = (int)(sizeof(opcodes) / sizeof(opcodes[0]));
+    CHECK(count == 30, "opcode table should have 30 entries, got %d", count);
+
+    for (int i = 0; i < count; i++) {
+        PPCInst inst = ppc_decode(opcodes[i].raw, 0x80000000u + (u32)(i * 4));
+        CHECK(inst.op == opcodes[i].op, "%s decoded as %s",
+              opcodes[i].name, ppc_op_name(inst.op));
+    }
+
+    return 1;
+}
 // edge cases
 static int test_unknown_opcode(void) {
     printf("  unknown opcode 63\n");
@@ -348,6 +408,8 @@ typedef struct {
 
 static TestCase all_tests[] = {
     { "sign_extend",           test_sign_extend },
+    { "current opcode count",  test_current_opcode_count },
+    { "current opcode decode", test_current_opcode_decode_table },
     { "addi basic",            test_addi_basic },
     { "addi negative SIMM",    test_addi_negative },
     { "li pseudo-op",          test_li_pseudoop },

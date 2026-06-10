@@ -6,10 +6,10 @@ PREFIX  := $(DEVKITPPC)/bin/powerpc-eabi-
 CC      := $(PREFIX)gcc
 ELF2DOL := $(DEVKITPRO)/tools/bin/elf2dol
 
-MACHDEP := -DGEKKO -mcpu=750 -meabi -mhard-float
+MACHDEP := -DGEKKO -mogc -mcpu=750 -meabi -mhard-float
 CFLAGS  := $(MACHDEP) -O0 -Wall -g -I$(LIBOGC)/include
 LDFLAGS := $(MACHDEP) -L$(LIBOGC)/lib/cube -Wl,-Map,test_opcodes.map
-LIBS    := -logc
+LIBS    := -logc -lm
 
 all: test_opcodes.dol
 

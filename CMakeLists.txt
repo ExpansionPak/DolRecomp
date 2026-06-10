@@ -38,3 +38,13 @@ add_executable(test_cross_check
 )
 target_include_directories(test_cross_check PRIVATE src)
 add_test(NAME cross_check COMMAND test_cross_check)
+
+# PC-side behavior checks against Dolphin-derived expectations
+add_executable(test_pc_reference
+    tests/test_pc_reference.c
+    src/frontend/decoder.c
+    src/frontend/dol.c
+    src/runtime/runtime.c
+)
+target_include_directories(test_pc_reference PRIVATE src)
+add_test(NAME pc_reference COMMAND test_pc_reference)

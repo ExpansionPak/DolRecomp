@@ -21,18 +21,38 @@ include/        - public headers if we end up needing them
 
 Here are the currently supported opcodes
 
-| Opcode    | Implemented |
-|-----------|--------|
-| addi (Add Immediate)   | Yes  |
-| addic (Add Immediate Carrying)    |  Yes   |
-| addis (Add Immediate Shifted)   | Yes |
-| cmpi (Compare Immediate)   | Yes |
-| ori (OR Immediate)  | Yes |
-| oris (OR Immediate Shifted)  | No |
-| lwz (Load Word and Zero)  | Yes |
-| stw (Store)  | Yes |
-| b[l][a] (Branch)  | Yes |
-| bc[l][a] (Branch Conditional)  | Yes |
+| Opcode | Implemented |
+|--------|-------------|
+| addi (Add Immediate) | Yes |
+| addic (Add Immediate Carrying) | Yes |
+| addis (Add Immediate Shifted) | Yes |
+| cmpi / cmpwi (Compare Immediate) | Yes |
+| cmpli / cmplwi (Compare Logical Immediate) | Yes |
+| ori (OR Immediate) | Yes |
+| oris (OR Immediate Shifted) | Yes |
+| xori (XOR Immediate) | Yes |
+| xoris (XOR Immediate Shifted) | Yes |
+| andi. (AND Immediate) | Yes |
+| andis. (AND Immediate Shifted) | Yes |
+| lwz (Load Word and Zero) | Yes |
+| lwzu (Load Word and Zero with Update) | Yes |
+| lbz (Load Byte and Zero) | Yes |
+| lbzu (Load Byte and Zero with Update) | Yes |
+| stw (Store Word) | Yes |
+| stwu (Store Word with Update) | Yes |
+| stb (Store Byte) | Yes |
+| stbu (Store Byte with Update) | Yes |
+| lhz (Load Halfword and Zero) | Yes |
+| lhzu (Load Halfword and Zero with Update) | Yes |
+| lha (Load Halfword Algebraic) | Yes |
+| sth (Store Halfword) | Yes |
+| sthu (Store Halfword with Update) | Yes |
+| b[l][a] (Branch) | Yes |
+| bc[l][a] (Branch Conditional) | Yes |
+| bclr / blr (Branch Conditional to Link Register) | Yes |
+| bcctr / bctr (Branch Conditional to Count Register) | Yes |
+| mfspr / mflr / mfctr (Move From SPR) | Yes |
+| mtspr / mtlr / mtctr (Move To SPR) | Yes |
 
 ## building
 

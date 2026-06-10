@@ -1,239 +1,141 @@
 #include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
 
 #include "../src/core/types.h"
 #include "../src/frontend/decoder.h"
 
-// raw machine code from devkitPPC (powerpc-eabi-as + powerpc-eabi-objdump)
-// every byte here was assembled by a real PPC toolchain
-static const u32 test_code[] = {
-    // addi
-    0x38610010,  // 00: addi r3,r1,16
-    0x38A2FF9C,  // 04: addi r5,r2,-100
-    0x3860002A,  // 08: li r3,42
-    0x3800FFFF,  // 0C: li r0,-1
-    0x3BFF0001,  // 10: addi r31,r31,1
-    0x38640000,  // 14: addi r3,r4,0
-
-    // ori
-    0x6064FF00,  // 18: ori r4,r3,65280
-    0x60000000,  // 1C: nop
-    0x6063FFFF,  // 20: ori r3,r3,65535
-    0x628A0001,  // 24: ori r10,r20,1
-
-    // lwz
-    0x80610000,  // 28: lwz r3,0(r1)
-    0x8081FFFC,  // 2C: lwz r4,-4(r1)
-    0x80600100,  // 30: lwz r3,256(0)
-    0x83FF7FFF,  // 34: lwz r31,32767(r31)
-    0x80018000,  // 38: lwz r0,-32768(r1)
-
-    // stw
-    0x90610000,  // 3C: stw r3,0(r1)
-    0x93E1FFF8,  // 40: stw r31,-8(r1)
-    0x9000000C,  // 44: stw r0,12(0)
-    0x90647FFF,  // 48: stw r3,32767(r4)
-
-    // branch (nop at 0x4C, then branches)
-    0x60000000,  // 4C: nop
-    0x4BFFFFFC,  // 50: b 4C (backward, displacement=-4)
-    0x4BFFFFF9,  // 54: bl 4C (backward call, displacement=-8)
-    0x48000018,  // 58: b 70 (forward, displacement=+0x18)
-    0x48000015,  // 5C: bl 70 (forward call, displacement=+0x14)
-    0x60000000,  // 60: nop
-    0x60000000,  // 64: nop
-    0x60000000,  // 68: nop
-    0x60000000,  // 6C: nop
-    0x60000000,  // 70: nop (branch target)
-};
+// Raw machine code from devkitPPC (powerpc-eabi-as + powerpc-eabi-objdump).
 
 #define BASE 0x80000000u
-#define NUM_INSTS (sizeof(test_code) / sizeof(test_code[0]))
+
+enum {
+    F_RD     = 1u << 0,
+    F_RA     = 1u << 1,
+    F_RS     = 1u << 2,
+    F_CRF    = 1u << 3,
+    F_L      = 1u << 4,
+    F_BO     = 1u << 5,
+    F_BI     = 1u << 6,
+    F_SIMM   = 1u << 7,
+    F_UIMM   = 1u << 8,
+    F_TARGET = 1u << 9,
+    F_AA     = 1u << 10,
+    F_LK     = 1u << 11,
+    F_RC     = 1u << 12,
+    F_SPR    = 1u << 13,
+};
+
+typedef struct {
+    const char* name;
+    u32 raw;
+    PPCOpcode op;
+    u32 fields;
+    u8 rD;
+    u8 rA;
+    u8 rS;
+    u8 crfD;
+    u8 l;
+    u8 bo;
+    u8 bi;
+    s16 simm;
+    u16 uimm;
+    u32 target;
+    bool aa;
+    bool lk;
+    bool rc;
+    u16 spr;
+} DecodeCase;
+
+static const DecodeCase cases[] = {
+    { "addi",  0x38610010, PPC_OP_ADDI,  F_RD|F_RA|F_SIMM, .rD=3, .rA=1, .simm=16 },
+    { "addic", 0x3084FFFF, PPC_OP_ADDIC, F_RD|F_RA|F_SIMM, .rD=4, .rA=4, .simm=-1 },
+    { "addis", 0x3CA01234, PPC_OP_ADDIS, F_RD|F_RA|F_SIMM, .rD=5, .rA=0, .simm=0x1234 },
+    { "cmpi",  0x2C03FFFF, PPC_OP_CMPI,  F_CRF|F_L|F_RA|F_SIMM, .crfD=0, .l=0, .rA=3, .simm=-1 },
+    { "cmpli", 0x28038000, PPC_OP_CMPLI, F_CRF|F_L|F_RA|F_UIMM, .crfD=0, .l=0, .rA=3, .uimm=0x8000 },
+
+    { "ori",    0x6064FF00, PPC_OP_ORI,   F_RS|F_RA|F_UIMM, .rS=3, .rA=4, .uimm=0xFF00 },
+    { "oris",   0x64851234, PPC_OP_ORIS,  F_RS|F_RA|F_UIMM, .rS=4, .rA=5, .uimm=0x1234 },
+    { "xori",   0x68A6FFFF, PPC_OP_XORI,  F_RS|F_RA|F_UIMM, .rS=5, .rA=6, .uimm=0xFFFF },
+    { "xoris",  0x6CC78000, PPC_OP_XORIS, F_RS|F_RA|F_UIMM, .rS=6, .rA=7, .uimm=0x8000 },
+    { "andi.",  0x70E800FF, PPC_OP_ANDI,  F_RS|F_RA|F_UIMM|F_RC, .rS=7, .rA=8, .uimm=0x00FF, .rc=true },
+    { "andis.", 0x74E900FF, PPC_OP_ANDIS, F_RS|F_RA|F_UIMM|F_RC, .rS=7, .rA=9, .uimm=0x00FF, .rc=true },
+
+    { "lwz",  0x80610000, PPC_OP_LWZ,  F_RD|F_RA|F_SIMM, .rD=3, .rA=1, .simm=0 },
+    { "lwzu", 0x84810004, PPC_OP_LWZU, F_RD|F_RA|F_SIMM, .rD=4, .rA=1, .simm=4 },
+    { "lbz",  0x88A10008, PPC_OP_LBZ,  F_RD|F_RA|F_SIMM, .rD=5, .rA=1, .simm=8 },
+    { "lbzu", 0x8CC1000C, PPC_OP_LBZU, F_RD|F_RA|F_SIMM, .rD=6, .rA=1, .simm=12 },
+    { "lhz",  0xA0E10010, PPC_OP_LHZ,  F_RD|F_RA|F_SIMM, .rD=7, .rA=1, .simm=16 },
+    { "lhzu", 0xA5010014, PPC_OP_LHZU, F_RD|F_RA|F_SIMM, .rD=8, .rA=1, .simm=20 },
+    { "lha",  0xA921FFFC, PPC_OP_LHA,  F_RD|F_RA|F_SIMM, .rD=9, .rA=1, .simm=-4 },
+
+    { "stw",  0x90610018, PPC_OP_STW,  F_RS|F_RA|F_SIMM, .rS=3, .rA=1, .simm=24 },
+    { "stwu", 0x9481001C, PPC_OP_STWU, F_RS|F_RA|F_SIMM, .rS=4, .rA=1, .simm=28 },
+    { "stb",  0x98A10020, PPC_OP_STB,  F_RS|F_RA|F_SIMM, .rS=5, .rA=1, .simm=32 },
+    { "stbu", 0x9CC10024, PPC_OP_STBU, F_RS|F_RA|F_SIMM, .rS=6, .rA=1, .simm=36 },
+    { "sth",  0xB0E10028, PPC_OP_STH,  F_RS|F_RA|F_SIMM, .rS=7, .rA=1, .simm=40 },
+    { "sthu", 0xB501002C, PPC_OP_STHU, F_RS|F_RA|F_SIMM, .rS=8, .rA=1, .simm=44 },
+
+    { "b",     0x48000018, PPC_OP_B,     F_TARGET|F_AA|F_LK, .target=BASE+0x78, .aa=false, .lk=false },
+    { "bc",    0x41820014, PPC_OP_BC,    F_BO|F_BI|F_TARGET|F_AA|F_LK, .bo=12, .bi=2, .target=BASE+0x78, .aa=false, .lk=false },
+    { "bclr",  0x4E800020, PPC_OP_BCLR,  F_BO|F_BI|F_LK, .bo=20, .bi=0, .lk=false },
+    { "bcctr", 0x4E800420, PPC_OP_BCCTR, F_BO|F_BI|F_LK, .bo=20, .bi=0, .lk=false },
+    { "mfspr", 0x7D4802A6, PPC_OP_MFSPR, F_RD|F_SPR, .rD=10, .spr=8 },
+    { "mtspr", 0x7D4803A6, PPC_OP_MTSPR, F_RS|F_SPR, .rS=10, .spr=8 },
+};
 
 static int pass = 0;
 static int fail = 0;
 
-static void check(bool cond, int idx, const char* what, const char* detail) {
+static void check(bool cond, int idx, const char* field, u32 got, u32 want) {
     if (cond) {
         pass++;
     } else {
         fail++;
-        printf("    FAIL [%02d] %s: %s\n", idx, what, detail);
+        printf("    FAIL [%02d] %s: got 0x%X, want 0x%X\n",
+               idx, field, got, want);
     }
 }
 
-#define CHK(cond, idx, what) do { \
-    char _buf[128]; \
-    snprintf(_buf, sizeof(_buf), "%s", #cond); \
-    check((cond), (idx), (what), _buf); \
-} while(0)
-
-#define CHK_EQ_U(got, want, idx, what) do { \
-    char _buf[128]; \
-    snprintf(_buf, sizeof(_buf), "got 0x%X, want 0x%X", (unsigned)(got), (unsigned)(want)); \
-    check((got) == (want), (idx), (what), _buf); \
-} while(0)
-
-#define CHK_EQ_D(got, want, idx, what) do { \
-    char _buf[128]; \
-    snprintf(_buf, sizeof(_buf), "got %d, want %d", (int)(got), (int)(want)); \
-    check((got) == (want), (idx), (what), _buf); \
-} while(0)
+static void check_s(bool cond, int idx, const char* field, s32 got, s32 want) {
+    if (cond) {
+        pass++;
+    } else {
+        fail++;
+        printf("    FAIL [%02d] %s: got %d, want %d\n",
+               idx, field, got, want);
+    }
+}
 
 int main(void) {
-    printf("cross-check: %d instructions against devkitPPC ground truth\n\n", (int)NUM_INSTS);
+    int num_cases = (int)(sizeof(cases) / sizeof(cases[0]));
+    printf("cross-check: %d opcodes against devkitPPC ground truth\n\n", num_cases);
 
-    for (int i = 0; i < (int)NUM_INSTS; i++) {
-        u32 addr = BASE + (u32)(i * 4);
-        PPCInst inst = ppc_decode(test_code[i], addr);
+    check((PPC_OP_COUNT - 1) == 30, -1, "opcode count", PPC_OP_COUNT - 1, 30);
+
+    for (int n = 0; n < num_cases; n++) {
+        const DecodeCase* c = &cases[n];
+        u32 addr = BASE + (u32)(n * 4);
+        PPCInst inst = ppc_decode(c->raw, addr);
 
         char buf[64];
         ppc_disasm(buf, sizeof(buf), &inst);
-        printf("[%02d] %08X  %08X  %s\n", i, addr, test_code[i], buf);
+        printf("[%02d] %08X  %08X  %-7s  %s\n", n, addr, c->raw, c->name, buf);
+
+        check(inst.op == c->op, n, "op", inst.op, c->op);
+        if (c->fields & F_RD)     check(inst.rD == c->rD, n, "rD", inst.rD, c->rD);
+        if (c->fields & F_RA)     check(inst.rA == c->rA, n, "rA", inst.rA, c->rA);
+        if (c->fields & F_RS)     check(inst.rS == c->rS, n, "rS", inst.rS, c->rS);
+        if (c->fields & F_CRF)    check(inst.crfD == c->crfD, n, "crfD", inst.crfD, c->crfD);
+        if (c->fields & F_L)      check(inst.l == c->l, n, "l", inst.l, c->l);
+        if (c->fields & F_BO)     check(inst.bo == c->bo, n, "bo", inst.bo, c->bo);
+        if (c->fields & F_BI)     check(inst.bi == c->bi, n, "bi", inst.bi, c->bi);
+        if (c->fields & F_SIMM)   check_s(inst.simm == c->simm, n, "simm", inst.simm, c->simm);
+        if (c->fields & F_UIMM)   check(inst.uimm == c->uimm, n, "uimm", inst.uimm, c->uimm);
+        if (c->fields & F_TARGET) check(inst.branch_target == c->target, n, "target", inst.branch_target, c->target);
+        if (c->fields & F_AA)     check(inst.aa == c->aa, n, "aa", inst.aa, c->aa);
+        if (c->fields & F_LK)     check(inst.lk == c->lk, n, "lk", inst.lk, c->lk);
+        if (c->fields & F_RC)     check(inst.rc == c->rc, n, "rc", inst.rc, c->rc);
+        if (c->fields & F_SPR)    check(inst.spr == c->spr, n, "spr", inst.spr, c->spr);
     }
-
-    printf("\n--- field verification ---\n\n");
-
-    // [00] addi r3, r1, 16
-    { PPCInst i = ppc_decode(0x38610010, BASE+0x00);
-      CHK_EQ_D(i.op, PPC_OP_ADDI, 0, "op");
-      CHK_EQ_U(i.rD, 3, 0, "rD"); CHK_EQ_U(i.rA, 1, 0, "rA");
-      CHK_EQ_D(i.simm, 16, 0, "simm"); }
-
-    // [01] addi r5, r2, -100
-    { PPCInst i = ppc_decode(0x38A2FF9C, BASE+0x04);
-      CHK_EQ_D(i.op, PPC_OP_ADDI, 1, "op");
-      CHK_EQ_U(i.rD, 5, 1, "rD"); CHK_EQ_U(i.rA, 2, 1, "rA");
-      CHK_EQ_D(i.simm, -100, 1, "simm"); }
-
-    // [02] li r3, 42
-    { PPCInst i = ppc_decode(0x3860002A, BASE+0x08);
-      CHK_EQ_D(i.op, PPC_OP_ADDI, 2, "op");
-      CHK_EQ_U(i.rD, 3, 2, "rD"); CHK_EQ_U(i.rA, 0, 2, "rA");
-      CHK_EQ_D(i.simm, 42, 2, "simm"); }
-
-    // [03] li r0, -1
-    { PPCInst i = ppc_decode(0x3800FFFF, BASE+0x0C);
-      CHK_EQ_D(i.op, PPC_OP_ADDI, 3, "op");
-      CHK_EQ_U(i.rD, 0, 3, "rD"); CHK_EQ_U(i.rA, 0, 3, "rA");
-      CHK_EQ_D(i.simm, -1, 3, "simm"); }
-
-    // [04] addi r31, r31, 1
-    { PPCInst i = ppc_decode(0x3BFF0001, BASE+0x10);
-      CHK_EQ_D(i.op, PPC_OP_ADDI, 4, "op");
-      CHK_EQ_U(i.rD, 31, 4, "rD"); CHK_EQ_U(i.rA, 31, 4, "rA");
-      CHK_EQ_D(i.simm, 1, 4, "simm"); }
-
-    // [05] addi r3, r4, 0
-    { PPCInst i = ppc_decode(0x38640000, BASE+0x14);
-      CHK_EQ_D(i.op, PPC_OP_ADDI, 5, "op");
-      CHK_EQ_U(i.rD, 3, 5, "rD"); CHK_EQ_U(i.rA, 4, 5, "rA");
-      CHK_EQ_D(i.simm, 0, 5, "simm"); }
-
-    // [06] ori r4, r3, 0xFF00
-    { PPCInst i = ppc_decode(0x6064FF00, BASE+0x18);
-      CHK_EQ_D(i.op, PPC_OP_ORI, 6, "op");
-      CHK_EQ_U(i.rS, 3, 6, "rS"); CHK_EQ_U(i.rA, 4, 6, "rA");
-      CHK_EQ_U(i.uimm, 0xFF00, 6, "uimm"); }
-
-    // [07] nop
-    { PPCInst i = ppc_decode(0x60000000, BASE+0x1C);
-      CHK_EQ_D(i.op, PPC_OP_ORI, 7, "op");
-      CHK_EQ_U(i.rS, 0, 7, "rS"); CHK_EQ_U(i.rA, 0, 7, "rA");
-      CHK_EQ_U(i.uimm, 0, 7, "uimm"); }
-
-    // [08] ori r3, r3, 0xFFFF
-    { PPCInst i = ppc_decode(0x6063FFFF, BASE+0x20);
-      CHK_EQ_D(i.op, PPC_OP_ORI, 8, "op");
-      CHK_EQ_U(i.rS, 3, 8, "rS"); CHK_EQ_U(i.rA, 3, 8, "rA");
-      CHK_EQ_U(i.uimm, 0xFFFF, 8, "uimm"); }
-
-    // [09] ori r10, r20, 1
-    { PPCInst i = ppc_decode(0x628A0001, BASE+0x24);
-      CHK_EQ_D(i.op, PPC_OP_ORI, 9, "op");
-      CHK_EQ_U(i.rS, 20, 9, "rS"); CHK_EQ_U(i.rA, 10, 9, "rA");
-      CHK_EQ_U(i.uimm, 1, 9, "uimm"); }
-
-    // [10] lwz r3, 0(r1)
-    { PPCInst i = ppc_decode(0x80610000, BASE+0x28);
-      CHK_EQ_D(i.op, PPC_OP_LWZ, 10, "op");
-      CHK_EQ_U(i.rD, 3, 10, "rD"); CHK_EQ_U(i.rA, 1, 10, "rA");
-      CHK_EQ_D(i.simm, 0, 10, "simm"); }
-
-    // [11] lwz r4, -4(r1)
-    { PPCInst i = ppc_decode(0x8081FFFC, BASE+0x2C);
-      CHK_EQ_D(i.op, PPC_OP_LWZ, 11, "op");
-      CHK_EQ_U(i.rD, 4, 11, "rD"); CHK_EQ_U(i.rA, 1, 11, "rA");
-      CHK_EQ_D(i.simm, -4, 11, "simm"); }
-
-    // [12] lwz r3, 256(r0) — rA=0 absolute
-    { PPCInst i = ppc_decode(0x80600100, BASE+0x30);
-      CHK_EQ_D(i.op, PPC_OP_LWZ, 12, "op");
-      CHK_EQ_U(i.rD, 3, 12, "rD"); CHK_EQ_U(i.rA, 0, 12, "rA");
-      CHK_EQ_D(i.simm, 256, 12, "simm"); }
-
-    // [13] lwz r31, 32767(r31) — max positive offset
-    { PPCInst i = ppc_decode(0x83FF7FFF, BASE+0x34);
-      CHK_EQ_D(i.op, PPC_OP_LWZ, 13, "op");
-      CHK_EQ_U(i.rD, 31, 13, "rD"); CHK_EQ_U(i.rA, 31, 13, "rA");
-      CHK_EQ_D(i.simm, 32767, 13, "simm"); }
-
-    // [14] lwz r0, -32768(r1) — min negative offset
-    { PPCInst i = ppc_decode(0x80018000, BASE+0x38);
-      CHK_EQ_D(i.op, PPC_OP_LWZ, 14, "op");
-      CHK_EQ_U(i.rD, 0, 14, "rD"); CHK_EQ_U(i.rA, 1, 14, "rA");
-      CHK_EQ_D(i.simm, -32768, 14, "simm"); }
-
-    // [15] stw r3, 0(r1)
-    { PPCInst i = ppc_decode(0x90610000, BASE+0x3C);
-      CHK_EQ_D(i.op, PPC_OP_STW, 15, "op");
-      CHK_EQ_U(i.rS, 3, 15, "rS"); CHK_EQ_U(i.rA, 1, 15, "rA");
-      CHK_EQ_D(i.simm, 0, 15, "simm"); }
-
-    // [16] stw r31, -8(r1)
-    { PPCInst i = ppc_decode(0x93E1FFF8, BASE+0x40);
-      CHK_EQ_D(i.op, PPC_OP_STW, 16, "op");
-      CHK_EQ_U(i.rS, 31, 16, "rS"); CHK_EQ_U(i.rA, 1, 16, "rA");
-      CHK_EQ_D(i.simm, -8, 16, "simm"); }
-
-    // [17] stw r0, 12(r0) — rA=0 absolute
-    { PPCInst i = ppc_decode(0x9000000C, BASE+0x44);
-      CHK_EQ_D(i.op, PPC_OP_STW, 17, "op");
-      CHK_EQ_U(i.rS, 0, 17, "rS"); CHK_EQ_U(i.rA, 0, 17, "rA");
-      CHK_EQ_D(i.simm, 12, 17, "simm"); }
-
-    // [18] stw r3, 32767(r4)
-    { PPCInst i = ppc_decode(0x90647FFF, BASE+0x48);
-      CHK_EQ_D(i.op, PPC_OP_STW, 18, "op");
-      CHK_EQ_U(i.rS, 3, 18, "rS"); CHK_EQ_U(i.rA, 4, 18, "rA");
-      CHK_EQ_D(i.simm, 32767, 18, "simm"); }
-
-    // [19] nop at 0x4C (skip)
-
-    // [20] b 0x4C (backward, raw=0x4BFFFFFC, displacement=-4)
-    { PPCInst i = ppc_decode(0x4BFFFFFC, BASE+0x50);
-      CHK_EQ_D(i.op, PPC_OP_B, 20, "op");
-      CHK_EQ_U(i.branch_target, BASE+0x4C, 20, "target");
-      CHK_EQ_D(i.aa, 0, 20, "aa"); CHK_EQ_D(i.lk, 0, 20, "lk"); }
-
-    // [21] bl 0x4C (backward call, raw=0x4BFFFFF9, displacement=-8)
-    { PPCInst i = ppc_decode(0x4BFFFFF9, BASE+0x54);
-      CHK_EQ_D(i.op, PPC_OP_B, 21, "op");
-      CHK_EQ_U(i.branch_target, BASE+0x4C, 21, "target");
-      CHK_EQ_D(i.aa, 0, 21, "aa"); CHK_EQ_D(i.lk, 1, 21, "lk"); }
-
-    // [22] b 0x70 (forward, raw=0x48000018, displacement=+0x18)
-    { PPCInst i = ppc_decode(0x48000018, BASE+0x58);
-      CHK_EQ_D(i.op, PPC_OP_B, 22, "op");
-      CHK_EQ_U(i.branch_target, BASE+0x70, 22, "target");
-      CHK_EQ_D(i.aa, 0, 22, "aa"); CHK_EQ_D(i.lk, 0, 22, "lk"); }
-
-    // [23] bl 0x70 (forward call, raw=0x48000015, displacement=+0x14)
-    { PPCInst i = ppc_decode(0x48000015, BASE+0x58+0x04);
-      CHK_EQ_D(i.op, PPC_OP_B, 23, "op");
-      CHK_EQ_U(i.branch_target, BASE+0x70, 23, "target");
-      CHK_EQ_D(i.aa, 0, 23, "aa"); CHK_EQ_D(i.lk, 1, 23, "lk"); }
 
     printf("\n%d/%d checks passed", pass, pass + fail);
     if (fail > 0)

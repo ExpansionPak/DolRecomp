@@ -1,9 +1,132 @@
 #include "emitter.h"
-#include <string.h>
+
+static u32 cr_field_shift(u8 crf) {
+    return 4u * (7u - (u32)crf);
+}
+
+static void emit_set_cr0_from_gpr(FILE* out, u8 reg) {
+    fprintf(out, "        u32 cr_bits = 0;\n");
+    fprintf(out, "        s32 cr_value = (s32)ctx->gpr[%u];\n", reg);
+    fprintf(out, "        if (cr_value < 0)  cr_bits |= 0x8u;\n");
+    fprintf(out, "        if (cr_value > 0)  cr_bits |= 0x4u;\n");
+    fprintf(out, "        if (cr_value == 0) cr_bits |= 0x2u;\n");
+    fprintf(out, "        cr_bits |= (ctx->xer >> 31) & 1u;\n");
+    fprintf(out, "        ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (cr_bits << 28);\n");
+}
+
+static void emit_compare_s32(FILE* out, u8 crf, u8 ra, s16 simm) {
+    u32 shift = cr_field_shift(crf);
+
+    fprintf(out, "    {\n");
+    fprintf(out, "        s32 val_a = (s32)ctx->gpr[%u];\n", ra);
+    fprintf(out, "        s32 val_b = (s32)%d;\n", (int)simm);
+    fprintf(out, "        u32 cr_bits = 0;\n");
+    fprintf(out, "        if (val_a < val_b)  cr_bits |= 0x8u;\n");
+    fprintf(out, "        if (val_a > val_b)  cr_bits |= 0x4u;\n");
+    fprintf(out, "        if (val_a == val_b) cr_bits |= 0x2u;\n");
+    fprintf(out, "        cr_bits |= (ctx->xer >> 31) & 1u;\n");
+    fprintf(out, "        ctx->cr = (ctx->cr & ~(0xFu << %u)) | (cr_bits << %u);\n",
+            shift, shift);
+    fprintf(out, "    }\n");
+}
+
+static void emit_compare_u32(FILE* out, u8 crf, u8 ra, u16 uimm) {
+    u32 shift = cr_field_shift(crf);
+
+    fprintf(out, "    {\n");
+    fprintf(out, "        u32 val_a = ctx->gpr[%u];\n", ra);
+    fprintf(out, "        u32 val_b = 0x%04Xu;\n", uimm);
+    fprintf(out, "        u32 cr_bits = 0;\n");
+    fprintf(out, "        if (val_a < val_b)  cr_bits |= 0x8u;\n");
+    fprintf(out, "        if (val_a > val_b)  cr_bits |= 0x4u;\n");
+    fprintf(out, "        if (val_a == val_b) cr_bits |= 0x2u;\n");
+    fprintf(out, "        cr_bits |= (ctx->xer >> 31) & 1u;\n");
+    fprintf(out, "        ctx->cr = (ctx->cr & ~(0xFu << %u)) | (cr_bits << %u);\n",
+            shift, shift);
+    fprintf(out, "    }\n");
+}
+
+static void emit_dform_ea(FILE* out, u8 ra, s16 simm, bool update) {
+    if (ra == 0 && !update) {
+        fprintf(out, "(u32)(s32)(%d)", (int)simm);
+    } else {
+        fprintf(out, "ctx->gpr[%u] + (u32)(s32)(%d)", ra, (int)simm);
+    }
+}
+
+static void emit_load(FILE* out, const PPCInst* inst, const char* read_expr,
+                      bool update) {
+    fprintf(out, "    {\n");
+    fprintf(out, "        u32 ea = ");
+    emit_dform_ea(out, inst->rA, inst->simm, update);
+    fprintf(out, ";\n");
+    fprintf(out, "        ctx->gpr[%u] = %s;\n", inst->rD, read_expr);
+    if (update) {
+        fprintf(out, "        ctx->gpr[%u] = ea;\n", inst->rA);
+    }
+    fprintf(out, "    }\n");
+}
+
+static void emit_store(FILE* out, const PPCInst* inst, const char* write_func,
+                       const char* cast_type, bool update) {
+    fprintf(out, "    {\n");
+    fprintf(out, "        u32 ea = ");
+    emit_dform_ea(out, inst->rA, inst->simm, update);
+    fprintf(out, ";\n");
+    fprintf(out, "        %s(ctx, ea, (%s)ctx->gpr[%u]);\n",
+            write_func, cast_type, inst->rS);
+    if (update) {
+        fprintf(out, "        ctx->gpr[%u] = ea;\n", inst->rA);
+    }
+    fprintf(out, "    }\n");
+}
+
+static void emit_branch_condition(FILE* out, u8 bo, u8 bi) {
+    bool ctr_ignored = (bo & 0x04) != 0;
+    bool cond_ignored = (bo & 0x10) != 0;
+
+    if (!ctr_ignored) {
+        fprintf(out, "        ctx->ctr--;\n");
+        fprintf(out, "        bool ctr_ok = (((ctx->ctr != 0) ? 1u : 0u) ^ %uu) != 0;\n",
+                (bo >> 1) & 1u);
+    } else {
+        fprintf(out, "        bool ctr_ok = true;\n");
+    }
+
+    if (!cond_ignored) {
+        u32 mask = 0x80000000u >> bi;
+        fprintf(out, "        bool cr_ok = (((ctx->cr & 0x%08Xu) != 0) == %s);\n",
+                mask, ((bo >> 3) & 1u) ? "true" : "false");
+    } else {
+        fprintf(out, "        bool cr_ok = true;\n");
+    }
+}
+
+static void emit_direct_branch(FILE* out, const PPCInst* inst) {
+    if (inst->lk) {
+        fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
+    }
+    fprintf(out, "            goto label_%08X;\n", inst->branch_target);
+}
+
+static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
+                                const char* target_expr) {
+    fprintf(out, "    {\n");
+    fprintf(out, "        u32 target = %s;\n", target_expr);
+    emit_branch_condition(out, inst->bo, inst->bi);
+    fprintf(out, "        if (ctr_ok && cr_ok) {\n");
+    if (inst->lk) {
+        fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
+    }
+    fprintf(out, "            ctx->pc = target;\n");
+    fprintf(out, "            return;\n");
+    fprintf(out, "        }\n");
+    fprintf(out, "    }\n");
+}
 
 void emit_header(FILE* out) {
     fprintf(out,
-        "// auto-generated by DolRecomp — do not edit\n"
+        "// auto-generated by DolRecomp - do not edit\n"
         "\n"
         "#include \"runtime/runtime.h\"\n"
         "\n"
@@ -20,7 +143,7 @@ void emit_instruction(FILE* out, const PPCInst* inst) {
     fprintf(out, "    // %08X: %s\n", inst->address, disasm);
 
     switch (inst->op) {
-    case PPC_OP_ADDI: // rA=0 means base is literal 0
+    case PPC_OP_ADDI:
         if (inst->rA == 0) {
             fprintf(out, "    ctx->gpr[%u] = (u32)(s32)(%d);\n",
                     inst->rD, (int)inst->simm);
@@ -29,45 +152,34 @@ void emit_instruction(FILE* out, const PPCInst* inst) {
                     inst->rD, inst->rA, (int)inst->simm);
         }
         break;
-    
-    case PPC_OP_ADDIC: {
+
+    case PPC_OP_ADDIC:
         fprintf(out, "    {\n");
-        fprintf(out, "        u64 res = (u64)ctx->gpr[%u] + (u64)(s32)(%d);\n", 
-                inst->rA, (int)inst->simm);
+        fprintf(out, "        u64 a = ctx->gpr[%u];\n", inst->rA);
+        fprintf(out, "        u64 b = (u32)(s32)(%d);\n", (int)inst->simm);
+        fprintf(out, "        u64 res = a + b;\n");
         fprintf(out, "        ctx->gpr[%u] = (u32)res;\n", inst->rD);
-        fprintf(out, "        // Update XER[CA] (bit 2 / mask 0x20000000)\n");
-        fprintf(out, "        u32 carry = (u32)((res >> 32) & 1);\n");
-        fprintf(out, "        ctx->xer = (ctx->xer & ~0x20000000u) | (carry << 29);\n");
+        fprintf(out, "        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);\n");
         fprintf(out, "    }\n");
         break;
-    }
 
-    case PPC_OP_ADDIS: // rA=0 means base is literal 0, shift immediate by 16
+    case PPC_OP_ADDIS:
         if (inst->rA == 0) {
-            fprintf(out, "    ctx->gpr[%u] = (u32)(inst->simm) << 16;\n",
-                    inst->rD);
+            fprintf(out, "    ctx->gpr[%u] = ((u32)(s32)(%d) << 16);\n",
+                    inst->rD, (int)inst->simm);
         } else {
-            fprintf(out, "    ctx->gpr[%u] = ctx->gpr[%u] + ((u32)(inst->simm) << 16);\n",
-                    inst->rD, inst->rA);
+            fprintf(out, "    ctx->gpr[%u] = ctx->gpr[%u] + ((u32)(s32)(%d) << 16);\n",
+                    inst->rD, inst->rA, (int)inst->simm);
         }
         break;
-    
-    case PPC_OP_CMPI: {
-        fprintf(out, "    {\n");
-        fprintf(out, "        s32 val_a = (s32)ctx->gpr[%u];\n", inst->rA);
-        fprintf(out, "        s32 val_b = (s32)%d;\n", (int)inst->simm);
-        fprintf(out, "        u32 c_bits = 0;\n");
-        fprintf(out, "        if (val_a < val_b)  c_bits |= 0x8u;\n");
-        fprintf(out, "        if (val_a > val_b)  c_bits |= 0x4u;\n");
-        fprintf(out, "        if (val_a == val_b) c_bits |= 0x2u;\n");
-        fprintf(out, "        c_bits |= (ctx->xer >> 31) & 1u; // Append XER[SO]\n");
-        fprintf(out, "\n");
-        fprintf(out, "        // Shift into correct 4-bit CR field slot (0-7)\n");
-        u32 shift = 4 * (7 - inst->crfD);
-        fprintf(out, "        ctx->cr = (ctx->cr & ~(0xFu << %u)) | (c_bits << %u);\n", shift, shift);
-        fprintf(out, "    }\n");
+
+    case PPC_OP_CMPI:
+        emit_compare_s32(out, inst->crfD, inst->rA, inst->simm);
         break;
-    }
+
+    case PPC_OP_CMPLI:
+        emit_compare_u32(out, inst->crfD, inst->rA, inst->uimm);
+        break;
 
     case PPC_OP_ORI:
         if (inst->rS == 0 && inst->rA == 0 && inst->uimm == 0) {
@@ -78,91 +190,146 @@ void emit_instruction(FILE* out, const PPCInst* inst) {
         }
         break;
 
-    case PPC_OP_LWZ: // rA=0 means base is 0
-        if (inst->rA == 0) {
-            fprintf(out, "    ctx->gpr[%u] = mem_read32(ctx, (u32)(s32)(%d));\n",
-                    inst->rD, (int)inst->simm);
-        } else {
-            fprintf(out, "    ctx->gpr[%u] = mem_read32(ctx, ctx->gpr[%u] + (u32)(s32)(%d));\n",
-                    inst->rD, inst->rA, (int)inst->simm);
-        }
+    case PPC_OP_ORIS:
+        fprintf(out, "    ctx->gpr[%u] = ctx->gpr[%u] | (0x%04Xu << 16);\n",
+                inst->rA, inst->rS, inst->uimm);
         break;
 
-    case PPC_OP_STW: // same rA=0 rule
-        if (inst->rA == 0) {
-            fprintf(out, "    mem_write32(ctx, (u32)(s32)(%d), ctx->gpr[%u]);\n",
-                    (int)inst->simm, inst->rS);
-        } else {
-            fprintf(out, "    mem_write32(ctx, ctx->gpr[%u] + (u32)(s32)(%d), ctx->gpr[%u]);\n",
-                    inst->rA, (int)inst->simm, inst->rS);
-        }
+    case PPC_OP_XORI:
+        fprintf(out, "    ctx->gpr[%u] = ctx->gpr[%u] ^ 0x%04Xu;\n",
+                inst->rA, inst->rS, inst->uimm);
         break;
 
-    case PPC_OP_B: // bl = call, b = goto
-        if (inst->lk) {
-            fprintf(out, "    ctx->lr = 0x%08Xu;\n", inst->address + 4);
-            fprintf(out, "    func_%08X(ctx);\n", inst->branch_target);
-        } else {
-            fprintf(out, "    goto label_%08X;\n", inst->branch_target);
-        }
+    case PPC_OP_XORIS:
+        fprintf(out, "    ctx->gpr[%u] = ctx->gpr[%u] ^ (0x%04Xu << 16);\n",
+                inst->rA, inst->rS, inst->uimm);
         break;
 
-    case PPC_OP_BC: {
+    case PPC_OP_ANDI:
         fprintf(out, "    {\n");
-        
-        // 1. Handle CTR decrement if required by the BO field
-        bool decrement_ctr = ((inst->bo & 0x08) == 0);
-        if (decrement_ctr) {
-            fprintf(out, "        ctx->ctr--;\n");
-        }
+        fprintf(out, "        ctx->gpr[%u] = ctx->gpr[%u] & 0x%04Xu;\n",
+                inst->rA, inst->rS, inst->uimm);
+        emit_set_cr0_from_gpr(out, inst->rA);
+        fprintf(out, "    }\n");
+        break;
 
-        // 2. Generate CTR check flag
-        fprintf(out, "        bool ctr_ok = ");
-        if (decrement_ctr) {
-            if (inst->bo & 0x04) {
-                fprintf(out, "(ctx->ctr == 0);\n");
-            } else {
-                fprintf(out, "(ctx->ctr != 0);\n");
-            }
-        } else {
-            fprintf(out, "true;\n");
-        }
+    case PPC_OP_ANDIS:
+        fprintf(out, "    {\n");
+        fprintf(out, "        ctx->gpr[%u] = ctx->gpr[%u] & (0x%04Xu << 16);\n",
+                inst->rA, inst->rS, inst->uimm);
+        emit_set_cr0_from_gpr(out, inst->rA);
+        fprintf(out, "    }\n");
+        break;
 
-        // 3. Generate Condition Register (CR) check flag
-        fprintf(out, "        bool cr_ok = ");
-        u32 cr_bit_mask = 0x80000000u >> inst->bi;
+    case PPC_OP_LWZ:
+        emit_load(out, inst, "mem_read32(ctx, ea)", false);
+        break;
 
-        if (inst->bo & 0x10) {
-            if (inst->bo & 0x08) {
-                fprintf(out, "((ctx->cr & 0x%08Xu) != 0);\n", cr_bit_mask);
-            } else {
-                fprintf(out, "((ctx->cr & 0x%08Xu) == 0);\n", cr_bit_mask);
-            }
-        } else {
-            if ((inst->bo & 0x1E) == 24) {
-                fprintf(out, "true;\n");
-            } else {
-                if (inst->bo & 0x08) {
-                    fprintf(out, "((ctx->cr & 0x%08Xu) != 0);\n", cr_bit_mask);
-                } else {
-                    fprintf(out, "((ctx->cr & 0x%08Xu) == 0);\n", cr_bit_mask);
-                }
-            }
-        }
+    case PPC_OP_LWZU:
+        emit_load(out, inst, "mem_read32(ctx, ea)", true);
+        break;
 
-        // 4. Combine and jump
-        fprintf(out, "        bool take_branch = ctr_ok && cr_ok;\n");
-        fprintf(out, "        if (take_branch) {\n");
-        if (inst->lk) {
-            fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
-            fprintf(out, "            func_%08X(ctx);\n", inst->branch_target);
-        } else {
-            fprintf(out, "            goto label_%08X;\n", inst->branch_target);
-        }
+    case PPC_OP_LBZ:
+        emit_load(out, inst, "mem_read8(ctx, ea)", false);
+        break;
+
+    case PPC_OP_LBZU:
+        emit_load(out, inst, "mem_read8(ctx, ea)", true);
+        break;
+
+    case PPC_OP_LHZ:
+        emit_load(out, inst, "mem_read16(ctx, ea)", false);
+        break;
+
+    case PPC_OP_LHZU:
+        emit_load(out, inst, "mem_read16(ctx, ea)", true);
+        break;
+
+    case PPC_OP_LHA:
+        emit_load(out, inst, "(u32)(s32)(s16)mem_read16(ctx, ea)", false);
+        break;
+
+    case PPC_OP_STW:
+        emit_store(out, inst, "mem_write32", "u32", false);
+        break;
+
+    case PPC_OP_STWU:
+        emit_store(out, inst, "mem_write32", "u32", true);
+        break;
+
+    case PPC_OP_STB:
+        emit_store(out, inst, "mem_write8", "u8", false);
+        break;
+
+    case PPC_OP_STBU:
+        emit_store(out, inst, "mem_write8", "u8", true);
+        break;
+
+    case PPC_OP_STH:
+        emit_store(out, inst, "mem_write16", "u16", false);
+        break;
+
+    case PPC_OP_STHU:
+        emit_store(out, inst, "mem_write16", "u16", true);
+        break;
+
+    case PPC_OP_B:
+        fprintf(out, "    {\n");
+        emit_direct_branch(out, inst);
+        fprintf(out, "    }\n");
+        break;
+
+    case PPC_OP_BC:
+        fprintf(out, "    {\n");
+        emit_branch_condition(out, inst->bo, inst->bi);
+        fprintf(out, "        if (ctr_ok && cr_ok) {\n");
+        emit_direct_branch(out, inst);
         fprintf(out, "        }\n");
         fprintf(out, "    }\n");
         break;
-    }
+
+    case PPC_OP_BCLR:
+        emit_dynamic_branch(out, inst, "ctx->lr & ~3u");
+        break;
+
+    case PPC_OP_BCCTR:
+        emit_dynamic_branch(out, inst, "ctx->ctr & ~3u");
+        break;
+
+    case PPC_OP_MFSPR:
+        switch (inst->spr) {
+        case 1:
+            fprintf(out, "    ctx->gpr[%u] = ctx->xer;\n", inst->rD);
+            break;
+        case 8:
+            fprintf(out, "    ctx->gpr[%u] = ctx->lr;\n", inst->rD);
+            break;
+        case 9:
+            fprintf(out, "    ctx->gpr[%u] = ctx->ctr;\n", inst->rD);
+            break;
+        default:
+            fprintf(out, "    // TODO: mfspr %u\n", inst->spr);
+            fprintf(out, "    ctx->gpr[%u] = 0;\n", inst->rD);
+            break;
+        }
+        break;
+
+    case PPC_OP_MTSPR:
+        switch (inst->spr) {
+        case 1:
+            fprintf(out, "    ctx->xer = ctx->gpr[%u];\n", inst->rS);
+            break;
+        case 8:
+            fprintf(out, "    ctx->lr = ctx->gpr[%u];\n", inst->rS);
+            break;
+        case 9:
+            fprintf(out, "    ctx->ctr = ctx->gpr[%u];\n", inst->rS);
+            break;
+        default:
+            fprintf(out, "    // TODO: mtspr %u\n", inst->spr);
+            break;
+        }
+        break;
 
     default:
         fprintf(out, "    // TODO: unimplemented (raw: 0x%08X)\n", inst->raw);
