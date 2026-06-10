@@ -51,6 +51,23 @@ void emit_instruction(FILE* out, const PPCInst* inst) {
                     inst->rD, inst->rA);
         }
         break;
+    
+    case PPC_OP_CMPI: {
+        fprintf(out, "    {\n");
+        fprintf(out, "        s32 val_a = (s32)ctx->gpr[%u];\n", inst->rA);
+        fprintf(out, "        s32 val_b = (s32)%d;\n", (int)inst->simm);
+        fprintf(out, "        u32 c_bits = 0;\n");
+        fprintf(out, "        if (val_a < val_b)  c_bits |= 0x8u;\n");
+        fprintf(out, "        if (val_a > val_b)  c_bits |= 0x4u;\n");
+        fprintf(out, "        if (val_a == val_b) c_bits |= 0x2u;\n");
+        fprintf(out, "        c_bits |= (ctx->xer >> 31) & 1u; // Append XER[SO]\n");
+        fprintf(out, "\n");
+        fprintf(out, "        // Shift into correct 4-bit CR field slot (0-7)\n");
+        u32 shift = 4 * (7 - inst->crfD);
+        fprintf(out, "        ctx->cr = (ctx->cr & ~(0xFu << %u)) | (c_bits << %u);\n", shift, shift);
+        fprintf(out, "    }\n");
+        break;
+    }
 
     case PPC_OP_ORI:
         if (inst->rS == 0 && inst->rA == 0 && inst->uimm == 0) {

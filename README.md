@@ -26,6 +26,7 @@ Here are the currently supported opcodes
 | addi (Add Immediate)   | Yes  |
 | addic (Add Immediate Carrying)    |  Yes   |
 | addis (Add Immediate Shifted)   | Yes |
+| cmpi (Compare Immediate)   | Yes |
 | ori (OR Immediate)  | Yes |
 | oris (OR Immediate Shifted)  | No |
 | lwz (Load Word and Zero)  | Yes |
