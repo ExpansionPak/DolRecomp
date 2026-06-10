@@ -32,8 +32,7 @@ int main(int argc, char** argv) {
 
     FILE* out = stdout;
     if (output_path) {
-        out = fopen(output_path, "w");
-        if (!out) {
+        if (fopen_s(&out, output_path, "w") != 0) {
             fprintf(stderr, "error: can't open output '%s'\n", output_path);
             dol_free(&dol);
             return 1;

@@ -26,6 +26,13 @@ PPCInst ppc_decode(u32 raw, u32 address) {
         inst.simm = PPC_SIMM(raw);
         break;
 
+    case 12: // addic — rD = rA + SIMM. Updates Carry (CA). rA=0 reads r0 register.
+        inst.op   = PPC_OP_ADDIC;
+        inst.rD   = PPC_RD(raw);
+        inst.rA   = PPC_RA(raw);
+        inst.simm = PPC_SIMM(raw);
+        break;
+
     case 24: // ori — ori r0,r0,0 is nop
         inst.op   = PPC_OP_ORI;
         inst.rS   = PPC_RS(raw);
@@ -71,6 +78,7 @@ PPCInst ppc_decode(u32 raw, u32 address) {
 static const char* opcode_names[PPC_OP_COUNT] = {
     [PPC_OP_UNKNOWN] = "???",
     [PPC_OP_ADDI]    = "addi",
+    [PPC_OP_ADDIC]   = "addic",
     [PPC_OP_ORI]     = "ori",
     [PPC_OP_LWZ]     = "lwz",
     [PPC_OP_STW]     = "stw",
@@ -92,6 +100,12 @@ char* ppc_disasm(char* buf, size_t buf_size, const PPCInst* inst) {
             snprintf(buf, buf_size, "addi    r%u, r%u, %d",
                      inst->rD, inst->rA, (int)inst->simm);
         }
+        break;
+
+    case PPC_OP_ADDIC:
+        // Always prints rA, even if it is r0. No pseudo-ops allowed here.
+        snprintf(buf, buf_size, "addic   r%u, r%u, %d",
+                 inst->rD, inst->rA, (int)inst->simm);
         break;
 
     case PPC_OP_ORI:

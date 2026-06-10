@@ -6,8 +6,13 @@
 bool dol_load(DOLFile* dol, const char* path) {
     memset(dol, 0, sizeof(*dol));
 
-    FILE* f = fopen(path, "rb");
+    FILE* f = NULL;
+#ifdef _MSC_VER
+    if (fopen_s(&f, path, "rb") != 0 || !f) {
+#else
+    f = fopen(path, "rb");
     if (!f) {
+#endif
         fprintf(stderr, "error: can't open '%s'\n", path);
         return false;
     }
