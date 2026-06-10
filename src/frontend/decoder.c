@@ -7,6 +7,9 @@
 #define PPC_RD(raw)        (((raw) >> 21) & 0x1F)
 #define PPC_RS(raw)        (((raw) >> 21) & 0x1F)
 #define PPC_RA(raw)        (((raw) >> 16) & 0x1F)
+#define PPC_BO(raw)      (((raw) >> 21) & 0x1F) // Bits 6-10: Branch Options
+#define PPC_BI(raw)      (((raw) >> 16) & 0x1F) // Bits 11-15: Branch Condition Bit Index
+// BD is a 14-bit signed displacement (bits 16-29) shifted left by 2
 #define PPC_SIMM(raw)      ((s16)((raw) & 0xFFFF))
 #define PPC_UIMM(raw)      ((u16)((raw) & 0xFFFF))
 
@@ -81,6 +84,31 @@ PPCInst ppc_decode(u32 raw, u32 address) {
         break;
     }
 
+    case 16: { // bc — Branch Conditional
+        inst.op = PPC_OP_BC;
+        u8 bo = (raw >> 21) & 0x1F;
+        u8 bi = (raw >> 16) & 0x1F;
+        inst.aa = (raw >> 1) & 1;
+        inst.lk = raw & 1;
+        
+        // Save bo/bi into your instruction structure so the emitter can read them
+        inst.bo = bo; 
+        inst.bi = bi;
+
+        // Isolate the 14-bit BD field (bits 16-29)
+        s32 bd_field = (s32)((raw & 0xFFFC) >> 2);
+        if (bd_field & 0x00002000) { // Sign extend 14-bit to 32-bit
+            bd_field |= 0xFFFFC000;
+        }
+        s32 displacement = bd_field << 2;
+
+        if (inst.aa)
+            inst.branch_target = (u32)displacement;
+        else
+            inst.branch_target = address + (u32)displacement;
+        break;
+    }
+
     default:
         inst.op = PPC_OP_UNKNOWN;
         break;
@@ -99,6 +127,7 @@ static const char* opcode_names[PPC_OP_COUNT] = {
     [PPC_OP_LWZ]     = "lwz",
     [PPC_OP_STW]     = "stw",
     [PPC_OP_B]       = "b",
+    [PPC_OP_BC]      = "bc",
 };
 
 const char* ppc_op_name(PPCOpcode op) {
