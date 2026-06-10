@@ -32,6 +32,7 @@ Here are the currently supported opcodes
 | lwz (Load Word and Zero)  | Yes |
 | stw (Store)  | Yes |
 | b[l][a] (Branch)  | Yes |
+| bc[l][a] (Branch Conditional)  | Yes |
 
 ## building
 
