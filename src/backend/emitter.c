@@ -29,6 +29,45 @@ void emit_instruction(FILE* out, const PPCInst* inst) {
                     inst->rD, inst->rA, (int)inst->simm);
         }
         break;
+    
+    case PPC_OP_ADDIC: {
+        fprintf(out, "    {\n");
+        fprintf(out, "        u64 res = (u64)ctx->gpr[%u] + (u64)(s32)(%d);\n", 
+                inst->rA, (int)inst->simm);
+        fprintf(out, "        ctx->gpr[%u] = (u32)res;\n", inst->rD);
+        fprintf(out, "        // Update XER[CA] (bit 2 / mask 0x20000000)\n");
+        fprintf(out, "        u32 carry = (u32)((res >> 32) & 1);\n");
+        fprintf(out, "        ctx->xer = (ctx->xer & ~0x20000000u) | (carry << 29);\n");
+        fprintf(out, "    }\n");
+        break;
+    }
+
+    case PPC_OP_ADDIS: // rA=0 means base is literal 0, shift immediate by 16
+        if (inst->rA == 0) {
+            fprintf(out, "    ctx->gpr[%u] = (u32)(inst->simm) << 16;\n",
+                    inst->rD);
+        } else {
+            fprintf(out, "    ctx->gpr[%u] = ctx->gpr[%u] + ((u32)(inst->simm) << 16);\n",
+                    inst->rD, inst->rA);
+        }
+        break;
+    
+    case PPC_OP_CMPI: {
+        fprintf(out, "    {\n");
+        fprintf(out, "        s32 val_a = (s32)ctx->gpr[%u];\n", inst->rA);
+        fprintf(out, "        s32 val_b = (s32)%d;\n", (int)inst->simm);
+        fprintf(out, "        u32 c_bits = 0;\n");
+        fprintf(out, "        if (val_a < val_b)  c_bits |= 0x8u;\n");
+        fprintf(out, "        if (val_a > val_b)  c_bits |= 0x4u;\n");
+        fprintf(out, "        if (val_a == val_b) c_bits |= 0x2u;\n");
+        fprintf(out, "        c_bits |= (ctx->xer >> 31) & 1u; // Append XER[SO]\n");
+        fprintf(out, "\n");
+        fprintf(out, "        // Shift into correct 4-bit CR field slot (0-7)\n");
+        u32 shift = 4 * (7 - inst->crfD);
+        fprintf(out, "        ctx->cr = (ctx->cr & ~(0xFu << %u)) | (c_bits << %u);\n", shift, shift);
+        fprintf(out, "    }\n");
+        break;
+    }
 
     case PPC_OP_ORI:
         if (inst->rS == 0 && inst->rA == 0 && inst->uimm == 0) {
@@ -67,6 +106,63 @@ void emit_instruction(FILE* out, const PPCInst* inst) {
             fprintf(out, "    goto label_%08X;\n", inst->branch_target);
         }
         break;
+
+    case PPC_OP_BC: {
+        fprintf(out, "    {\n");
+        
+        // 1. Handle CTR decrement if required by the BO field
+        bool decrement_ctr = ((inst->bo & 0x08) == 0);
+        if (decrement_ctr) {
+            fprintf(out, "        ctx->ctr--;\n");
+        }
+
+        // 2. Generate CTR check flag
+        fprintf(out, "        bool ctr_ok = ");
+        if (decrement_ctr) {
+            if (inst->bo & 0x04) {
+                fprintf(out, "(ctx->ctr == 0);\n");
+            } else {
+                fprintf(out, "(ctx->ctr != 0);\n");
+            }
+        } else {
+            fprintf(out, "true;\n");
+        }
+
+        // 3. Generate Condition Register (CR) check flag
+        fprintf(out, "        bool cr_ok = ");
+        u32 cr_bit_mask = 0x80000000u >> inst->bi;
+
+        if (inst->bo & 0x10) {
+            if (inst->bo & 0x08) {
+                fprintf(out, "((ctx->cr & 0x%08Xu) != 0);\n", cr_bit_mask);
+            } else {
+                fprintf(out, "((ctx->cr & 0x%08Xu) == 0);\n", cr_bit_mask);
+            }
+        } else {
+            if ((inst->bo & 0x1E) == 24) {
+                fprintf(out, "true;\n");
+            } else {
+                if (inst->bo & 0x08) {
+                    fprintf(out, "((ctx->cr & 0x%08Xu) != 0);\n", cr_bit_mask);
+                } else {
+                    fprintf(out, "((ctx->cr & 0x%08Xu) == 0);\n", cr_bit_mask);
+                }
+            }
+        }
+
+        // 4. Combine and jump
+        fprintf(out, "        bool take_branch = ctr_ok && cr_ok;\n");
+        fprintf(out, "        if (take_branch) {\n");
+        if (inst->lk) {
+            fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
+            fprintf(out, "            func_%08X(ctx);\n", inst->branch_target);
+        } else {
+            fprintf(out, "            goto label_%08X;\n", inst->branch_target);
+        }
+        fprintf(out, "        }\n");
+        fprintf(out, "    }\n");
+        break;
+    }
 
     default:
         fprintf(out, "    // TODO: unimplemented (raw: 0x%08X)\n", inst->raw);
