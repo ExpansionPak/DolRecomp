@@ -27,7 +27,7 @@ Here are the currently supported opcodes
 | addic (Add Immediate Carrying)    |  Yes   |
 | addis (Add Immediate Shifted)   | Yes |
 | ori (OR Immediate)  | Yes |
-| oris (OR Immediate Shifted)  | Yes |
+| oris (OR Immediate Shifted)  | No |
 | lwz (Load Word and Zero)  | Yes |
 | stw (Store)  | Yes |
 | b[l][a] (Branch)  | Yes |
