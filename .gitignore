@@ -30,3 +30,8 @@ extern/*/
 # Test artifacts
 tests/data/*.dol
 tests/data/*.rel
+
+# discs and test output
+*.elf
+*.dol
+discs/
