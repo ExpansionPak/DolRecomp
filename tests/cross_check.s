@@ -67,6 +67,11 @@ subfc r15, r16, r17
 subfe r16, r17, r18
 subfze r17, r18
 neg r18, r19
+mullw r3, r4, r5
+mulhw r6, r7, r8
+mulhwu r9, r10, r11
+divw r12, r13, r14
+divwu r15, r16, r17
 
 # --- register logical / shifts ---
 and r19, r20, r21
@@ -110,6 +115,51 @@ sthux r10, r4, r5
 stwbrx r9, r10, r11
 sthbrx r12, r13, r14
 dcbz r15, r16
+
+# --- FPU loads/stores ---
+lfs f1, 0(r4)
+lfsu f2, 4(r4)
+lfd f3, 8(r4)
+lfdu f4, 16(r4)
+stfs f5, 20(r4)
+stfsu f6, 24(r4)
+stfd f7, 32(r4)
+stfdu f8, 40(r4)
+lfsx f9, r4, r5
+lfsux f10, r4, r5
+lfdx f11, r4, r5
+lfdux f12, r4, r5
+stfsx f13, r4, r5
+stfsux f14, r4, r5
+stfdx f15, r4, r5
+stfdux f16, r4, r5
+
+# --- FPU arithmetic / moves / compare ---
+fadds f1, f2, f3
+fsubs f4, f5, f6
+fmuls f7, f8, f9
+fdivs f10, f11, f12
+fadd f13, f14, f15
+fsub f16, f17, f18
+fmul f19, f20, f21
+fdiv f22, f23, f24
+fmr f25, f26
+fneg f27, f28
+fabs f29, f30
+fnabs f31, f0
+frsp f1, f2
+fcmpu cr2, f3, f4
+fcmpo cr3, f5, f6
+
+# --- paired-single memory ---
+psq_l f1, 0(r4), 0, 0
+psq_lu f3, 8(r4), 0, 0
+psq_st f5, 16(r4), 0, 0
+psq_stu f7, 24(r4), 0, 0
+psq_lx f9, r4, r5, 0, 0
+psq_lux f11, r4, r5, 0, 0
+psq_stx f13, r4, r5, 0, 0
+psq_stux f15, r4, r5, 0, 0
 
 branch_target:
 nop

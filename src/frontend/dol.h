@@ -33,7 +33,7 @@ bool dol_load(DOLFile* dol, const char* path);
 void dol_free(DOLFile* dol);
 
 // dump header info to stdout
-void dol_print_info(const DOLFile* dol);
+void dol_print_info(const DOLFile* dol, const char* game_name);
 
 // get raw section data (NULL if unused)
 const u8* dol_get_text_section(const DOLFile* dol, int index);

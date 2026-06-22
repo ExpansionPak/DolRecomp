@@ -16,10 +16,13 @@ add_executable(dolrecomp
     src/frontend/dol.c
     src/frontend/decoder.c
     src/backend/emitter.c
-    src/runtime/runtime.c
 )
 
 target_include_directories(dolrecomp PRIVATE src)
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(dolrecomp PRIVATE Threads::Threads)
+endif()
 
 # opcode verification tests
 add_executable(test_opcodes
@@ -44,7 +47,7 @@ add_executable(test_pc_reference
     tests/test_pc_reference.c
     src/frontend/decoder.c
     src/frontend/dol.c
-    src/runtime/runtime.c
+    src/core/cpu.c
 )
 target_include_directories(test_pc_reference PRIVATE src)
 add_test(NAME pc_reference COMMAND test_pc_reference)
@@ -62,6 +65,7 @@ add_test(NAME codegen_compile
         -DOUTPUT_C=${CMAKE_CURRENT_BINARY_DIR}/codegen_smoke.c
         -DOUTPUT_OBJ=${CMAKE_CURRENT_BINARY_DIR}/codegen_smoke.c.o
         -DCC=${CMAKE_C_COMPILER}
+        -DCC_ID=${CMAKE_C_COMPILER_ID}
         -DREPO_SRC=${CMAKE_CURRENT_SOURCE_DIR}/src
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/codegen_compile.cmake
 )

@@ -116,6 +116,54 @@ static void check_eq(u32 got, u32 want, const char* name) {
     }
 }
 
+static void check_eq64(u64 got, u64 want, const char* name) {
+    char label[96];
+
+    snprintf(label, sizeof(label), "%s hi", name);
+    check_eq((u32)(got >> 32), (u32)(want >> 32), label);
+
+    snprintf(label, sizeof(label), "%s lo", name);
+    check_eq((u32)got, (u32)want, label);
+}
+
+static u32 f32_bits(float value) {
+    u32 bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static u64 f64_bits(double value) {
+    u64 bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static double f64_from_bits(u64 bits) {
+    double value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static void be_store32(volatile u8* p, u32 value) {
+    p[0] = (u8)(value >> 24);
+    p[1] = (u8)(value >> 16);
+    p[2] = (u8)(value >> 8);
+    p[3] = (u8)value;
+}
+
+static u32 be_load32(const volatile u8* p) {
+    return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
+}
+
+static void be_store64(volatile u8* p, u64 value) {
+    be_store32(p, (u32)(value >> 32));
+    be_store32(p + 4, (u32)value);
+}
+
+static u64 be_load64(const volatile u8* p) {
+    return ((u64)be_load32(p) << 32) | be_load32(p + 4);
+}
+
 #define DEFINE_CR_LOGIC_TEST(fn_name, mnemonic) \
 static u32 fn_name(u32 seed) { \
     u32 cr; \
@@ -554,6 +602,31 @@ static void test_register_arithmetic(void) {
     asm volatile("neg %0,%1" : "=r"(result) : "r"(a));
     check_eq(result, 0xFFFFFFFBu, "neg");
 
+    a = 0x80000000u;
+    b = 2;
+    asm volatile("mullw %0,%1,%2" : "=r"(result) : "r"(a), "r"(b));
+    check_eq(result, 0, "mullw keeps low word");
+
+    a = 0xFFFFFFFFu;
+    b = 2;
+    asm volatile("mulhw %0,%1,%2" : "=r"(result) : "r"(a), "r"(b));
+    check_eq(result, 0xFFFFFFFFu, "mulhw signed high word");
+
+    a = 0xFFFFFFFFu;
+    b = 2;
+    asm volatile("mulhwu %0,%1,%2" : "=r"(result) : "r"(a), "r"(b));
+    check_eq(result, 1, "mulhwu unsigned high word");
+
+    a = (u32)(s32)-7;
+    b = 2;
+    asm volatile("divw %0,%1,%2" : "=r"(result) : "r"(a), "r"(b));
+    check_eq(result, 0xFFFFFFFDu, "divw truncates toward zero");
+
+    a = 7;
+    b = 2;
+    asm volatile("divwu %0,%1,%2" : "=r"(result) : "r"(a), "r"(b));
+    check_eq(result, 3, "divwu unsigned quotient");
+
     u32 cr;
     a = 0xFFFFFFFFu;
     b = 1;
@@ -953,6 +1026,360 @@ static void test_indexed_memory(void) {
     check_eq(dcbz_words[0], 0, "dcbz uses zero base when rA is zero");
 }
 
+static void test_fpu_memory(void) {
+    kprintf("--- FPU memory ---\n");
+    printf("--- FPU memory ---\n");
+
+    static volatile u8 mem[256] __attribute__((aligned(32)));
+    memset((void*)mem, 0, sizeof(mem));
+
+    double fd;
+    double fs;
+    volatile u8* ptr;
+    u32 off;
+
+    be_store32(&mem[0], 0x3F800000u);
+    asm volatile("lfs %0,0(%1)" : "=f"(fd) : "r"(&mem[0]) : "memory");
+    check_eq(f32_bits((float)fd), 0x3F800000u, "lfs loads single");
+
+    be_store32(&mem[4], 0x80000000u);
+    ptr = &mem[0];
+    asm volatile("lfsu %0,4(%1)" : "=f"(fd), "+r"(ptr) : : "memory");
+    check_eq(f32_bits((float)fd), 0x80000000u, "lfsu preserves negative zero");
+    check((u32)ptr == (u32)&mem[4], "lfsu updates rA");
+
+    be_store64(&mem[8], 0x400921FB54442D18ull);
+    asm volatile("lfd %0,8(%1)" : "=f"(fd) : "r"(&mem[0]) : "memory");
+    check_eq64(f64_bits(fd), 0x400921FB54442D18ull, "lfd loads double");
+
+    be_store64(&mem[16], 0x8000000000000000ull);
+    ptr = &mem[0];
+    asm volatile("lfdu %0,16(%1)" : "=f"(fd), "+r"(ptr) : : "memory");
+    check_eq64(f64_bits(fd), 0x8000000000000000ull, "lfdu preserves negative zero");
+    check((u32)ptr == (u32)&mem[16], "lfdu updates rA");
+
+    fs = 1.5;
+    asm volatile("stfs %0,20(%1)" : : "f"(fs), "r"(&mem[0]) : "memory");
+    check_eq(be_load32(&mem[20]), 0x3FC00000u, "stfs stores single");
+
+    fs = -1.0;
+    ptr = &mem[0];
+    asm volatile("stfsu %1,24(%0)" : "+r"(ptr) : "f"(fs) : "memory");
+    check_eq(be_load32(&mem[24]), 0xBF800000u, "stfsu stores single");
+    check((u32)ptr == (u32)&mem[24], "stfsu updates rA");
+
+    fs = 2.5;
+    asm volatile("stfd %0,32(%1)" : : "f"(fs), "r"(&mem[0]) : "memory");
+    check_eq64(be_load64(&mem[32]), 0x4004000000000000ull, "stfd stores double");
+
+    fs = -1.0;
+    ptr = &mem[0];
+    asm volatile("stfdu %1,40(%0)" : "+r"(ptr) : "f"(fs) : "memory");
+    check_eq64(be_load64(&mem[40]), 0xBFF0000000000000ull, "stfdu stores double");
+    check((u32)ptr == (u32)&mem[40], "stfdu updates rA");
+
+    off = 0x80;
+    be_store32(&mem[0x80], 0x40490FDBu);
+    asm volatile("lfsx %0,%1,%2" : "=f"(fd) : "r"(&mem[0]), "r"(off) : "memory");
+    check_eq(f32_bits((float)fd), 0x40490FDBu, "lfsx loads single");
+
+    off = 0x84;
+    be_store32(&mem[0x84], 0xC0200000u);
+    ptr = &mem[0];
+    asm volatile("lfsux %0,%1,%2" : "=f"(fd), "+r"(ptr) : "r"(off) : "memory");
+    check_eq(f32_bits((float)fd), 0xC0200000u, "lfsux loads single");
+    check((u32)ptr == (u32)&mem[0x84], "lfsux updates rA");
+
+    off = 0x88;
+    be_store64(&mem[0x88], 0x3FF8000000000000ull);
+    asm volatile("lfdx %0,%1,%2" : "=f"(fd) : "r"(&mem[0]), "r"(off) : "memory");
+    check_eq64(f64_bits(fd), 0x3FF8000000000000ull, "lfdx loads double");
+
+    off = 0x90;
+    be_store64(&mem[0x90], 0xC008000000000000ull);
+    ptr = &mem[0];
+    asm volatile("lfdux %0,%1,%2" : "=f"(fd), "+r"(ptr) : "r"(off) : "memory");
+    check_eq64(f64_bits(fd), 0xC008000000000000ull, "lfdux loads double");
+    check((u32)ptr == (u32)&mem[0x90], "lfdux updates rA");
+
+    off = 0x98;
+    fs = 9.0;
+    asm volatile("stfsx %0,%1,%2" : : "f"(fs), "r"(&mem[0]), "r"(off) : "memory");
+    check_eq(be_load32(&mem[0x98]), 0x41100000u, "stfsx stores single");
+
+    off = 0x9C;
+    fs = -10.0;
+    ptr = &mem[0];
+    asm volatile("stfsux %1,%0,%2" : "+r"(ptr) : "f"(fs), "r"(off) : "memory");
+    check_eq(be_load32(&mem[0x9C]), 0xC1200000u, "stfsux stores single");
+    check((u32)ptr == (u32)&mem[0x9C], "stfsux updates rA");
+
+    off = 0xA0;
+    fs = 5.0;
+    asm volatile("stfdx %0,%1,%2" : : "f"(fs), "r"(&mem[0]), "r"(off) : "memory");
+    check_eq64(be_load64(&mem[0xA0]), 0x4014000000000000ull, "stfdx stores double");
+
+    off = 0xA8;
+    fs = -5.0;
+    ptr = &mem[0];
+    asm volatile("stfdux %1,%0,%2" : "+r"(ptr) : "f"(fs), "r"(off) : "memory");
+    check_eq64(be_load64(&mem[0xA8]), 0xC014000000000000ull, "stfdux stores double");
+    check((u32)ptr == (u32)&mem[0xA8], "stfdux updates rA");
+}
+
+static void test_psq_memory(void) {
+    kprintf("--- paired-single memory ---\n");
+    printf("--- paired-single memory ---\n");
+
+    static volatile u8 mem[256] __attribute__((aligned(32)));
+    static volatile u8 out[256] __attribute__((aligned(32)));
+    memset((void*)mem, 0, sizeof(mem));
+    memset((void*)out, 0, sizeof(out));
+
+    double pair;
+    volatile u8* ptr;
+    u32 off;
+
+    be_store32(&mem[0], 0x3F800000u);
+    be_store32(&mem[4], 0x40000000u);
+    asm volatile(
+        "psq_l %0,0(%1),0,0\n\t"
+        "psq_st %0,0(%2),0,0"
+        : "=&f"(pair)
+        : "r"(&mem[0]), "r"(&out[0])
+        : "memory"
+    );
+    check_eq(be_load32(&out[0]), 0x3F800000u, "psq_l w0 ps0");
+    check_eq(be_load32(&out[4]), 0x40000000u, "psq_l w0 ps1");
+
+    be_store32(&mem[4], 0x40400000u);
+    asm volatile(
+        "psq_l %0,4(%1),1,0\n\t"
+        "psq_st %0,8(%2),0,0"
+        : "=&f"(pair)
+        : "r"(&mem[0]), "r"(&out[0])
+        : "memory"
+    );
+    check_eq(be_load32(&out[8]), 0x40400000u, "psq_l w1 ps0");
+    check_eq(be_load32(&out[12]), 0x3F800000u, "psq_l w1 ps1 one");
+
+    be_store32(&mem[8], 0x40800000u);
+    be_store32(&mem[12], 0x40A00000u);
+    ptr = &mem[0];
+    asm volatile(
+        "psq_lu %0,8(%1),0,0\n\t"
+        "psq_st %0,16(%2),0,0"
+        : "=&f"(pair), "+r"(ptr)
+        : "r"(&out[0])
+        : "memory"
+    );
+    check_eq(be_load32(&out[16]), 0x40800000u, "psq_lu w0 ps0");
+    check_eq(be_load32(&out[20]), 0x40A00000u, "psq_lu w0 ps1");
+    check((u32)ptr == (u32)&mem[8], "psq_lu updates rA");
+
+    be_store32(&mem[32], 0x40C00000u);
+    be_store32(&mem[36], 0x40E00000u);
+    asm volatile(
+        "psq_l %0,32(%1),0,0\n\t"
+        "psq_st %0,16(%2),0,0"
+        : "=&f"(pair)
+        : "r"(&mem[0]), "r"(&out[0])
+        : "memory"
+    );
+    check_eq(be_load32(&out[16]), 0x40C00000u, "psq_st w0 ps0");
+    check_eq(be_load32(&out[20]), 0x40E00000u, "psq_st w0 ps1");
+
+    be_store32(&out[24], 0xDEADBEEFu);
+    be_store32(&mem[40], 0x41000000u);
+    be_store32(&mem[44], 0x41100000u);
+    asm volatile(
+        "psq_l %0,40(%1),0,0\n\t"
+        "psq_st %0,20(%2),1,0"
+        : "=&f"(pair)
+        : "r"(&mem[0]), "r"(&out[0])
+        : "memory"
+    );
+    check_eq(be_load32(&out[20]), 0x41000000u, "psq_st w1 ps0");
+    check_eq(be_load32(&out[24]), 0xDEADBEEFu, "psq_st w1 leaves ps1 word");
+
+    be_store32(&mem[48], 0x41200000u);
+    be_store32(&mem[52], 0x41300000u);
+    ptr = &out[0];
+    asm volatile(
+        "psq_l %0,48(%2),0,0\n\t"
+        "psq_stu %0,24(%1),0,0"
+        : "=&f"(pair), "+r"(ptr)
+        : "r"(&mem[0])
+        : "memory"
+    );
+    check_eq(be_load32(&out[24]), 0x41200000u, "psq_stu w0 ps0");
+    check_eq(be_load32(&out[28]), 0x41300000u, "psq_stu w0 ps1");
+    check((u32)ptr == (u32)&out[24], "psq_stu updates rA");
+
+    off = 0x80;
+    be_store32(&mem[0x80], 0x41400000u);
+    be_store32(&mem[0x84], 0x41500000u);
+    asm volatile(
+        "psq_lx %0,%1,%2,0,0\n\t"
+        "psq_st %0,0(%3),0,0"
+        : "=&f"(pair)
+        : "r"(&mem[0]), "r"(off), "r"(&out[64])
+        : "memory"
+    );
+    check_eq(be_load32(&out[64]), 0x41400000u, "psq_lx w0 ps0");
+    check_eq(be_load32(&out[68]), 0x41500000u, "psq_lx w0 ps1");
+
+    off = 0x88;
+    be_store32(&mem[0x88], 0x41600000u);
+    asm volatile(
+        "psq_lx %0,%1,%2,1,0\n\t"
+        "psq_st %0,8(%3),0,0"
+        : "=&f"(pair)
+        : "r"(&mem[0]), "r"(off), "r"(&out[64])
+        : "memory"
+    );
+    check_eq(be_load32(&out[72]), 0x41600000u, "psq_lx w1 ps0");
+    check_eq(be_load32(&out[76]), 0x3F800000u, "psq_lx w1 ps1 one");
+
+    off = 0x90;
+    be_store32(&mem[0x90], 0x41700000u);
+    be_store32(&mem[0x94], 0x41800000u);
+    ptr = &mem[0];
+    asm volatile(
+        "psq_lux %0,%1,%2,0,0\n\t"
+        "psq_st %0,16(%3),0,0"
+        : "=&f"(pair), "+r"(ptr)
+        : "r"(off), "r"(&out[64])
+        : "memory"
+    );
+    check_eq(be_load32(&out[80]), 0x41700000u, "psq_lux w0 ps0");
+    check_eq(be_load32(&out[84]), 0x41800000u, "psq_lux w0 ps1");
+    check((u32)ptr == (u32)&mem[0x90], "psq_lux updates rA");
+
+    off = 0x98;
+    be_store32(&mem[0x98], 0x41880000u);
+    be_store32(&mem[0x9C], 0x41900000u);
+    asm volatile(
+        "psq_l %0,0(%1),0,0\n\t"
+        "psq_stx %0,%2,%3,0,0"
+        : "=&f"(pair)
+        : "r"(&mem[0x98]), "r"(&out[0]), "r"(off)
+        : "memory"
+    );
+    check_eq(be_load32(&out[0x98]), 0x41880000u, "psq_stx w0 ps0");
+    check_eq(be_load32(&out[0x9C]), 0x41900000u, "psq_stx w0 ps1");
+
+    off = 0xA0;
+    be_store32(&mem[0xA0], 0x41980000u);
+    be_store32(&mem[0xA4], 0x41A00000u);
+    ptr = &out[0];
+    asm volatile(
+        "psq_l %0,0(%2),0,0\n\t"
+        "psq_stux %0,%1,%3,0,0"
+        : "=&f"(pair), "+r"(ptr)
+        : "r"(&mem[0xA0]), "r"(off)
+        : "memory"
+    );
+    check_eq(be_load32(&out[0xA0]), 0x41980000u, "psq_stux w0 ps0");
+    check_eq(be_load32(&out[0xA4]), 0x41A00000u, "psq_stux w0 ps1");
+    check((u32)ptr == (u32)&out[0xA0], "psq_stux updates rA");
+}
+
+static void test_fpu_arithmetic(void) {
+    kprintf("--- FPU arithmetic ---\n");
+    printf("--- FPU arithmetic ---\n");
+
+    double a;
+    double b;
+    double out;
+    u32 cr;
+
+    a = 1.25;
+    b = 2.5;
+    asm volatile("fadds %0,%1,%2" : "=f"(out) : "f"(a), "f"(b));
+    check_eq(f32_bits((float)out), 0x40700000u, "fadds result");
+
+    a = 7.0;
+    b = 1.5;
+    asm volatile("fsubs %0,%1,%2" : "=f"(out) : "f"(a), "f"(b));
+    check_eq(f32_bits((float)out), 0x40B00000u, "fsubs result");
+
+    a = 3.0;
+    b = 2.0;
+    asm volatile("fmuls %0,%1,%2" : "=f"(out) : "f"(a), "f"(b));
+    check_eq(f32_bits((float)out), 0x40C00000u, "fmuls result");
+
+    a = 7.0;
+    b = 2.0;
+    asm volatile("fdivs %0,%1,%2" : "=f"(out) : "f"(a), "f"(b));
+    check_eq(f32_bits((float)out), 0x40600000u, "fdivs result");
+
+    a = 1.25;
+    b = 2.5;
+    asm volatile("fadd %0,%1,%2" : "=f"(out) : "f"(a), "f"(b));
+    check_eq64(f64_bits(out), 0x400E000000000000ull, "fadd result");
+
+    a = 7.0;
+    b = 1.5;
+    asm volatile("fsub %0,%1,%2" : "=f"(out) : "f"(a), "f"(b));
+    check_eq64(f64_bits(out), 0x4016000000000000ull, "fsub result");
+
+    a = 3.0;
+    b = 2.0;
+    asm volatile("fmul %0,%1,%2" : "=f"(out) : "f"(a), "f"(b));
+    check_eq64(f64_bits(out), 0x4018000000000000ull, "fmul result");
+
+    a = 7.0;
+    b = 2.0;
+    asm volatile("fdiv %0,%1,%2" : "=f"(out) : "f"(a), "f"(b));
+    check_eq64(f64_bits(out), 0x400C000000000000ull, "fdiv result");
+
+    a = f64_from_bits(0x8000000000000000ull);
+    asm volatile("fmr %0,%1" : "=f"(out) : "f"(a));
+    check_eq64(f64_bits(out), 0x8000000000000000ull, "fmr preserves negative zero");
+
+    a = 2.5;
+    asm volatile("fneg %0,%1" : "=f"(out) : "f"(a));
+    check_eq64(f64_bits(out), 0xC004000000000000ull, "fneg flips sign");
+
+    a = -2.5;
+    asm volatile("fabs %0,%1" : "=f"(out) : "f"(a));
+    check_eq64(f64_bits(out), 0x4004000000000000ull, "fabs clears sign");
+
+    a = 2.5;
+    asm volatile("fnabs %0,%1" : "=f"(out) : "f"(a));
+    check_eq64(f64_bits(out), 0xC004000000000000ull, "fnabs sets sign");
+
+    a = 1.1;
+    asm volatile("frsp %0,%1" : "=f"(out) : "f"(a));
+    check_eq(f32_bits((float)out), 0x3F8CCCCDu, "frsp rounds to single");
+
+    a = 1.0;
+    b = 2.0;
+    asm volatile("fcmpu cr2,%1,%2\n\tmfcr %0" : "=r"(cr) : "f"(a), "f"(b) : "cr2");
+    check_eq((cr >> 20) & 0xFu, 0x8, "fcmpu less");
+
+    a = 2.0;
+    b = 1.0;
+    asm volatile("fcmpu cr2,%1,%2\n\tmfcr %0" : "=r"(cr) : "f"(a), "f"(b) : "cr2");
+    check_eq((cr >> 20) & 0xFu, 0x4, "fcmpu greater");
+
+    a = 2.0;
+    b = 2.0;
+    asm volatile("fcmpu cr2,%1,%2\n\tmfcr %0" : "=r"(cr) : "f"(a), "f"(b) : "cr2");
+    check_eq((cr >> 20) & 0xFu, 0x2, "fcmpu equal");
+
+    a = f64_from_bits(0x7FF8000000000000ull);
+    b = 2.0;
+    asm volatile("fcmpu cr2,%1,%2\n\tmfcr %0" : "=r"(cr) : "f"(a), "f"(b) : "cr2");
+    check_eq((cr >> 20) & 0xFu, 0x1, "fcmpu unordered");
+
+    a = 4.0;
+    b = 3.0;
+    asm volatile("fcmpo cr3,%1,%2\n\tmfcr %0" : "=r"(cr) : "f"(a), "f"(b) : "cr3");
+    check_eq((cr >> 16) & 0xFu, 0x4, "fcmpo greater");
+}
+
 static void test_branches_and_spr(void) {
     kprintf("--- branches / SPR ---\n");
     printf("--- branches / SPR ---\n");
@@ -1039,6 +1466,9 @@ int main(void) {
     test_loads();
     test_stores();
     test_indexed_memory();
+    test_fpu_memory();
+    test_psq_memory();
+    test_fpu_arithmetic();
     test_branches_and_spr();
 
     reference_printf("\n%d passed, %d failed\n", pass_count, fail_count);

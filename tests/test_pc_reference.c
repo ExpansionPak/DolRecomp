@@ -2,8 +2,8 @@
 #include <string.h>
 
 #include "../src/core/types.h"
+#include "../src/core/cpu.h"
 #include "../src/frontend/decoder.h"
-#include "../src/runtime/runtime.h"
 
 #define BASE 0x80000000u
 #define XER_SO 0x80000000u
@@ -22,6 +22,16 @@ static void check_eq(u32 got, u32 want, const char* name) {
         fail_count++;
         printf("  FAIL: %s - got 0x%08X, want 0x%08X\n", name, got, want);
     }
+}
+
+static void check_eq64(u64 got, u64 want, const char* name) {
+    char label[96];
+
+    snprintf(label, sizeof(label), "%s hi", name);
+    check_eq((u32)(got >> 32), (u32)(want >> 32), label);
+
+    snprintf(label, sizeof(label), "%s lo", name);
+    check_eq((u32)got, (u32)want, label);
 }
 
 static u32 make_dform(u32 opcd, u32 rt, u32 ra, u16 imm) {
@@ -178,6 +188,30 @@ static u32 mask32(u8 mb, u8 me) {
 static u32 rotl32(u32 value, u32 sh) {
     sh &= 31u;
     return sh ? ((value << sh) | (value >> (32u - sh))) : value;
+}
+
+static f32 f32_from_bits(u32 bits) {
+    f32 value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static u32 f32_to_bits(f32 value) {
+    u32 bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static f64 f64_from_bits(u64 bits) {
+    f64 value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static u64 f64_to_bits(f64 value) {
+    u64 bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
 }
 
 static u32 arith_shift_right(u32 value, u32 sh) {
@@ -359,6 +393,44 @@ static void exec_inst(CPUState* cpu, const PPCInst* inst) {
         if (inst->rc) set_cr0_from_gpr(cpu, inst->rD);
         break;
 
+    case PPC_OP_MULLW:
+        cpu->gpr[inst->rD] = (u32)((s64)(s32)cpu->gpr[inst->rA] *
+                                    (s64)(s32)cpu->gpr[inst->rB]);
+        if (inst->rc) set_cr0_from_gpr(cpu, inst->rD);
+        break;
+
+    case PPC_OP_MULHW: {
+        s64 product = (s64)(s32)cpu->gpr[inst->rA] *
+                      (s64)(s32)cpu->gpr[inst->rB];
+        cpu->gpr[inst->rD] = (u32)(product >> 32);
+        if (inst->rc) set_cr0_from_gpr(cpu, inst->rD);
+        break;
+    }
+
+    case PPC_OP_MULHWU: {
+        u64 product = (u64)cpu->gpr[inst->rA] * (u64)cpu->gpr[inst->rB];
+        cpu->gpr[inst->rD] = (u32)(product >> 32);
+        if (inst->rc) set_cr0_from_gpr(cpu, inst->rD);
+        break;
+    }
+
+    case PPC_OP_DIVW: {
+        s32 dividend = (s32)cpu->gpr[inst->rA];
+        s32 divisor = (s32)cpu->gpr[inst->rB];
+        cpu->gpr[inst->rD] = (divisor == 0 || (dividend == (s32)0x80000000 && divisor == -1))
+            ? 0u
+            : (u32)(dividend / divisor);
+        if (inst->rc) set_cr0_from_gpr(cpu, inst->rD);
+        break;
+    }
+
+    case PPC_OP_DIVWU:
+        cpu->gpr[inst->rD] = cpu->gpr[inst->rB] == 0
+            ? 0u
+            : cpu->gpr[inst->rA] / cpu->gpr[inst->rB];
+        if (inst->rc) set_cr0_from_gpr(cpu, inst->rD);
+        break;
+
     case PPC_OP_AND:
         cpu->gpr[inst->rA] = cpu->gpr[inst->rS] & cpu->gpr[inst->rB];
         if (inst->rc) set_cr0_from_gpr(cpu, inst->rA);
@@ -462,6 +534,71 @@ static void exec_inst(CPUState* cpu, const PPCInst* inst) {
         break;
     }
 
+    case PPC_OP_FADDS:
+        cpu->fpr[inst->rD] = (f64)((f32)cpu->fpr[inst->rA] + (f32)cpu->fpr[inst->rB]);
+        break;
+
+    case PPC_OP_FSUBS:
+        cpu->fpr[inst->rD] = (f64)((f32)cpu->fpr[inst->rA] - (f32)cpu->fpr[inst->rB]);
+        break;
+
+    case PPC_OP_FMULS:
+        cpu->fpr[inst->rD] = (f64)((f32)cpu->fpr[inst->rA] * (f32)cpu->fpr[inst->rC]);
+        break;
+
+    case PPC_OP_FDIVS:
+        cpu->fpr[inst->rD] = (f64)((f32)cpu->fpr[inst->rA] / (f32)cpu->fpr[inst->rB]);
+        break;
+
+    case PPC_OP_FADD:
+        cpu->fpr[inst->rD] = cpu->fpr[inst->rA] + cpu->fpr[inst->rB];
+        break;
+
+    case PPC_OP_FSUB:
+        cpu->fpr[inst->rD] = cpu->fpr[inst->rA] - cpu->fpr[inst->rB];
+        break;
+
+    case PPC_OP_FMUL:
+        cpu->fpr[inst->rD] = cpu->fpr[inst->rA] * cpu->fpr[inst->rC];
+        break;
+
+    case PPC_OP_FDIV:
+        cpu->fpr[inst->rD] = cpu->fpr[inst->rA] / cpu->fpr[inst->rB];
+        break;
+
+    case PPC_OP_FMR:
+        cpu->fpr[inst->rD] = cpu->fpr[inst->rB];
+        break;
+
+    case PPC_OP_FNEG:
+        cpu->fpr[inst->rD] = f64_from_bits(f64_to_bits(cpu->fpr[inst->rB]) ^ 0x8000000000000000ull);
+        break;
+
+    case PPC_OP_FABS:
+        cpu->fpr[inst->rD] = f64_from_bits(f64_to_bits(cpu->fpr[inst->rB]) & 0x7FFFFFFFFFFFFFFFull);
+        break;
+
+    case PPC_OP_FNABS:
+        cpu->fpr[inst->rD] = f64_from_bits(f64_to_bits(cpu->fpr[inst->rB]) | 0x8000000000000000ull);
+        break;
+
+    case PPC_OP_FRSP:
+        cpu->fpr[inst->rD] = (f64)(f32)cpu->fpr[inst->rB];
+        break;
+
+    case PPC_OP_FCMPU:
+    case PPC_OP_FCMPO: {
+        f64 a = cpu->fpr[inst->rA];
+        f64 b = cpu->fpr[inst->rB];
+        u32 bits;
+        if (a < b) bits = 0x8u;
+        else if (a > b) bits = 0x4u;
+        else if (a == b) bits = 0x2u;
+        else bits = 0x1u;
+        set_cr_field(cpu, inst->crfD, bits);
+        break;
+    }
+
     case PPC_OP_LWZ:
     case PPC_OP_LWZU: {
         bool update = inst->op == PPC_OP_LWZU;
@@ -546,6 +683,62 @@ static void exec_inst(CPUState* cpu, const PPCInst* inst) {
         break;
     }
 
+    case PPC_OP_LFS:
+    case PPC_OP_LFSU: {
+        bool update = inst->op == PPC_OP_LFSU;
+        u32 ea = dform_ea(cpu, inst, update);
+        cpu->fpr[inst->rD] = (f64)f32_from_bits(mem_read32(cpu, ea));
+        if (update) cpu->gpr[inst->rA] = ea;
+        break;
+    }
+
+    case PPC_OP_LFD:
+    case PPC_OP_LFDU: {
+        bool update = inst->op == PPC_OP_LFDU;
+        u32 ea = dform_ea(cpu, inst, update);
+        cpu->fpr[inst->rD] = f64_from_bits(mem_read64(cpu, ea));
+        if (update) cpu->gpr[inst->rA] = ea;
+        break;
+    }
+
+    case PPC_OP_LFSX:
+    case PPC_OP_LFSUX: {
+        bool update = inst->op == PPC_OP_LFSUX;
+        u32 ea = xform_ea(cpu, inst, update);
+        cpu->fpr[inst->rD] = (f64)f32_from_bits(mem_read32(cpu, ea));
+        if (update) cpu->gpr[inst->rA] = ea;
+        break;
+    }
+
+    case PPC_OP_LFDX:
+    case PPC_OP_LFDUX: {
+        bool update = inst->op == PPC_OP_LFDUX;
+        u32 ea = xform_ea(cpu, inst, update);
+        cpu->fpr[inst->rD] = f64_from_bits(mem_read64(cpu, ea));
+        if (update) cpu->gpr[inst->rA] = ea;
+        break;
+    }
+
+    case PPC_OP_PSQ_L:
+    case PPC_OP_PSQ_LU: {
+        bool update = inst->op == PPC_OP_PSQ_LU;
+        u32 ea = dform_ea(cpu, inst, update);
+        cpu->fpr[inst->rD] = (f64)f32_from_bits(mem_read32(cpu, ea));
+        cpu->ps1[inst->rD] = inst->w ? 1.0 : (f64)f32_from_bits(mem_read32(cpu, ea + 4));
+        if (update) cpu->gpr[inst->rA] = ea;
+        break;
+    }
+
+    case PPC_OP_PSQ_LX:
+    case PPC_OP_PSQ_LUX: {
+        bool update = inst->op == PPC_OP_PSQ_LUX;
+        u32 ea = xform_ea(cpu, inst, update);
+        cpu->fpr[inst->rD] = (f64)f32_from_bits(mem_read32(cpu, ea));
+        cpu->ps1[inst->rD] = inst->w ? 1.0 : (f64)f32_from_bits(mem_read32(cpu, ea + 4));
+        if (update) cpu->gpr[inst->rA] = ea;
+        break;
+    }
+
     case PPC_OP_STW:
     case PPC_OP_STWU: {
         bool update = inst->op == PPC_OP_STWU;
@@ -609,6 +802,64 @@ static void exec_inst(CPUState* cpu, const PPCInst* inst) {
     case PPC_OP_STHBRX: {
         u32 ea = xform_ea(cpu, inst, false);
         mem_write16(cpu, ea, bswap16((u16)cpu->gpr[inst->rS]));
+        break;
+    }
+
+    case PPC_OP_STFS:
+    case PPC_OP_STFSU: {
+        bool update = inst->op == PPC_OP_STFSU;
+        u32 ea = dform_ea(cpu, inst, update);
+        mem_write32(cpu, ea, f32_to_bits((f32)cpu->fpr[inst->rS]));
+        if (update) cpu->gpr[inst->rA] = ea;
+        break;
+    }
+
+    case PPC_OP_STFD:
+    case PPC_OP_STFDU: {
+        bool update = inst->op == PPC_OP_STFDU;
+        u32 ea = dform_ea(cpu, inst, update);
+        mem_write64(cpu, ea, f64_to_bits(cpu->fpr[inst->rS]));
+        if (update) cpu->gpr[inst->rA] = ea;
+        break;
+    }
+
+    case PPC_OP_STFSX:
+    case PPC_OP_STFSUX: {
+        bool update = inst->op == PPC_OP_STFSUX;
+        u32 ea = xform_ea(cpu, inst, update);
+        mem_write32(cpu, ea, f32_to_bits((f32)cpu->fpr[inst->rS]));
+        if (update) cpu->gpr[inst->rA] = ea;
+        break;
+    }
+
+    case PPC_OP_STFDX:
+    case PPC_OP_STFDUX: {
+        bool update = inst->op == PPC_OP_STFDUX;
+        u32 ea = xform_ea(cpu, inst, update);
+        mem_write64(cpu, ea, f64_to_bits(cpu->fpr[inst->rS]));
+        if (update) cpu->gpr[inst->rA] = ea;
+        break;
+    }
+
+    case PPC_OP_PSQ_ST:
+    case PPC_OP_PSQ_STU: {
+        bool update = inst->op == PPC_OP_PSQ_STU;
+        u32 ea = dform_ea(cpu, inst, update);
+        mem_write32(cpu, ea, f32_to_bits((f32)cpu->fpr[inst->rS]));
+        if (!inst->w)
+            mem_write32(cpu, ea + 4, f32_to_bits((f32)cpu->ps1[inst->rS]));
+        if (update) cpu->gpr[inst->rA] = ea;
+        break;
+    }
+
+    case PPC_OP_PSQ_STX:
+    case PPC_OP_PSQ_STUX: {
+        bool update = inst->op == PPC_OP_PSQ_STUX;
+        u32 ea = xform_ea(cpu, inst, update);
+        mem_write32(cpu, ea, f32_to_bits((f32)cpu->fpr[inst->rS]));
+        if (!inst->w)
+            mem_write32(cpu, ea + 4, f32_to_bits((f32)cpu->ps1[inst->rS]));
+        if (update) cpu->gpr[inst->rA] = ea;
         break;
     }
 
@@ -869,6 +1120,31 @@ static void test_register_arithmetic(CPUState* cpu) {
     cpu->gpr[19] = 5;
     exec_raw(cpu, 0x7E5300D0, BASE);
     check_eq(cpu->gpr[18], 0xFFFFFFFBu, "neg");
+
+    cpu->gpr[4] = 0x80000000u;
+    cpu->gpr[5] = 2;
+    exec_raw(cpu, 0x7C6429D6, BASE);
+    check_eq(cpu->gpr[3], 0, "mullw keeps low word");
+
+    cpu->gpr[7] = 0xFFFFFFFFu;
+    cpu->gpr[8] = 2;
+    exec_raw(cpu, 0x7CC74096, BASE);
+    check_eq(cpu->gpr[6], 0xFFFFFFFFu, "mulhw signed high word");
+
+    cpu->gpr[10] = 0xFFFFFFFFu;
+    cpu->gpr[11] = 2;
+    exec_raw(cpu, 0x7D2A5816, BASE);
+    check_eq(cpu->gpr[9], 1, "mulhwu unsigned high word");
+
+    cpu->gpr[13] = (u32)(s32)-7;
+    cpu->gpr[14] = 2;
+    exec_raw(cpu, 0x7D8D73D6, BASE);
+    check_eq(cpu->gpr[12], 0xFFFFFFFDu, "divw truncates toward zero");
+
+    cpu->gpr[16] = 7;
+    cpu->gpr[17] = 2;
+    exec_raw(cpu, 0x7DF08B96, BASE);
+    check_eq(cpu->gpr[15], 3, "divwu unsigned quotient");
 
     cpu->gpr[3] = 0xFFFFFFFFu;
     cpu->gpr[4] = 1;
@@ -1232,6 +1508,284 @@ static void test_indexed_memory(CPUState* cpu) {
     check_eq(mem_read32(cpu, base + 0xC0), 0, "dcbz uses zero base when rA is zero");
 }
 
+static void test_fpu_memory(CPUState* cpu) {
+    u32 base = GC_RAM_BASE + 0x4000;
+    printf("--- FPU memory ---\n");
+
+    cpu_reset(cpu);
+    cpu->gpr[4] = base;
+
+    mem_write32(cpu, base, 0x3F800000u);
+    exec_raw(cpu, 0xC0240000, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[1]), 0x3F800000u, "lfs loads single");
+
+    mem_write32(cpu, base + 4, 0x80000000u);
+    exec_raw(cpu, 0xC4440004, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[2]), 0x80000000u, "lfsu preserves negative zero");
+    check_eq(cpu->gpr[4], base + 4, "lfsu updates rA");
+
+    cpu->gpr[4] = base;
+    mem_write64(cpu, base + 8, 0x400921FB54442D18ull);
+    exec_raw(cpu, 0xC8640008, BASE);
+    check_eq64(f64_to_bits(cpu->fpr[3]), 0x400921FB54442D18ull, "lfd loads double");
+
+    mem_write64(cpu, base + 16, 0x8000000000000000ull);
+    exec_raw(cpu, 0xCC840010, BASE);
+    check_eq64(f64_to_bits(cpu->fpr[4]), 0x8000000000000000ull, "lfdu preserves negative zero");
+    check_eq(cpu->gpr[4], base + 16, "lfdu updates rA");
+
+    cpu->gpr[4] = base;
+    cpu->fpr[5] = (f64)f32_from_bits(0x3FC00000u);
+    exec_raw(cpu, 0xD0A40014, BASE);
+    check_eq(mem_read32(cpu, base + 20), 0x3FC00000u, "stfs stores single");
+
+    cpu->fpr[6] = (f64)f32_from_bits(0xBF800000u);
+    exec_raw(cpu, 0xD4C40018, BASE);
+    check_eq(mem_read32(cpu, base + 24), 0xBF800000u, "stfsu stores single");
+    check_eq(cpu->gpr[4], base + 24, "stfsu updates rA");
+
+    cpu->gpr[4] = base;
+    cpu->fpr[7] = f64_from_bits(0x4004000000000000ull);
+    exec_raw(cpu, 0xD8E40020, BASE);
+    check_eq64(mem_read64(cpu, base + 32), 0x4004000000000000ull, "stfd stores double");
+
+    cpu->fpr[8] = f64_from_bits(0xBFF0000000000000ull);
+    exec_raw(cpu, 0xDD040028, BASE);
+    check_eq64(mem_read64(cpu, base + 40), 0xBFF0000000000000ull, "stfdu stores double");
+    check_eq(cpu->gpr[4], base + 40, "stfdu updates rA");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0x80;
+    mem_write32(cpu, base + 0x80, 0x40490FDBu);
+    exec_raw(cpu, 0x7D242C2E, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[9]), 0x40490FDBu, "lfsx loads single");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0x84;
+    mem_write32(cpu, base + 0x84, 0xC0200000u);
+    exec_raw(cpu, 0x7D442C6E, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[10]), 0xC0200000u, "lfsux loads single");
+    check_eq(cpu->gpr[4], base + 0x84, "lfsux updates rA");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0x88;
+    mem_write64(cpu, base + 0x88, 0x3FF8000000000000ull);
+    exec_raw(cpu, 0x7D642CAE, BASE);
+    check_eq64(f64_to_bits(cpu->fpr[11]), 0x3FF8000000000000ull, "lfdx loads double");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0x90;
+    mem_write64(cpu, base + 0x90, 0xC008000000000000ull);
+    exec_raw(cpu, 0x7D842CEE, BASE);
+    check_eq64(f64_to_bits(cpu->fpr[12]), 0xC008000000000000ull, "lfdux loads double");
+    check_eq(cpu->gpr[4], base + 0x90, "lfdux updates rA");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0x98;
+    cpu->fpr[13] = (f64)f32_from_bits(0x41100000u);
+    exec_raw(cpu, 0x7DA42D2E, BASE);
+    check_eq(mem_read32(cpu, base + 0x98), 0x41100000u, "stfsx stores single");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0x9C;
+    cpu->fpr[14] = (f64)f32_from_bits(0xC1200000u);
+    exec_raw(cpu, 0x7DC42D6E, BASE);
+    check_eq(mem_read32(cpu, base + 0x9C), 0xC1200000u, "stfsux stores single");
+    check_eq(cpu->gpr[4], base + 0x9C, "stfsux updates rA");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0xA0;
+    cpu->fpr[15] = f64_from_bits(0x4014000000000000ull);
+    exec_raw(cpu, 0x7DE42DAE, BASE);
+    check_eq64(mem_read64(cpu, base + 0xA0), 0x4014000000000000ull, "stfdx stores double");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0xA8;
+    cpu->fpr[16] = f64_from_bits(0xC014000000000000ull);
+    exec_raw(cpu, 0x7E042DEE, BASE);
+    check_eq64(mem_read64(cpu, base + 0xA8), 0xC014000000000000ull, "stfdux stores double");
+    check_eq(cpu->gpr[4], base + 0xA8, "stfdux updates rA");
+}
+
+static void test_psq_memory(CPUState* cpu) {
+    u32 base = GC_RAM_BASE + 0x5000;
+    printf("--- paired-single memory ---\n");
+
+    cpu_reset(cpu);
+    cpu->gpr[4] = base;
+    mem_write32(cpu, base, 0x3F800000u);
+    mem_write32(cpu, base + 4, 0x40000000u);
+    exec_raw(cpu, 0xE0240000, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[1]), 0x3F800000u, "psq_l w0 ps0");
+    check_eq(f32_to_bits((f32)cpu->ps1[1]), 0x40000000u, "psq_l w0 ps1");
+
+    mem_write32(cpu, base + 4, 0x40400000u);
+    exec_raw(cpu, 0xE0448004, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[2]), 0x40400000u, "psq_l w1 ps0");
+    check_eq(f32_to_bits((f32)cpu->ps1[2]), 0x3F800000u, "psq_l w1 ps1 one");
+
+    mem_write32(cpu, base + 8, 0x40800000u);
+    mem_write32(cpu, base + 12, 0x40A00000u);
+    cpu->gpr[4] = base;
+    exec_raw(cpu, 0xE4640008, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[3]), 0x40800000u, "psq_lu w0 ps0");
+    check_eq(f32_to_bits((f32)cpu->ps1[3]), 0x40A00000u, "psq_lu w0 ps1");
+    check_eq(cpu->gpr[4], base + 8, "psq_lu updates rA");
+
+    cpu->gpr[4] = base;
+    cpu->fpr[5] = (f64)f32_from_bits(0x40C00000u);
+    cpu->ps1[5] = (f64)f32_from_bits(0x40E00000u);
+    exec_raw(cpu, 0xF0A40010, BASE);
+    check_eq(mem_read32(cpu, base + 16), 0x40C00000u, "psq_st w0 ps0");
+    check_eq(mem_read32(cpu, base + 20), 0x40E00000u, "psq_st w0 ps1");
+
+    mem_write32(cpu, base + 24, 0xDEADBEEFu);
+    cpu->fpr[6] = (f64)f32_from_bits(0x41000000u);
+    cpu->ps1[6] = (f64)f32_from_bits(0x41100000u);
+    exec_raw(cpu, 0xF0C48014, BASE);
+    check_eq(mem_read32(cpu, base + 20), 0x41000000u, "psq_st w1 ps0");
+    check_eq(mem_read32(cpu, base + 24), 0xDEADBEEFu, "psq_st w1 leaves ps1 word");
+
+    cpu->gpr[4] = base;
+    cpu->fpr[7] = (f64)f32_from_bits(0x41200000u);
+    cpu->ps1[7] = (f64)f32_from_bits(0x41300000u);
+    exec_raw(cpu, 0xF4E40018, BASE);
+    check_eq(mem_read32(cpu, base + 24), 0x41200000u, "psq_stu w0 ps0");
+    check_eq(mem_read32(cpu, base + 28), 0x41300000u, "psq_stu w0 ps1");
+    check_eq(cpu->gpr[4], base + 24, "psq_stu updates rA");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0x80;
+    mem_write32(cpu, base + 0x80, 0x41400000u);
+    mem_write32(cpu, base + 0x84, 0x41500000u);
+    exec_raw(cpu, 0x1124280C, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[9]), 0x41400000u, "psq_lx w0 ps0");
+    check_eq(f32_to_bits((f32)cpu->ps1[9]), 0x41500000u, "psq_lx w0 ps1");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0x88;
+    mem_write32(cpu, base + 0x88, 0x41600000u);
+    exec_raw(cpu, 0x11442C0C, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[10]), 0x41600000u, "psq_lx w1 ps0");
+    check_eq(f32_to_bits((f32)cpu->ps1[10]), 0x3F800000u, "psq_lx w1 ps1 one");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0x90;
+    mem_write32(cpu, base + 0x90, 0x41700000u);
+    mem_write32(cpu, base + 0x94, 0x41800000u);
+    exec_raw(cpu, 0x1164284C, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[11]), 0x41700000u, "psq_lux w0 ps0");
+    check_eq(f32_to_bits((f32)cpu->ps1[11]), 0x41800000u, "psq_lux w0 ps1");
+    check_eq(cpu->gpr[4], base + 0x90, "psq_lux updates rA");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0x98;
+    cpu->fpr[13] = (f64)f32_from_bits(0x41880000u);
+    cpu->ps1[13] = (f64)f32_from_bits(0x41900000u);
+    exec_raw(cpu, 0x11A4280E, BASE);
+    check_eq(mem_read32(cpu, base + 0x98), 0x41880000u, "psq_stx w0 ps0");
+    check_eq(mem_read32(cpu, base + 0x9C), 0x41900000u, "psq_stx w0 ps1");
+
+    cpu->gpr[4] = base;
+    cpu->gpr[5] = 0xA0;
+    cpu->fpr[15] = (f64)f32_from_bits(0x41980000u);
+    cpu->ps1[15] = (f64)f32_from_bits(0x41A00000u);
+    exec_raw(cpu, 0x11E4284E, BASE);
+    check_eq(mem_read32(cpu, base + 0xA0), 0x41980000u, "psq_stux w0 ps0");
+    check_eq(mem_read32(cpu, base + 0xA4), 0x41A00000u, "psq_stux w0 ps1");
+    check_eq(cpu->gpr[4], base + 0xA0, "psq_stux updates rA");
+}
+
+static void test_fpu_arithmetic(CPUState* cpu) {
+    printf("--- FPU arithmetic ---\n");
+
+    cpu_reset(cpu);
+    cpu->fpr[2] = 1.25;
+    cpu->fpr[3] = 2.5;
+    exec_raw(cpu, 0xEC22182A, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[1]), 0x40700000u, "fadds result");
+
+    cpu->fpr[5] = 7.0;
+    cpu->fpr[6] = 1.5;
+    exec_raw(cpu, 0xEC853028, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[4]), 0x40B00000u, "fsubs result");
+
+    cpu->fpr[8] = 3.0;
+    cpu->fpr[9] = 2.0;
+    exec_raw(cpu, 0xECE80272, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[7]), 0x40C00000u, "fmuls result");
+
+    cpu->fpr[11] = 7.0;
+    cpu->fpr[12] = 2.0;
+    exec_raw(cpu, 0xED4B6024, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[10]), 0x40600000u, "fdivs result");
+
+    cpu->fpr[14] = 1.25;
+    cpu->fpr[15] = 2.5;
+    exec_raw(cpu, 0xFDAE782A, BASE);
+    check_eq64(f64_to_bits(cpu->fpr[13]), 0x400E000000000000ull, "fadd result");
+
+    cpu->fpr[17] = 7.0;
+    cpu->fpr[18] = 1.5;
+    exec_raw(cpu, 0xFE119028, BASE);
+    check_eq64(f64_to_bits(cpu->fpr[16]), 0x4016000000000000ull, "fsub result");
+
+    cpu->fpr[20] = 3.0;
+    cpu->fpr[21] = 2.0;
+    exec_raw(cpu, 0xFE740572, BASE);
+    check_eq64(f64_to_bits(cpu->fpr[19]), 0x4018000000000000ull, "fmul result");
+
+    cpu->fpr[23] = 7.0;
+    cpu->fpr[24] = 2.0;
+    exec_raw(cpu, 0xFED7C024, BASE);
+    check_eq64(f64_to_bits(cpu->fpr[22]), 0x400C000000000000ull, "fdiv result");
+
+    cpu->fpr[26] = f64_from_bits(0x8000000000000000ull);
+    exec_raw(cpu, 0xFF20D090, BASE);
+    check_eq64(f64_to_bits(cpu->fpr[25]), 0x8000000000000000ull, "fmr preserves negative zero");
+
+    cpu->fpr[28] = 2.5;
+    exec_raw(cpu, 0xFF60E050, BASE);
+    check_eq64(f64_to_bits(cpu->fpr[27]), 0xC004000000000000ull, "fneg flips sign");
+
+    cpu->fpr[30] = -2.5;
+    exec_raw(cpu, 0xFFA0F210, BASE);
+    check_eq64(f64_to_bits(cpu->fpr[29]), 0x4004000000000000ull, "fabs clears sign");
+
+    cpu->fpr[0] = 2.5;
+    exec_raw(cpu, 0xFFE00110, BASE);
+    check_eq64(f64_to_bits(cpu->fpr[31]), 0xC004000000000000ull, "fnabs sets sign");
+
+    cpu->fpr[2] = 1.1;
+    exec_raw(cpu, 0xFC201018, BASE);
+    check_eq(f32_to_bits((f32)cpu->fpr[1]), 0x3F8CCCCDu, "frsp rounds to single");
+
+    cpu->fpr[3] = 1.0;
+    cpu->fpr[4] = 2.0;
+    exec_raw(cpu, 0xFD032000, BASE);
+    check_eq(get_cr_field(cpu, 2), 0x8, "fcmpu less");
+
+    cpu->fpr[3] = 2.0;
+    cpu->fpr[4] = 1.0;
+    exec_raw(cpu, 0xFD032000, BASE);
+    check_eq(get_cr_field(cpu, 2), 0x4, "fcmpu greater");
+
+    cpu->fpr[3] = 2.0;
+    cpu->fpr[4] = 2.0;
+    exec_raw(cpu, 0xFD032000, BASE);
+    check_eq(get_cr_field(cpu, 2), 0x2, "fcmpu equal");
+
+    cpu->fpr[3] = f64_from_bits(0x7FF8000000000000ull);
+    cpu->fpr[4] = 2.0;
+    exec_raw(cpu, 0xFD032000, BASE);
+    check_eq(get_cr_field(cpu, 2), 0x1, "fcmpu unordered");
+
+    cpu->fpr[5] = 4.0;
+    cpu->fpr[6] = 3.0;
+    exec_raw(cpu, 0xFD853040, BASE);
+    check_eq(get_cr_field(cpu, 3), 0x4, "fcmpo greater");
+}
+
 static void check_cr_logic(CPUState* cpu, const char* name, u32 xo,
                            const u8 expected[4]) {
     static const u32 bit3 = 0x10000000u;
@@ -1354,6 +1908,9 @@ int main(void) {
     test_loads(&cpu);
     test_stores(&cpu);
     test_indexed_memory(&cpu);
+    test_fpu_memory(&cpu);
+    test_psq_memory(&cpu);
+    test_fpu_arithmetic(&cpu);
     test_branches_cr_spr(&cpu);
 
     cpu_free(&cpu);

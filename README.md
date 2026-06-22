@@ -8,8 +8,7 @@ DolRecomp is is a tool to statically recompile GameCube DOL executables into C c
 src/
   frontend/     - DOL/REL loading, PPC disassembly, control flow analysis
   backend/      - code generation, target arch emission (x86_64, arm64, etc)
-  runtime/      - the glue that makes recompiled code actually work (HW regs, memory, OS)
-  core/         - shared types, config, logging, the stuff everything else depends on
+  core/         - shared types and the minimal CPU support ABI used by generated code/tests
 
 tools/          - standalone utilities
 docs/           - notes, specs, rambling design docs
@@ -19,16 +18,18 @@ include/        - public headers if we end up needing them
 
 ## Opcodes
 
-The current CPU opcode set has 95 implemented opcodes.
+The current CPU opcode set has 139 implemented opcodes.
 
 | Area | Opcodes |
 |------|---------|
 | Immediate arithmetic | addi, addic, addic., addis, mulli, subfic |
-| Register arithmetic | add, addc, adde, addze, neg, subf, subfc, subfe, subfze |
+| Register arithmetic | add, addc, adde, addze, divw, divwu, mulhw, mulhwu, mullw, neg, subf, subfc, subfe, subfze |
 | Compare / branch / CR | b[l][a], bc[l][a], bclr/blr, bcctr/bctr, cmp/cmpw, cmpi/cmpwi, cmpl/cmplw, cmpli/cmplwi, crand, crandc, creqv, crnand, crnor, cror, crorc, crxor, mcrf, mfcr, mtcrf |
 | Logical / rotate / shift | and, andc, andi., andis., cntlzw, eqv, extsb, extsh, nand, nor, or, orc, ori, oris, rlwimi, rlwinm, rlwnm, slw, sraw, srawi, srw, xor, xori, xoris |
-| Loads | lbz, lbzu, lbzx, lbzux, lha, lhau, lhax, lhaux, lhbrx, lhz, lhzu, lhzx, lhzux, lmw, lwbrx, lwz, lwzu, lwzx, lwzux |
-| Stores | stb, stbu, stbux, stbx, sth, sthbrx, sthu, sthux, sthx, stmw, stw, stwbrx, stwu, stwux, stwx |
+| Loads | lbz, lbzu, lbzx, lbzux, lfd, lfdu, lfdux, lfdx, lfs, lfsu, lfsux, lfsx, lha, lhau, lhax, lhaux, lhbrx, lhz, lhzu, lhzx, lhzux, lmw, lwbrx, lwz, lwzu, lwzx, lwzux |
+| Stores | stb, stbu, stbux, stbx, stfd, stfdu, stfdux, stfdx, stfs, stfsu, stfsux, stfsx, sth, sthbrx, sthu, sthux, sthx, stmw, stw, stwbrx, stwu, stwux, stwx |
+| Floating point | fabs, fadd, fadds, fcmpo, fcmpu, fdiv, fdivs, fmr, fmul, fmuls, fneg, fnabs, frsp, fsub, fsubs |
+| Paired-single memory | psq_l, psq_lu, psq_lux, psq_lx, psq_st, psq_stu, psq_stux, psq_stx |
 | Cache / memory control | dcbz |
 | SPR moves | mfspr/mflr/mfctr/mfxer, mtspr/mtlr/mtctr/mtxer |
 
@@ -44,6 +45,30 @@ cd build
 cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
 cmake --build build
 ```
+
+## usage
+
+Download the local GameTDB/WiiTDB title list first:
+
+```
+dolrecomp.exe --setup
+```
+
+Wii DOLs need a 6-character title ID so DolRecomp can look up the game name through `database\titles.txt`:
+
+```
+dolrecomp.exe -j14 path\to\main.dol SUKE01 build
+```
+
+GameCube DOLs skip the title ID and write to a generic generated folder:
+
+```
+dolrecomp.exe --gamecube path\to\main.dol build
+```
+
+If the last argument is a directory, output goes under `<title-id>_generated\` for Wii or `generated\` for GameCube. If the last argument ends in `.c`, that exact C file is used. `-jN` controls how many worker jobs write split C chunks.
+
+If `database\titles.txt` is missing, DolRecomp warns and uses GameCube mode.
 
 ## contributing
 

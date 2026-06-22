@@ -43,11 +43,25 @@ static inline u32 read_be32(const u8* p) {
     return (u32)((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]);
 }
 
+static inline u64 read_be64(const u8* p) {
+    return ((u64)read_be32(p) << 32) | read_be32(p + 4);
+}
+
+static inline void write_be16(u8* p, u16 v) {
+    p[0] = (u8)(v >> 8);
+    p[1] = (u8)(v);
+}
+
 static inline void write_be32(u8* p, u32 v) {
     p[0] = (u8)(v >> 24);
     p[1] = (u8)(v >> 16);
     p[2] = (u8)(v >> 8);
     p[3] = (u8)(v);
+}
+
+static inline void write_be64(u8* p, u64 v) {
+    write_be32(p, (u32)(v >> 32));
+    write_be32(p + 4, (u32)v);
 }
 
 #endif /* DOLRECOMP_TYPES_H */

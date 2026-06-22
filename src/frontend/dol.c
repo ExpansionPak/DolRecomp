@@ -77,11 +77,13 @@ void dol_free(DOLFile* dol) {
     dol->file_size = 0;
 }
 
-void dol_print_info(const DOLFile* dol) {
+void dol_print_info(const DOLFile* dol, const char* game_name) {
     int i;
 
     printf("=== DOL Info ===\n");
     printf("entry point: 0x%08X\n", dol->header.entry_point);
+    if (game_name && game_name[0] != '\0')
+        printf("game: %s\n", game_name);
     printf("BSS: 0x%08X (0x%X bytes)\n", dol->header.bss_address, dol->header.bss_size);
     printf("\n");
 

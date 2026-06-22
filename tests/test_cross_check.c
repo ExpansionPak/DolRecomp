@@ -28,6 +28,9 @@ enum {
     F_SH     = 1u << 17,
     F_CRFS   = 1u << 18,
     F_CRM    = 1u << 19,
+    F_RC_REG = 1u << 20,
+    F_W      = 1u << 21,
+    F_I      = 1u << 22,
 };
 
 typedef struct {
@@ -39,10 +42,13 @@ typedef struct {
     u8 rA;
     u8 rS;
     u8 rB;
+    u8 rC;
     u8 crfD;
     u8 crfS;
     u8 crm;
     u8 l;
+    u8 w;
+    u8 i;
     u8 bo;
     u8 bi;
     u8 mb;
@@ -159,6 +165,54 @@ static const DecodeCase cases[] = {
     { "stwbrx", 0x7D2A5D2C, PPC_OP_STWBRX, F_RS|F_RA|F_RB, .rS=9,  .rA=10, .rB=11 },
     { "sthbrx", 0x7D8D772C, PPC_OP_STHBRX, F_RS|F_RA|F_RB, .rS=12, .rA=13, .rB=14 },
     { "dcbz",   0x7C0F87EC, PPC_OP_DCBZ,   F_RA|F_RB,      .rA=15, .rB=16 },
+
+    { "lfs",    0xC0240000, PPC_OP_LFS,    F_RD|F_RA|F_SIMM, .rD=1,  .rA=4, .simm=0 },
+    { "lfsu",   0xC4440004, PPC_OP_LFSU,   F_RD|F_RA|F_SIMM, .rD=2,  .rA=4, .simm=4 },
+    { "lfd",    0xC8640008, PPC_OP_LFD,    F_RD|F_RA|F_SIMM, .rD=3,  .rA=4, .simm=8 },
+    { "lfdu",   0xCC840010, PPC_OP_LFDU,   F_RD|F_RA|F_SIMM, .rD=4,  .rA=4, .simm=16 },
+    { "stfs",   0xD0A40014, PPC_OP_STFS,   F_RS|F_RA|F_SIMM, .rS=5,  .rA=4, .simm=20 },
+    { "stfsu",  0xD4C40018, PPC_OP_STFSU,  F_RS|F_RA|F_SIMM, .rS=6,  .rA=4, .simm=24 },
+    { "stfd",   0xD8E40020, PPC_OP_STFD,   F_RS|F_RA|F_SIMM, .rS=7,  .rA=4, .simm=32 },
+    { "stfdu",  0xDD040028, PPC_OP_STFDU,  F_RS|F_RA|F_SIMM, .rS=8,  .rA=4, .simm=40 },
+    { "lfsx",   0x7D242C2E, PPC_OP_LFSX,   F_RD|F_RA|F_RB, .rD=9,  .rA=4, .rB=5 },
+    { "lfsux",  0x7D442C6E, PPC_OP_LFSUX,  F_RD|F_RA|F_RB, .rD=10, .rA=4, .rB=5 },
+    { "lfdx",   0x7D642CAE, PPC_OP_LFDX,   F_RD|F_RA|F_RB, .rD=11, .rA=4, .rB=5 },
+    { "lfdux",  0x7D842CEE, PPC_OP_LFDUX,  F_RD|F_RA|F_RB, .rD=12, .rA=4, .rB=5 },
+    { "stfsx",  0x7DA42D2E, PPC_OP_STFSX,  F_RS|F_RA|F_RB, .rS=13, .rA=4, .rB=5 },
+    { "stfsux", 0x7DC42D6E, PPC_OP_STFSUX, F_RS|F_RA|F_RB, .rS=14, .rA=4, .rB=5 },
+    { "stfdx",  0x7DE42DAE, PPC_OP_STFDX,  F_RS|F_RA|F_RB, .rS=15, .rA=4, .rB=5 },
+    { "stfdux", 0x7E042DEE, PPC_OP_STFDUX, F_RS|F_RA|F_RB, .rS=16, .rA=4, .rB=5 },
+
+    { "fadds",  0xEC22182A, PPC_OP_FADDS, F_RD|F_RA|F_RB, .rD=1,  .rA=2,  .rB=3 },
+    { "fsubs",  0xEC853028, PPC_OP_FSUBS, F_RD|F_RA|F_RB, .rD=4,  .rA=5,  .rB=6 },
+    { "fmuls",  0xECE80272, PPC_OP_FMULS, F_RD|F_RA|F_RC_REG, .rD=7,  .rA=8,  .rC=9 },
+    { "fdivs",  0xED4B6024, PPC_OP_FDIVS, F_RD|F_RA|F_RB, .rD=10, .rA=11, .rB=12 },
+    { "fadd",   0xFDAE782A, PPC_OP_FADD,  F_RD|F_RA|F_RB, .rD=13, .rA=14, .rB=15 },
+    { "fsub",   0xFE119028, PPC_OP_FSUB,  F_RD|F_RA|F_RB, .rD=16, .rA=17, .rB=18 },
+    { "fmul",   0xFE740572, PPC_OP_FMUL,  F_RD|F_RA|F_RC_REG, .rD=19, .rA=20, .rC=21 },
+    { "fdiv",   0xFED7C024, PPC_OP_FDIV,  F_RD|F_RA|F_RB, .rD=22, .rA=23, .rB=24 },
+    { "fmr",    0xFF20D090, PPC_OP_FMR,   F_RD|F_RB, .rD=25, .rB=26 },
+    { "fneg",   0xFF60E050, PPC_OP_FNEG,  F_RD|F_RB, .rD=27, .rB=28 },
+    { "fabs",   0xFFA0F210, PPC_OP_FABS,  F_RD|F_RB, .rD=29, .rB=30 },
+    { "fnabs",  0xFFE00110, PPC_OP_FNABS, F_RD|F_RB, .rD=31, .rB=0 },
+    { "frsp",   0xFC201018, PPC_OP_FRSP,  F_RD|F_RB, .rD=1,  .rB=2 },
+    { "fcmpu",  0xFD032000, PPC_OP_FCMPU, F_CRF|F_RA|F_RB, .crfD=2, .rA=3, .rB=4 },
+    { "fcmpo",  0xFD853040, PPC_OP_FCMPO, F_CRF|F_RA|F_RB, .crfD=3, .rA=5, .rB=6 },
+
+    { "psq_l",   0xE0240000, PPC_OP_PSQ_L,   F_RD|F_RA|F_SIMM|F_W|F_I, .rD=1,  .rA=4, .simm=0,  .w=0, .i=0 },
+    { "psq_lu",  0xE4640008, PPC_OP_PSQ_LU,  F_RD|F_RA|F_SIMM|F_W|F_I, .rD=3,  .rA=4, .simm=8,  .w=0, .i=0 },
+    { "psq_st",  0xF0A40010, PPC_OP_PSQ_ST,  F_RS|F_RA|F_SIMM|F_W|F_I, .rS=5,  .rA=4, .simm=16, .w=0, .i=0 },
+    { "psq_stu", 0xF4E40018, PPC_OP_PSQ_STU, F_RS|F_RA|F_SIMM|F_W|F_I, .rS=7,  .rA=4, .simm=24, .w=0, .i=0 },
+    { "psq_lx",  0x1124280C, PPC_OP_PSQ_LX,  F_RD|F_RA|F_RB|F_W|F_I, .rD=9,  .rA=4, .rB=5, .w=0, .i=0 },
+    { "psq_lux", 0x1164284C, PPC_OP_PSQ_LUX, F_RD|F_RA|F_RB|F_W|F_I, .rD=11, .rA=4, .rB=5, .w=0, .i=0 },
+    { "psq_stx", 0x11A4280E, PPC_OP_PSQ_STX, F_RS|F_RA|F_RB|F_W|F_I, .rS=13, .rA=4, .rB=5, .w=0, .i=0 },
+    { "psq_stux",0x11E4284E, PPC_OP_PSQ_STUX,F_RS|F_RA|F_RB|F_W|F_I, .rS=15, .rA=4, .rB=5, .w=0, .i=0 },
+
+    { "mullw",  0x7C6429D6, PPC_OP_MULLW,  F_RD|F_RA|F_RB, .rD=3,  .rA=4,  .rB=5 },
+    { "mulhw",  0x7CC74096, PPC_OP_MULHW,  F_RD|F_RA|F_RB, .rD=6,  .rA=7,  .rB=8 },
+    { "mulhwu", 0x7D2A5816, PPC_OP_MULHWU, F_RD|F_RA|F_RB, .rD=9,  .rA=10, .rB=11 },
+    { "divw",   0x7D8D73D6, PPC_OP_DIVW,   F_RD|F_RA|F_RB, .rD=12, .rA=13, .rB=14 },
+    { "divwu",  0x7DF08B96, PPC_OP_DIVWU,  F_RD|F_RA|F_RB, .rD=15, .rA=16, .rB=17 },
 };
 
 static int pass = 0;
@@ -188,7 +242,7 @@ int main(void) {
     int num_cases = (int)(sizeof(cases) / sizeof(cases[0]));
     printf("cross-check: %d opcodes against devkitPPC ground truth\n\n", num_cases);
 
-    check((PPC_OP_COUNT - 1) == 95, -1, "opcode count", PPC_OP_COUNT - 1, 95);
+    check((PPC_OP_COUNT - 1) == 139, -1, "opcode count", PPC_OP_COUNT - 1, 139);
 
     for (int n = 0; n < num_cases; n++) {
         const DecodeCase* c = &cases[n];
@@ -204,10 +258,13 @@ int main(void) {
         if (c->fields & F_RA)     check(inst.rA == c->rA, n, "rA", inst.rA, c->rA);
         if (c->fields & F_RS)     check(inst.rS == c->rS, n, "rS", inst.rS, c->rS);
         if (c->fields & F_RB)     check(inst.rB == c->rB, n, "rB", inst.rB, c->rB);
+        if (c->fields & F_RC_REG) check(inst.rC == c->rC, n, "rC", inst.rC, c->rC);
         if (c->fields & F_CRF)    check(inst.crfD == c->crfD, n, "crfD", inst.crfD, c->crfD);
         if (c->fields & F_CRFS)   check(inst.crfS == c->crfS, n, "crfS", inst.crfS, c->crfS);
         if (c->fields & F_CRM)    check(inst.crm == c->crm, n, "crm", inst.crm, c->crm);
         if (c->fields & F_L)      check(inst.l == c->l, n, "l", inst.l, c->l);
+        if (c->fields & F_W)      check(inst.w == c->w, n, "w", inst.w, c->w);
+        if (c->fields & F_I)      check(inst.i == c->i, n, "i", inst.i, c->i);
         if (c->fields & F_BO)     check(inst.bo == c->bo, n, "bo", inst.bo, c->bo);
         if (c->fields & F_BI)     check(inst.bi == c->bi, n, "bi", inst.bi, c->bi);
         if (c->fields & F_MB)     check(inst.mb == c->mb, n, "mb", inst.mb, c->mb);

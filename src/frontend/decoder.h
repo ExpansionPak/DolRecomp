@@ -102,6 +102,50 @@ typedef enum {
     PPC_OP_STHUX,
     PPC_OP_STWBRX,
     PPC_OP_STHBRX,
+    PPC_OP_LFS,
+    PPC_OP_LFSU,
+    PPC_OP_LFD,
+    PPC_OP_LFDU,
+    PPC_OP_STFS,
+    PPC_OP_STFSU,
+    PPC_OP_STFD,
+    PPC_OP_STFDU,
+    PPC_OP_LFSX,
+    PPC_OP_LFSUX,
+    PPC_OP_LFDX,
+    PPC_OP_LFDUX,
+    PPC_OP_STFSX,
+    PPC_OP_STFSUX,
+    PPC_OP_STFDX,
+    PPC_OP_STFDUX,
+    PPC_OP_FADDS,
+    PPC_OP_FSUBS,
+    PPC_OP_FMULS,
+    PPC_OP_FDIVS,
+    PPC_OP_FADD,
+    PPC_OP_FSUB,
+    PPC_OP_FMUL,
+    PPC_OP_FDIV,
+    PPC_OP_FMR,
+    PPC_OP_FNEG,
+    PPC_OP_FABS,
+    PPC_OP_FNABS,
+    PPC_OP_FRSP,
+    PPC_OP_FCMPU,
+    PPC_OP_FCMPO,
+    PPC_OP_PSQ_L,
+    PPC_OP_PSQ_LU,
+    PPC_OP_PSQ_ST,
+    PPC_OP_PSQ_STU,
+    PPC_OP_PSQ_LX,
+    PPC_OP_PSQ_LUX,
+    PPC_OP_PSQ_STX,
+    PPC_OP_PSQ_STUX,
+    PPC_OP_MULLW,
+    PPC_OP_MULHW,
+    PPC_OP_MULHWU,
+    PPC_OP_DIVW,
+    PPC_OP_DIVWU,
     PPC_OP_DCBZ,
     PPC_OP_COUNT
 } PPCOpcode;
@@ -115,10 +159,13 @@ typedef struct {
     u8  rA;
     u8  rS;
     u8  rB;
+    u8  rC;
     u8  crfD;
     u8  crfS;
     u8  crm;
     u8  l;
+    u8  w;
+    u8  i;
     u8  bo;
     u8  bi;
     u8  mb;
