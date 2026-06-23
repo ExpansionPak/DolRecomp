@@ -9,11 +9,30 @@
 #define GC_RAM_BASE         0x80000000u
 #define GC_RAM_UNCACHED     0xC0000000u
 
-#define PPC_EXC_PROGRAM     0x00000001u
-#define PPC_PROGRAM_TRAP    0x00000001u
-#define PPC_PROGRAM_PRIV    0x00000002u
+#define PPC_EXC_PROGRAM       0x00000001u
+#define PPC_EXC_DSI           0x00000002u
+#define PPC_EXC_ALIGNMENT     0x00000004u
+#define PPC_EXC_SYSTEM_CALL   0x00000008u
+#define PPC_EXC_MACHINE_CHECK 0x00000010u
 
-typedef struct {
+#define PPC_PROGRAM_FP        0x00100000u
+#define PPC_PROGRAM_ILLEGAL   0x00080000u
+#define PPC_PROGRAM_PRIV      0x00040000u
+#define PPC_PROGRAM_TRAP      0x00020000u
+
+#define PPC_DSI_EAR_DISABLED  0x00100000u
+
+#define PPC_VECTOR_MACHINE_CHECK 0x00200u
+#define PPC_VECTOR_DSI           0x00300u
+#define PPC_VECTOR_ALIGNMENT     0x00600u
+#define PPC_VECTOR_PROGRAM       0x00700u
+#define PPC_VECTOR_SYSTEM_CALL   0x00C00u
+
+typedef struct CPUState CPUState;
+typedef u32 (*PPCExternalRead32)(CPUState* cpu, u32 ea, u8 rid);
+typedef void (*PPCExternalWrite32)(CPUState* cpu, u32 ea, u32 value, u8 rid);
+
+struct CPUState {
     u32 gpr[32];
     f64 fpr[32];
     f64 ps1[32];
@@ -24,15 +43,34 @@ typedef struct {
     u32 xer;
     u32 fpscr;
     u32 msr;
+    u32 srr0;
+    u32 srr1;
+    u32 dar;
+    u32 dsisr;
+    u32 ear;
+    u32 hid2;
+    u64 timebase;
     u32 sr[16];
     u32 exception;
     u32 program_exception;
+    u32 tlb_last_vps;
+    u32 tlb_last_index;
+    u32 tlb_invalidate_count;
+    u32 external_addr;
+    u32 external_value;
+    u8 external_rid;
+    u8 external_read_count;
+    u8 external_write_count;
     u32 reserve_addr;
     bool reserve_valid;
+    u32 locked_cache_tag[512];
+    bool locked_cache_valid[512];
+    PPCExternalRead32 external_read32;
+    PPCExternalWrite32 external_write32;
 
     u8* ram;
     u32 ram_size;
-} CPUState;
+};
 
 bool cpu_init(CPUState* cpu);
 void cpu_free(CPUState* cpu);
@@ -59,6 +97,17 @@ bool ppc_fctiw(CPUState* cpu, f64 value, bool toward_zero, u64* result);
 bool ppc_add_overflowed(u32 a, u32 b, u32 result);
 bool ppc_trap_condition(u8 to, u32 a, u32 b);
 void ppc_set_xer_ov(CPUState* cpu, bool ov);
+void ppc_take_exception(CPUState* cpu, u32 exception, u32 vector, u32 srr0, u32 srr1_info);
+void ppc_program_exception(CPUState* cpu, u32 cause, u32 cia);
+void ppc_system_call_exception(CPUState* cpu, u32 cia);
+void ppc_dsi_exception(CPUState* cpu, u32 ea, u32 cia, u32 dsisr);
+void ppc_alignment_exception(CPUState* cpu, u32 ea, u32 cia);
+u32 ppc_mftb(CPUState* cpu, u16 tbr, u32 cia);
+void ppc_rfi(CPUState* cpu, u32 cia);
+void ppc_dcbz_l(CPUState* cpu, u32 ea, u32 cia);
+u32 ppc_eciwx(CPUState* cpu, u32 ea, u32 cia);
+void ppc_ecowx(CPUState* cpu, u32 ea, u32 value, u32 cia);
+void ppc_tlbie(CPUState* cpu, u32 ea, u32 cia);
 void ppc_fpscr_updated(CPUState* cpu);
 void ppc_memory_fence(void);
 

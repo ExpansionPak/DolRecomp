@@ -316,6 +316,13 @@ static const DecodeCase cases[] = {
     { "dcbi", 0x7C19D3AC, PPC_OP_DCBI, F_RA|F_RB, .rA=25, .rB=26 },
     { "icbi", 0x7C1BE7AC, PPC_OP_ICBI, F_RA|F_RB, .rA=27, .rB=28 },
     { "tlbsync", 0x7C00046C, PPC_OP_TLBSYNC, 0 },
+    { "sc", 0x44000002, PPC_OP_SC, 0 },
+    { "rfi", 0x4C000064, PPC_OP_RFI, 0 },
+    { "mftb", 0x7C6C42E6, PPC_OP_MFTB, F_RD|F_SPR, .rD=3, .spr=268 },
+    { "dcbz_l", 0x100537EC, PPC_OP_DCBZ_L, F_RA|F_RB, .rA=5, .rB=6 },
+    { "tlbie", 0x7C003A64, PPC_OP_TLBIE, F_RB, .rB=7 },
+    { "eciwx", 0x7D09526C, PPC_OP_ECIWX, F_RD|F_RA|F_RB, .rD=8, .rA=9, .rB=10 },
+    { "ecowx", 0x7D6C6B6C, PPC_OP_ECOWX, F_RS|F_RA|F_RB, .rS=11, .rA=12, .rB=13 },
 };
 
 static int pass = 0;
@@ -345,7 +352,7 @@ int main(void) {
     int num_cases = (int)(sizeof(cases) / sizeof(cases[0]));
     printf("cross-check: %d opcodes against devkitPPC ground truth\n\n", num_cases);
 
-    check((PPC_OP_COUNT - 1) == 229, -1, "opcode count", PPC_OP_COUNT - 1, 229);
+    check((PPC_OP_COUNT - 1) == 236, -1, "opcode count", PPC_OP_COUNT - 1, 236);
 
     for (int n = 0; n < num_cases; n++) {
         const DecodeCase* c = &cases[n];

@@ -1979,6 +1979,21 @@ static void test_new_opcodes(void) {
     asm volatile("dcbi 0,%1" : "+r"(value) : "r"(mem) : "memory"); check_eq(value, 0x5A5A5A5Au, "dcbi preserves state");
     asm volatile("icbi 0,%1" : "+r"(value) : "r"(mem) : "memory"); check_eq(value, 0x5A5A5A5Au, "icbi preserves state");
     asm volatile("tlbsync" : "+r"(value) : : "memory"); check_eq(value, 0x5A5A5A5Au, "tlbsync preserves state");
+
+    u32 tbl0, tbl1, tbu0, tbu1;
+    asm volatile(
+        "mftbu %0\n"
+        "mftb %1\n"
+        "mftb %2\n"
+        "mftbu %3\n"
+        : "=r"(tbu0), "=r"(tbl0), "=r"(tbl1), "=r"(tbu1)
+    );
+    check((tbu1 == tbu0) || (tbu1 == tbu0 + 1), "mftb reads time base");
+    check((tbl1 >= tbl0) || (tbu1 != tbu0), "mftb lower word advances");
+
+    value = 0x5A5A5A5Au;
+    asm volatile("tlbie %1" : "+r"(value) : "r"(mem) : "memory");
+    check_eq(value, 0x5A5A5A5Au, "tlbie preserves state");
 }
 
 static void test_branches_and_spr(void) {

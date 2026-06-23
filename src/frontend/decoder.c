@@ -182,6 +182,13 @@ PPCInst ppc_decode(u32 raw, u32 address) {
         case 814: decode_a_frt_fra_frb_frc(&inst, PPC_OP_PS_MADDS0, raw); break;
         case 894: decode_a_frt_fra_frb_frc(&inst, PPC_OP_PS_NMSUB, raw); break;
         case 943: decode_a_frt_fra_frb_frc(&inst, PPC_OP_PS_MADDS1, raw); break;
+        case 1014:
+            if (PPC_RD(raw) == 0 && !PPC_RC(raw)) {
+                inst.op = PPC_OP_DCBZ_L;
+                inst.rA = PPC_RA(raw);
+                inst.rB = PPC_RB(raw);
+            } else inst.op = PPC_OP_UNKNOWN;
+            break;
         default: {
             u32 psxo = xo & 0x3Fu;
             switch (psxo) {
@@ -252,6 +259,10 @@ PPCInst ppc_decode(u32 raw, u32 address) {
         break;
     }
 
+    case 17:
+        inst.op = raw == 0x44000002u ? PPC_OP_SC : PPC_OP_UNKNOWN;
+        break;
+
     case 18: { // b/bl/ba/bla
         inst.op = PPC_OP_B;
         inst.aa = (raw >> 1) & 1;
@@ -270,6 +281,8 @@ PPCInst ppc_decode(u32 raw, u32 address) {
             inst.op   = PPC_OP_MCRF;
             inst.crfD = (raw >> 23) & 0x7;
             inst.crfS = (raw >> 18) & 0x7;
+        } else if (raw == 0x4C000064u) {
+            inst.op = PPC_OP_RFI;
         } else if (xo == 16) {
             inst.op = PPC_OP_BCLR;
             inst.bo = PPC_BO(raw);
@@ -542,6 +555,16 @@ PPCInst ppc_decode(u32 raw, u32 address) {
             break;
         case 279: decode_x_rt_ra_rb(&inst, PPC_OP_LHZX, raw); break;
         case 284: decode_x_rs_ra_rb(&inst, PPC_OP_EQV, raw); break;
+        case 306:
+            if (PPC_RD(raw) == 0 && PPC_RA(raw) == 0 && !PPC_RC(raw)) {
+                inst.op = PPC_OP_TLBIE;
+                inst.rB = PPC_RB(raw);
+            } else inst.op = PPC_OP_UNKNOWN;
+            break;
+        case 310:
+            if (!PPC_RC(raw)) decode_x_rt_ra_rb(&inst, PPC_OP_ECIWX, raw);
+            else inst.op = PPC_OP_UNKNOWN;
+            break;
         case 311: decode_x_rt_ra_rb(&inst, PPC_OP_LHZUX, raw); break;
         case 316: decode_x_rs_ra_rb(&inst, PPC_OP_XOR, raw); break;
         case 339:
@@ -549,10 +572,21 @@ PPCInst ppc_decode(u32 raw, u32 address) {
             inst.rD  = PPC_RD(raw);
             inst.spr = PPC_SPR(raw);
             break;
+        case 371:
+            if (!PPC_RC(raw)) {
+                inst.op = PPC_OP_MFTB;
+                inst.rD = PPC_RD(raw);
+                inst.spr = PPC_SPR(raw);
+            } else inst.op = PPC_OP_UNKNOWN;
+            break;
         case 343: decode_x_rt_ra_rb(&inst, PPC_OP_LHAX, raw); break;
         case 375: decode_x_rt_ra_rb(&inst, PPC_OP_LHAUX, raw); break;
         case 407: decode_x_rs_ra_rb(&inst, PPC_OP_STHX, raw); break;
         case 412: decode_x_rs_ra_rb(&inst, PPC_OP_ORC, raw); break;
+        case 438:
+            if (!PPC_RC(raw)) decode_x_rs_ra_rb(&inst, PPC_OP_ECOWX, raw);
+            else inst.op = PPC_OP_UNKNOWN;
+            break;
         case 439: decode_x_rs_ra_rb(&inst, PPC_OP_STHUX, raw); break;
         case 444: decode_x_rs_ra_rb(&inst, PPC_OP_OR, raw); break;
         case 470:
@@ -836,6 +870,8 @@ static const char* opcode_names[PPC_OP_COUNT] = {
     [PPC_OP_BC]      = "bc",
     [PPC_OP_BCLR]    = "bclr",
     [PPC_OP_BCCTR]   = "bcctr",
+    [PPC_OP_SC]      = "sc",
+    [PPC_OP_RFI]     = "rfi",
     [PPC_OP_CRAND]   = "crand",
     [PPC_OP_CRANDC]  = "crandc",
     [PPC_OP_CREQV]   = "creqv",
@@ -849,6 +885,7 @@ static const char* opcode_names[PPC_OP_COUNT] = {
     [PPC_OP_MTCRF]   = "mtcrf",
     [PPC_OP_MFSPR]   = "mfspr",
     [PPC_OP_MTSPR]   = "mtspr",
+    [PPC_OP_MFTB]    = "mftb",
     [PPC_OP_CMP]     = "cmp",
     [PPC_OP_CMPL]    = "cmpl",
     [PPC_OP_TW]      = "tw",
@@ -1013,6 +1050,7 @@ static const char* opcode_names[PPC_OP_COUNT] = {
     [PPC_OP_DIVWU]   = "divwu",
     [PPC_OP_DIVWUO]  = "divwuo",
     [PPC_OP_DCBZ]    = "dcbz",
+    [PPC_OP_DCBZ_L]  = "dcbz_l",
     [PPC_OP_DCBST]   = "dcbst",
     [PPC_OP_DCBF]    = "dcbf",
     [PPC_OP_DCBTST]  = "dcbtst",
@@ -1029,7 +1067,10 @@ static const char* opcode_names[PPC_OP_COUNT] = {
     [PPC_OP_MFSRIN]  = "mfsrin",
     [PPC_OP_MTSR]    = "mtsr",
     [PPC_OP_MTSRIN]  = "mtsrin",
+    [PPC_OP_TLBIE]   = "tlbie",
     [PPC_OP_TLBSYNC] = "tlbsync",
+    [PPC_OP_ECIWX]   = "eciwx",
+    [PPC_OP_ECOWX]   = "ecowx",
 };
 
 const char* ppc_op_name(PPCOpcode op) {
@@ -1042,6 +1083,10 @@ static const char* spr_name(u16 spr) {
     case 1: return "xer";
     case 8: return "lr";
     case 9: return "ctr";
+    case 26: return "srr0";
+    case 27: return "srr1";
+    case 282: return "ear";
+    case 920: return "hid2";
     default: return NULL;
     }
 }
@@ -1472,6 +1517,8 @@ char* ppc_disasm(char* buf, size_t buf_size, const PPCInst* inst) {
     case PPC_OP_SYNC:
     case PPC_OP_EIEIO:
     case PPC_OP_ISYNC:
+    case PPC_OP_SC:
+    case PPC_OP_RFI:
     case PPC_OP_TLBSYNC:
         snprintf(buf, buf_size, "%s", ppc_op_name(inst->op));
         break;
@@ -1522,6 +1569,7 @@ char* ppc_disasm(char* buf, size_t buf_size, const PPCInst* inst) {
         break;
 
     case PPC_OP_DCBZ:
+    case PPC_OP_DCBZ_L:
     case PPC_OP_DCBST:
     case PPC_OP_DCBF:
     case PPC_OP_DCBTST:
@@ -1533,6 +1581,18 @@ char* ppc_disasm(char* buf, size_t buf_size, const PPCInst* inst) {
         } else {
             snprintf(buf, buf_size, "%s    r%u, r%u", ppc_op_name(inst->op), inst->rA, inst->rB);
         }
+        break;
+
+    case PPC_OP_TLBIE:
+        snprintf(buf, buf_size, "tlbie   r%u", inst->rB);
+        break;
+
+    case PPC_OP_ECIWX:
+        snprintf(buf, buf_size, "eciwx   r%u, r%u, r%u", inst->rD, inst->rA, inst->rB);
+        break;
+
+    case PPC_OP_ECOWX:
+        snprintf(buf, buf_size, "ecowx   r%u, r%u, r%u", inst->rS, inst->rA, inst->rB);
         break;
 
     case PPC_OP_MCRXR:
@@ -1637,6 +1697,15 @@ char* ppc_disasm(char* buf, size_t buf_size, const PPCInst* inst) {
             snprintf(buf, buf_size, "mfspr   r%u, %u", inst->rD, inst->spr);
         break;
     }
+
+    case PPC_OP_MFTB:
+        if (inst->spr == 268)
+            snprintf(buf, buf_size, "mftb    r%u", inst->rD);
+        else if (inst->spr == 269)
+            snprintf(buf, buf_size, "mftbu   r%u", inst->rD);
+        else
+            snprintf(buf, buf_size, "mftb    r%u, %u", inst->rD, inst->spr);
+        break;
 
     case PPC_OP_MTSPR: {
         const char* name = spr_name(inst->spr);

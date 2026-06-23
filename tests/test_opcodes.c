@@ -254,6 +254,13 @@ static const OpcodeDecode opcode_cases[] = {
     { 0x7C19D3AC, PPC_OP_DCBI, "dcbi" },
     { 0x7C1BE7AC, PPC_OP_ICBI, "icbi" },
     { 0x7C00046C, PPC_OP_TLBSYNC, "tlbsync" },
+    { 0x44000002, PPC_OP_SC, "sc" },
+    { 0x4C000064, PPC_OP_RFI, "rfi" },
+    { 0x7C6C42E6, PPC_OP_MFTB, "mftb" },
+    { 0x100537EC, PPC_OP_DCBZ_L, "dcbz_l" },
+    { 0x7C003A64, PPC_OP_TLBIE, "tlbie" },
+    { 0x7D09526C, PPC_OP_ECIWX, "eciwx" },
+    { 0x7D6C6B6C, PPC_OP_ECOWX, "ecowx" },
 };
 
 static u32 make_dform(u32 opcd, u32 rt, u32 ra, u16 imm) {
@@ -278,16 +285,16 @@ static int test_sign_extend(void) {
 }
 
 static int test_current_opcode_count(void) {
-    printf("  current opcode count is 229\n");
-    CHECK(PPC_OP_COUNT - 1 == 229, "should expose 229 opcodes, got %d", PPC_OP_COUNT - 1);
+    printf("  current opcode count is 236\n");
+    CHECK(PPC_OP_COUNT - 1 == 236, "should expose 236 opcodes, got %d", PPC_OP_COUNT - 1);
     return 1;
 }
 
 static int test_current_opcode_decode_table(void) {
     int count = (int)(sizeof(opcode_cases) / sizeof(opcode_cases[0]));
-    printf("  decode every opcode in the current 229-opcode set\n");
+    printf("  decode every opcode in the current 236-opcode set\n");
 
-    CHECK(count == 229, "opcode table should have 229 entries, got %d", count);
+    CHECK(count == 236, "opcode table should have 236 entries, got %d", count);
 
     for (int i = 0; i < count; i++) {
         char disasm[96];

@@ -57,6 +57,50 @@ static void clear_matching_reservation(CPUState* cpu, u32 addr) {
         cpu->reserve_valid = false;
 }
 
+#define PPC_BIT(n) (1u << (31u - (n)))
+#define PPC_MSR_RFI_MASK 0x87C0FFFFu
+#define PPC_MSR_POW PPC_BIT(13)
+#define PPC_MSR_ILE PPC_BIT(15)
+#define PPC_MSR_EE  PPC_BIT(16)
+#define PPC_MSR_PR  PPC_BIT(17)
+#define PPC_MSR_FP  PPC_BIT(18)
+#define PPC_MSR_ME  PPC_BIT(19)
+#define PPC_MSR_FE0 PPC_BIT(20)
+#define PPC_MSR_SE  PPC_BIT(21)
+#define PPC_MSR_BE  PPC_BIT(22)
+#define PPC_MSR_FE1 PPC_BIT(23)
+#define PPC_MSR_IP  PPC_BIT(25)
+#define PPC_MSR_IR  PPC_BIT(26)
+#define PPC_MSR_DR  PPC_BIT(27)
+#define PPC_MSR_PM  PPC_BIT(29)
+#define PPC_MSR_RI  PPC_BIT(30)
+#define PPC_MSR_LE  PPC_BIT(31)
+
+#define PPC_HID2_LCE    PPC_BIT(3)
+#define PPC_HID2_DCHERR PPC_BIT(8)
+#define PPC_HID2_DCHEE  PPC_BIT(12)
+
+#define PPC_EAR_ENABLE 0x80000000u
+#define PPC_SRR1_MACHINE_CHECK_DCBZL PPC_BIT(10)
+
+static u32 exception_vector_address(u32 msr, u32 vector) {
+    return ((msr & PPC_MSR_IP) ? 0xFFF00000u : 0u) + vector;
+}
+
+static u32 exception_msr(u32 old_msr, u32 exception) {
+    u32 clear = PPC_MSR_POW | PPC_MSR_EE | PPC_MSR_PR | PPC_MSR_FP |
+                PPC_MSR_FE0 | PPC_MSR_SE | PPC_MSR_BE | PPC_MSR_FE1 |
+                PPC_MSR_IR | PPC_MSR_DR | PPC_MSR_PM | PPC_MSR_RI |
+                PPC_MSR_LE;
+    if (exception & PPC_EXC_MACHINE_CHECK)
+        clear |= PPC_MSR_ME;
+
+    u32 next = old_msr & ~clear;
+    if (old_msr & PPC_MSR_ILE)
+        next |= PPC_MSR_LE;
+    return next;
+}
+
 u64 mem_read64(CPUState* cpu, u32 addr) {
     u32 offset = translate_addr(addr, cpu->ram_size);
     if (offset == (u32)-1 || offset + 8 > cpu->ram_size) {
@@ -141,6 +185,139 @@ void ppc_set_xer_ov(CPUState* cpu, bool ov) {
     cpu->xer = (cpu->xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);
     if (ov)
         cpu->xer |= 0x80000000u;
+}
+
+void ppc_take_exception(CPUState* cpu, u32 exception, u32 vector, u32 srr0, u32 srr1_info) {
+    u32 old_msr = cpu->msr;
+    cpu->srr0 = srr0;
+    cpu->srr1 = (old_msr & PPC_MSR_RFI_MASK) | srr1_info;
+    cpu->exception |= exception;
+    cpu->msr = exception_msr(old_msr, exception);
+    cpu->pc = exception_vector_address(cpu->msr, vector);
+}
+
+void ppc_program_exception(CPUState* cpu, u32 cause, u32 cia) {
+    cpu->program_exception |= cause;
+    ppc_take_exception(cpu, PPC_EXC_PROGRAM, PPC_VECTOR_PROGRAM, cia, cause);
+}
+
+void ppc_system_call_exception(CPUState* cpu, u32 cia) {
+    ppc_take_exception(cpu, PPC_EXC_SYSTEM_CALL, PPC_VECTOR_SYSTEM_CALL, cia + 4u, 0);
+}
+
+void ppc_dsi_exception(CPUState* cpu, u32 ea, u32 cia, u32 dsisr) {
+    cpu->dar = ea;
+    cpu->dsisr = dsisr;
+    ppc_take_exception(cpu, PPC_EXC_DSI, PPC_VECTOR_DSI, cia, 0);
+}
+
+void ppc_alignment_exception(CPUState* cpu, u32 ea, u32 cia) {
+    cpu->dar = ea;
+    ppc_take_exception(cpu, PPC_EXC_ALIGNMENT, PPC_VECTOR_ALIGNMENT, cia, 0);
+}
+
+u32 ppc_mftb(CPUState* cpu, u16 tbr, u32 cia) {
+    if (tbr == 268)
+        return (u32)cpu->timebase;
+    if (tbr == 269)
+        return (u32)(cpu->timebase >> 32);
+
+    ppc_program_exception(cpu, PPC_PROGRAM_ILLEGAL, cia);
+    return 0;
+}
+
+void ppc_rfi(CPUState* cpu, u32 cia) {
+    if (cpu->msr & PPC_MSR_PR) {
+        ppc_program_exception(cpu, PPC_PROGRAM_PRIV, cia);
+        return;
+    }
+
+    cpu->msr = (cpu->msr & ~PPC_MSR_RFI_MASK) | (cpu->srr1 & PPC_MSR_RFI_MASK);
+    cpu->msr &= ~PPC_MSR_POW;
+    cpu->pc = cpu->srr0 & ~3u;
+}
+
+void ppc_dcbz_l(CPUState* cpu, u32 ea, u32 cia) {
+    if (cpu->msr & PPC_MSR_PR) {
+        ppc_program_exception(cpu, PPC_PROGRAM_PRIV, cia);
+        return;
+    }
+
+    if ((cpu->hid2 & PPC_HID2_LCE) == 0) {
+        ppc_program_exception(cpu, PPC_PROGRAM_ILLEGAL, cia);
+        return;
+    }
+
+    u32 block = ea & ~31u;
+    u32 slot = (block >> 5) & 511u;
+    bool hit = cpu->locked_cache_valid[slot] && cpu->locked_cache_tag[slot] == block;
+    bool first_hit_error = hit && (cpu->hid2 & PPC_HID2_DCHERR) == 0;
+
+    if (hit) {
+        cpu->hid2 |= PPC_HID2_DCHERR;
+        if (first_hit_error && (cpu->hid2 & PPC_HID2_DCHEE) &&
+            (cpu->msr & PPC_MSR_EE) && (cpu->msr & PPC_MSR_ME)) {
+            ppc_take_exception(cpu, PPC_EXC_MACHINE_CHECK, PPC_VECTOR_MACHINE_CHECK,
+                               cia, PPC_SRR1_MACHINE_CHECK_DCBZL);
+        }
+    } else {
+        cpu->locked_cache_valid[slot] = true;
+        cpu->locked_cache_tag[slot] = block;
+    }
+
+    for (u32 i = 0; i < 32; i += 4)
+        mem_write32(cpu, block + i, 0);
+}
+
+u32 ppc_eciwx(CPUState* cpu, u32 ea, u32 cia) {
+    if ((cpu->ear & PPC_EAR_ENABLE) == 0) {
+        ppc_dsi_exception(cpu, ea, cia, PPC_DSI_EAR_DISABLED);
+        return 0;
+    }
+
+    if ((ea & 3u) != 0) {
+        ppc_alignment_exception(cpu, ea, cia);
+        return 0;
+    }
+
+    u8 rid = (u8)(cpu->ear & 0xFu);
+    cpu->external_addr = ea;
+    cpu->external_rid = rid;
+    cpu->external_read_count++;
+    if (cpu->external_read32)
+        return cpu->external_read32(cpu, ea, rid);
+    return 0;
+}
+
+void ppc_ecowx(CPUState* cpu, u32 ea, u32 value, u32 cia) {
+    if ((cpu->ear & PPC_EAR_ENABLE) == 0) {
+        ppc_dsi_exception(cpu, ea, cia, PPC_DSI_EAR_DISABLED);
+        return;
+    }
+
+    if ((ea & 3u) != 0) {
+        ppc_alignment_exception(cpu, ea, cia);
+        return;
+    }
+
+    u8 rid = (u8)(cpu->ear & 0xFu);
+    cpu->external_addr = ea;
+    cpu->external_value = value;
+    cpu->external_rid = rid;
+    cpu->external_write_count++;
+    if (cpu->external_write32)
+        cpu->external_write32(cpu, ea, value, rid);
+}
+
+void ppc_tlbie(CPUState* cpu, u32 ea, u32 cia) {
+    if (cpu->msr & PPC_MSR_PR) {
+        ppc_program_exception(cpu, PPC_PROGRAM_PRIV, cia);
+        return;
+    }
+
+    cpu->tlb_last_vps = (ea >> 12) & 0xFFFFu;
+    cpu->tlb_last_index = (ea >> 12) & 0x3Fu;
+    cpu->tlb_invalidate_count++;
 }
 
 bool ppc_trap_condition(u8 to, u32 a, u32 b) {

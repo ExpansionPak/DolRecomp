@@ -42,6 +42,8 @@ typedef enum {
     PPC_OP_BC,
     PPC_OP_BCLR,
     PPC_OP_BCCTR,
+    PPC_OP_SC,
+    PPC_OP_RFI,
     PPC_OP_CRAND,
     PPC_OP_CRANDC,
     PPC_OP_CREQV,
@@ -55,6 +57,7 @@ typedef enum {
     PPC_OP_MTCRF,
     PPC_OP_MFSPR,
     PPC_OP_MTSPR,
+    PPC_OP_MFTB,
     PPC_OP_CMP,
     PPC_OP_CMPL,
     PPC_OP_TWI,
@@ -220,6 +223,7 @@ typedef enum {
     PPC_OP_DIVWU,
     PPC_OP_DIVWUO,
     PPC_OP_DCBZ,
+    PPC_OP_DCBZ_L,
     PPC_OP_DCBST,
     PPC_OP_DCBF,
     PPC_OP_DCBTST,
@@ -236,7 +240,10 @@ typedef enum {
     PPC_OP_MFSRIN,
     PPC_OP_MTSR,
     PPC_OP_MTSRIN,
+    PPC_OP_TLBIE,
     PPC_OP_TLBSYNC,
+    PPC_OP_ECIWX,
+    PPC_OP_ECOWX,
     PPC_OP_COUNT
 } PPCOpcode;
 

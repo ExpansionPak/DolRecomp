@@ -1437,6 +1437,16 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         emit_dcbz(out, inst);
         break;
 
+    case PPC_OP_DCBZ_L:
+        fprintf(out, "    {\n");
+        fprintf(out, "        u32 ea = ");
+        emit_xform_ea(out, inst->rA, inst->rB, false);
+        fprintf(out, ";\n");
+        fprintf(out, "        ppc_dcbz_l(ctx, ea, 0x%08Xu);\n", inst->address);
+        fprintf(out, "        if (ctx->exception) return;\n");
+        fprintf(out, "    }\n");
+        break;
+
     case PPC_OP_DCBST:
     case PPC_OP_DCBF:
     case PPC_OP_DCBTST:
@@ -1494,17 +1504,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     case PPC_OP_TWI:
         fprintf(out, "    if (ppc_trap_condition(%uu, ctx->gpr[%u], (u32)(s32)%d)) {\n",
                 inst->to, inst->rA, (int)inst->simm);
-        fprintf(out, "        ctx->exception |= PPC_EXC_PROGRAM;\n");
-        fprintf(out, "        ctx->program_exception |= PPC_PROGRAM_TRAP;\n");
+        fprintf(out, "        ppc_program_exception(ctx, PPC_PROGRAM_TRAP, 0x%08Xu);\n", inst->address);
+        fprintf(out, "        return;\n");
         fprintf(out, "    }\n");
         break;
 
     case PPC_OP_TW:
         fprintf(out, "    if (ppc_trap_condition(%uu, ctx->gpr[%u], ctx->gpr[%u])) {\n",
                 inst->to, inst->rA, inst->rB);
-        fprintf(out, "        ctx->exception |= PPC_EXC_PROGRAM;\n");
-        fprintf(out, "        ctx->program_exception |= PPC_PROGRAM_TRAP;\n");
+        fprintf(out, "        ppc_program_exception(ctx, PPC_PROGRAM_TRAP, 0x%08Xu);\n", inst->address);
+        fprintf(out, "        return;\n");
         fprintf(out, "    }\n");
+        break;
+
+    case PPC_OP_SC:
+        fprintf(out, "    ppc_system_call_exception(ctx, 0x%08Xu);\n", inst->address);
+        fprintf(out, "    return;\n");
+        break;
+
+    case PPC_OP_RFI:
+        fprintf(out, "    ppc_rfi(ctx, 0x%08Xu);\n", inst->address);
+        fprintf(out, "    return;\n");
         break;
 
     case PPC_OP_CRAND:  emit_cr_logical(out, inst, "a & b"); break;
@@ -1583,11 +1603,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
                 inst->rB, inst->rS);
         break;
 
+    case PPC_OP_MFTB:
+        fprintf(out, "    ctx->gpr[%u] = ppc_mftb(ctx, %uu, 0x%08Xu);\n",
+                inst->rD, inst->spr, inst->address);
+        fprintf(out, "    if (ctx->exception) return;\n");
+        break;
+
     case PPC_OP_MFSPR:
         switch (inst->spr) {
         case 1: fprintf(out, "    ctx->gpr[%u] = ctx->xer;\n", inst->rD); break;
         case 8: fprintf(out, "    ctx->gpr[%u] = ctx->lr;\n", inst->rD); break;
         case 9: fprintf(out, "    ctx->gpr[%u] = ctx->ctr;\n", inst->rD); break;
+        case 26: fprintf(out, "    ctx->gpr[%u] = ctx->srr0;\n", inst->rD); break;
+        case 27: fprintf(out, "    ctx->gpr[%u] = ctx->srr1;\n", inst->rD); break;
+        case 268:
+        case 269:
+            fprintf(out, "    ctx->gpr[%u] = ppc_mftb(ctx, %uu, 0x%08Xu);\n",
+                    inst->rD, inst->spr, inst->address);
+            fprintf(out, "    if (ctx->exception) return;\n");
+            break;
+        case 282: fprintf(out, "    ctx->gpr[%u] = ctx->ear;\n", inst->rD); break;
+        case 920: fprintf(out, "    ctx->gpr[%u] = ctx->hid2;\n", inst->rD); break;
         default:
             fprintf(out, "    // TODO: mfspr %u\n", inst->spr);
             fprintf(out, "    ctx->gpr[%u] = 0;\n", inst->rD);
@@ -1600,10 +1636,19 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         case 1: fprintf(out, "    ctx->xer = ctx->gpr[%u];\n", inst->rS); break;
         case 8: fprintf(out, "    ctx->lr = ctx->gpr[%u];\n", inst->rS); break;
         case 9: fprintf(out, "    ctx->ctr = ctx->gpr[%u];\n", inst->rS); break;
+        case 26: fprintf(out, "    ctx->srr0 = ctx->gpr[%u];\n", inst->rS); break;
+        case 27: fprintf(out, "    ctx->srr1 = ctx->gpr[%u];\n", inst->rS); break;
+        case 282: fprintf(out, "    ctx->ear = ctx->gpr[%u];\n", inst->rS); break;
+        case 920: fprintf(out, "    ctx->hid2 = ctx->gpr[%u];\n", inst->rS); break;
         default:
             fprintf(out, "    // TODO: mtspr %u\n", inst->spr);
             break;
         }
+        break;
+
+    case PPC_OP_TLBIE:
+        fprintf(out, "    ppc_tlbie(ctx, ctx->gpr[%u], 0x%08Xu);\n", inst->rB, inst->address);
+        fprintf(out, "    if (ctx->exception) return;\n");
         break;
 
     case PPC_OP_SYNC:
@@ -1611,6 +1656,28 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     case PPC_OP_ISYNC:
     case PPC_OP_TLBSYNC:
         fprintf(out, "    ppc_memory_fence();\n");
+        break;
+
+    case PPC_OP_ECIWX:
+        fprintf(out, "    {\n");
+        fprintf(out, "        u32 ea = ");
+        emit_xform_ea(out, inst->rA, inst->rB, false);
+        fprintf(out, ";\n");
+        fprintf(out, "        u32 value = ppc_eciwx(ctx, ea, 0x%08Xu);\n", inst->address);
+        fprintf(out, "        if (ctx->exception) return;\n");
+        fprintf(out, "        ctx->gpr[%u] = value;\n", inst->rD);
+        fprintf(out, "    }\n");
+        break;
+
+    case PPC_OP_ECOWX:
+        fprintf(out, "    {\n");
+        fprintf(out, "        u32 ea = ");
+        emit_xform_ea(out, inst->rA, inst->rB, false);
+        fprintf(out, ";\n");
+        fprintf(out, "        ppc_ecowx(ctx, ea, ctx->gpr[%u], 0x%08Xu);\n",
+                inst->rS, inst->address);
+        fprintf(out, "        if (ctx->exception) return;\n");
+        fprintf(out, "    }\n");
         break;
 
     default:

@@ -35,6 +35,17 @@ static void check_eq64(u64 got, u64 want, const char* name) {
     check_eq((u32)got, (u32)want, label);
 }
 
+static u32 test_external_read32(CPUState* cpu, u32 ea, u8 rid) {
+    (void)cpu;
+    return 0xA5000000u ^ ea ^ ((u32)rid << 8);
+}
+
+static void test_external_write32(CPUState* cpu, u32 ea, u32 value, u8 rid) {
+    cpu->external_addr = ea;
+    cpu->external_value = value;
+    cpu->external_rid = rid;
+}
+
 static u32 make_dform(u32 opcd, u32 rt, u32 ra, u16 imm) {
     return (opcd << 26) | (rt << 21) | (ra << 16) | imm;
 }
@@ -346,10 +357,8 @@ static void exec_inst(CPUState* cpu, const PPCInst* inst) {
         break;
 
     case PPC_OP_TWI:
-        if (ppc_trap_condition(inst->to, cpu->gpr[inst->rA], (u32)(s32)inst->simm)) {
-            cpu->exception |= PPC_EXC_PROGRAM;
-            cpu->program_exception |= PPC_PROGRAM_TRAP;
-        }
+        if (ppc_trap_condition(inst->to, cpu->gpr[inst->rA], (u32)(s32)inst->simm))
+            ppc_program_exception(cpu, PPC_PROGRAM_TRAP, inst->address);
         break;
 
     case PPC_OP_ORI:
@@ -1320,6 +1329,10 @@ static void exec_inst(CPUState* cpu, const PPCInst* inst) {
         break;
     }
 
+    case PPC_OP_DCBZ_L:
+        ppc_dcbz_l(cpu, xform_ea(cpu, inst, false), inst->address);
+        break;
+
     case PPC_OP_DCBST:
     case PPC_OP_DCBF:
     case PPC_OP_DCBTST:
@@ -1332,6 +1345,21 @@ static void exec_inst(CPUState* cpu, const PPCInst* inst) {
     case PPC_OP_EIEIO:
     case PPC_OP_ISYNC:
     case PPC_OP_TLBSYNC:
+        break;
+
+    case PPC_OP_TLBIE:
+        ppc_tlbie(cpu, cpu->gpr[inst->rB], inst->address);
+        break;
+
+    case PPC_OP_ECIWX: {
+        u32 value = ppc_eciwx(cpu, xform_ea(cpu, inst, false), inst->address);
+        if (!cpu->exception)
+            cpu->gpr[inst->rD] = value;
+        break;
+    }
+
+    case PPC_OP_ECOWX:
+        ppc_ecowx(cpu, xform_ea(cpu, inst, false), cpu->gpr[inst->rS], inst->address);
         break;
 
     case PPC_OP_B:
@@ -1366,11 +1394,17 @@ static void exec_inst(CPUState* cpu, const PPCInst* inst) {
         }
         break;
 
+    case PPC_OP_SC:
+        ppc_system_call_exception(cpu, inst->address);
+        break;
+
+    case PPC_OP_RFI:
+        ppc_rfi(cpu, inst->address);
+        break;
+
     case PPC_OP_TW:
-        if (ppc_trap_condition(inst->to, cpu->gpr[inst->rA], cpu->gpr[inst->rB])) {
-            cpu->exception |= PPC_EXC_PROGRAM;
-            cpu->program_exception |= PPC_PROGRAM_TRAP;
-        }
+        if (ppc_trap_condition(inst->to, cpu->gpr[inst->rA], cpu->gpr[inst->rB]))
+            ppc_program_exception(cpu, PPC_PROGRAM_TRAP, inst->address);
         break;
 
     case PPC_OP_CRAND:
@@ -1448,16 +1482,29 @@ static void exec_inst(CPUState* cpu, const PPCInst* inst) {
         cpu->sr[(cpu->gpr[inst->rB] >> 28) & 0xFu] = cpu->gpr[inst->rS];
         break;
 
+    case PPC_OP_MFTB:
+        cpu->gpr[inst->rD] = ppc_mftb(cpu, inst->spr, inst->address);
+        break;
+
     case PPC_OP_MFSPR:
         if (inst->spr == 1) cpu->gpr[inst->rD] = cpu->xer;
         else if (inst->spr == 8) cpu->gpr[inst->rD] = cpu->lr;
         else if (inst->spr == 9) cpu->gpr[inst->rD] = cpu->ctr;
+        else if (inst->spr == 26) cpu->gpr[inst->rD] = cpu->srr0;
+        else if (inst->spr == 27) cpu->gpr[inst->rD] = cpu->srr1;
+        else if (inst->spr == 268 || inst->spr == 269) cpu->gpr[inst->rD] = ppc_mftb(cpu, inst->spr, inst->address);
+        else if (inst->spr == 282) cpu->gpr[inst->rD] = cpu->ear;
+        else if (inst->spr == 920) cpu->gpr[inst->rD] = cpu->hid2;
         break;
 
     case PPC_OP_MTSPR:
         if (inst->spr == 1) cpu->xer = cpu->gpr[inst->rS];
         else if (inst->spr == 8) cpu->lr = cpu->gpr[inst->rS];
         else if (inst->spr == 9) cpu->ctr = cpu->gpr[inst->rS];
+        else if (inst->spr == 26) cpu->srr0 = cpu->gpr[inst->rS];
+        else if (inst->spr == 27) cpu->srr1 = cpu->gpr[inst->rS];
+        else if (inst->spr == 282) cpu->ear = cpu->gpr[inst->rS];
+        else if (inst->spr == 920) cpu->hid2 = cpu->gpr[inst->rS];
         break;
 
     default:
@@ -2806,6 +2853,125 @@ static void test_new_opcodes(CPUState* cpu) {
     cpu->gpr[27] = base; cpu->gpr[28] = 0;
     exec_raw(cpu, 0x7C1BE7AC, BASE); check_eq(cpu->gpr[3], marker, "icbi preserves state");
     exec_raw(cpu, 0x7C00046C, BASE); check_eq(cpu->gpr[3], marker, "tlbsync preserves state");
+
+    cpu->exception = cpu->program_exception = 0;
+    cpu->msr = 0x0000F073u;
+    exec_raw(cpu, 0x44000002, BASE + 0x200);
+    check_eq(cpu->exception & PPC_EXC_SYSTEM_CALL, PPC_EXC_SYSTEM_CALL, "sc raises system call");
+    check_eq(cpu->srr0, BASE + 0x204, "sc stores next CIA in SRR0");
+    check_eq(cpu->srr1, 0x0000F073u & 0x87C0FFFFu, "sc stores MSR bits in SRR1");
+    check_eq(cpu->pc, 0xFFF00C00u, "sc vectors through IP");
+    check_eq(cpu->msr, 0x00001040u, "sc clears exception MSR bits");
+
+    cpu->exception = cpu->program_exception = 0;
+    cpu->msr = 0xFFFFBFFFu;
+    cpu->srr0 = BASE + 0x123;
+    cpu->srr1 = 0x0000F073u;
+    exec_raw(cpu, 0x4C000064, BASE + 0x300);
+    check_eq(cpu->pc, BASE + 0x120, "rfi resumes from SRR0");
+    check_eq(cpu->msr, ((0xFFFFBFFFu & ~0x87C0FFFFu) | (0x0000F073u & 0x87C0FFFFu)) & ~0x00040000u,
+             "rfi restores masked MSR bits and clears POW");
+
+    cpu->exception = cpu->program_exception = 0;
+    cpu->msr = 0x00004000u;
+    exec_raw(cpu, 0x4C000064, BASE + 0x302);
+    check_eq(cpu->exception & PPC_EXC_PROGRAM, PPC_EXC_PROGRAM, "rfi in user mode raises program");
+    check_eq(cpu->program_exception & PPC_PROGRAM_PRIV, PPC_PROGRAM_PRIV, "rfi in user mode is privileged");
+
+    cpu->timebase = 0x1122334455667788ull;
+    exec_raw(cpu, 0x7C6C42E6, BASE);
+    check_eq(cpu->gpr[3], 0x55667788u, "mftb reads TBL");
+    exec_raw(cpu, 0x7C8D42E6, BASE);
+    check_eq(cpu->gpr[4], 0x11223344u, "mftbu reads TBU");
+    cpu->exception = cpu->program_exception = 0;
+    exec_raw(cpu, make_xfx(371, 5, 270), BASE + 0x304);
+    check_eq(cpu->exception & PPC_EXC_PROGRAM, PPC_EXC_PROGRAM, "mftb invalid TBR raises program");
+    check_eq(cpu->program_exception & PPC_PROGRAM_ILLEGAL, PPC_PROGRAM_ILLEGAL, "mftb invalid TBR is illegal");
+
+    cpu->exception = cpu->program_exception = 0;
+    cpu->hid2 = 0;
+    cpu->gpr[5] = base;
+    cpu->gpr[6] = 0x80;
+    mem_write32(cpu, base + 0x80, 0x11111111u);
+    exec_raw(cpu, 0x100537EC, BASE + 0x308);
+    check_eq(cpu->exception & PPC_EXC_PROGRAM, PPC_EXC_PROGRAM, "dcbz_l without LCE raises program");
+    check_eq(cpu->program_exception & PPC_PROGRAM_ILLEGAL, PPC_PROGRAM_ILLEGAL, "dcbz_l without LCE is illegal");
+    check_eq(mem_read32(cpu, base + 0x80), 0x11111111u, "dcbz_l illegal leaves memory");
+
+    cpu->exception = cpu->program_exception = 0;
+    cpu->hid2 = 0x10000000u;
+    memset(cpu->locked_cache_valid, 0, sizeof(cpu->locked_cache_valid));
+    for (u32 off = 0x80; off < 0xA0; off += 4) mem_write32(cpu, base + off, 0x22222222u);
+    exec_raw(cpu, 0x100537EC, BASE + 0x30C);
+    check_eq(mem_read32(cpu, base + 0x80), 0, "dcbz_l clears first word");
+    check_eq(mem_read32(cpu, base + 0x9C), 0, "dcbz_l clears last word");
+    check_eq(cpu->hid2 & 0x00800000u, 0, "dcbz_l miss does not set DCHERR");
+    exec_raw(cpu, 0x100537EC, BASE + 0x310);
+    check_eq(cpu->hid2 & 0x00800000u, 0x00800000u, "dcbz_l hit sets DCHERR");
+
+    cpu->exception = cpu->program_exception = 0;
+    cpu->hid2 = 0x10080000u;
+    cpu->msr = 0x00009000u;
+    memset(cpu->locked_cache_valid, 0, sizeof(cpu->locked_cache_valid));
+    exec_raw(cpu, 0x100537EC, BASE + 0x314);
+    exec_raw(cpu, 0x100537EC, BASE + 0x318);
+    check_eq(cpu->exception & PPC_EXC_MACHINE_CHECK, PPC_EXC_MACHINE_CHECK, "dcbz_l hit can raise machine check");
+    check_eq(cpu->srr1 & 0x00200000u, 0x00200000u, "dcbz_l machine check marks SRR1 bit 10");
+
+    cpu->exception = cpu->program_exception = 0;
+    cpu->gpr[7] = 0x81234000u;
+    exec_raw(cpu, 0x7C003A64, BASE + 0x31C);
+    check_eq(cpu->tlb_invalidate_count, 1, "tlbie increments invalidate count");
+    check_eq(cpu->tlb_last_vps, 0x1234, "tlbie records VPS");
+    check_eq(cpu->tlb_last_index, 0x34, "tlbie records TLB index");
+
+    cpu->exception = cpu->program_exception = 0;
+    cpu->ear = 0;
+    cpu->gpr[8] = 0xDEADBEEFu;
+    cpu->gpr[9] = base;
+    cpu->gpr[10] = 0;
+    exec_raw(cpu, 0x7D09526C, BASE + 0x320);
+    check_eq(cpu->exception & PPC_EXC_DSI, PPC_EXC_DSI, "eciwx EAR disabled raises DSI");
+    check_eq(cpu->dar, base, "eciwx DSI stores DAR");
+    check_eq(cpu->dsisr, PPC_DSI_EAR_DISABLED, "eciwx DSI marks EAR disabled");
+    check_eq(cpu->gpr[8], 0xDEADBEEFu, "eciwx exception leaves rD");
+
+    cpu->exception = cpu->program_exception = 0;
+    cpu->ear = 0x8000000Du;
+    cpu->gpr[9] = base;
+    cpu->gpr[10] = 2;
+    exec_raw(cpu, 0x7D09526C, BASE + 0x324);
+    check_eq(cpu->exception & PPC_EXC_ALIGNMENT, PPC_EXC_ALIGNMENT, "eciwx unaligned raises alignment");
+    check_eq(cpu->dar, base + 2, "eciwx alignment stores DAR");
+
+    cpu->exception = cpu->program_exception = 0;
+    cpu->external_read32 = test_external_read32;
+    cpu->gpr[9] = base;
+    cpu->gpr[10] = 4;
+    exec_raw(cpu, 0x7D09526C, BASE + 0x328);
+    check_eq(cpu->gpr[8], test_external_read32(cpu, base + 4, 0xD), "eciwx reads external word");
+    check_eq(cpu->external_rid, 0xD, "eciwx records RID");
+    check_eq(cpu->external_addr, base + 4, "eciwx records address");
+
+    cpu->exception = cpu->program_exception = 0;
+    cpu->external_write32 = test_external_write32;
+    cpu->ear = 0x8000000Cu;
+    cpu->gpr[11] = 0xCAFEBABEu;
+    cpu->gpr[12] = base;
+    cpu->gpr[13] = 8;
+    exec_raw(cpu, 0x7D6C6B6C, BASE + 0x32C);
+    check_eq(cpu->external_write_count, 1, "ecowx records write count");
+    check_eq(cpu->external_rid, 0xC, "ecowx records RID");
+    check_eq(cpu->external_addr, base + 8, "ecowx records address");
+    check_eq(cpu->external_value, 0xCAFEBABEu, "ecowx records value");
+
+    cpu->exception = cpu->program_exception = 0;
+    cpu->msr = 0x00004000u;
+    exec_raw(cpu, 0x7C003A64, BASE + 0x330);
+    check_eq(cpu->exception & PPC_EXC_PROGRAM, PPC_EXC_PROGRAM, "tlbie in user mode raises program");
+    check_eq(cpu->program_exception & PPC_PROGRAM_PRIV, PPC_PROGRAM_PRIV, "tlbie in user mode is privileged");
+    cpu->msr = 0;
+    cpu->exception = cpu->program_exception = 0;
 }
 
 static void check_cr_logic(CPUState* cpu, const char* name, u32 xo,

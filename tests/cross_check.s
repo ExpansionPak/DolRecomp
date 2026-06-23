@@ -222,6 +222,13 @@ dcbt r23, r24
 dcbi r25, r26
 icbi r27, r28
 tlbsync
+sc
+rfi
+mftb r3, 268
+dcbz_l r5, r6
+tlbie r7
+eciwx r8, r9, r10
+ecowx r11, r12, r13
 
 branch_target:
 nop
