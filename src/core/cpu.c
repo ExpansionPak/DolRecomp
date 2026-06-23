@@ -33,16 +33,22 @@ void cpu_free(CPUState* cpu) {
 void cpu_reset(CPUState* cpu) {
     u8* ram = cpu->ram;
     u32 ram_size = cpu->ram_size;
+    PPCExternalRead external_read = cpu->external_read;
+    PPCExternalWrite external_write = cpu->external_write;
     PPCExternalRead32 external_read32 = cpu->external_read32;
     PPCExternalWrite32 external_write32 = cpu->external_write32;
     PPCInstructionFallback instruction_fallback = cpu->instruction_fallback;
+    void* external_user_data = cpu->external_user_data;
 
     memset(cpu, 0, sizeof(*cpu));
     cpu->ram = ram;
     cpu->ram_size = ram_size;
+    cpu->external_read = external_read;
+    cpu->external_write = external_write;
     cpu->external_read32 = external_read32;
     cpu->external_write32 = external_write32;
     cpu->instruction_fallback = instruction_fallback;
+    cpu->external_user_data = external_user_data;
 
     if (cpu->ram)
         memset(cpu->ram, 0, cpu->ram_size);
@@ -106,6 +112,8 @@ static u32 exception_msr(u32 old_msr, u32 exception) {
 u64 mem_read64(CPUState* cpu, u32 addr) {
     u32 offset = translate_addr(addr, cpu->ram_size);
     if (offset == (u32)-1 || offset + 8 > cpu->ram_size) {
+        if (cpu->external_read)
+            return cpu->external_read(cpu, addr, 8);
         fprintf(stderr, "warn: read64 from unmapped 0x%08X\n", addr);
         return 0;
     }
@@ -115,6 +123,10 @@ u64 mem_read64(CPUState* cpu, u32 addr) {
 void mem_write64(CPUState* cpu, u32 addr, u64 value) {
     u32 offset = translate_addr(addr, cpu->ram_size);
     if (offset == (u32)-1 || offset + 8 > cpu->ram_size) {
+        if (cpu->external_write) {
+            cpu->external_write(cpu, addr, value, 8);
+            return;
+        }
         fprintf(stderr, "warn: write64 to unmapped 0x%08X\n", addr);
         return;
     }
@@ -125,6 +137,8 @@ void mem_write64(CPUState* cpu, u32 addr, u64 value) {
 u32 mem_read32(CPUState* cpu, u32 addr) {
     u32 offset = translate_addr(addr, cpu->ram_size);
     if (offset == (u32)-1 || offset + 4 > cpu->ram_size) {
+        if (cpu->external_read)
+            return (u32)cpu->external_read(cpu, addr, 4);
         fprintf(stderr, "warn: read32 from unmapped 0x%08X\n", addr);
         return 0;
     }
@@ -134,6 +148,10 @@ u32 mem_read32(CPUState* cpu, u32 addr) {
 void mem_write32(CPUState* cpu, u32 addr, u32 value) {
     u32 offset = translate_addr(addr, cpu->ram_size);
     if (offset == (u32)-1 || offset + 4 > cpu->ram_size) {
+        if (cpu->external_write) {
+            cpu->external_write(cpu, addr, value, 4);
+            return;
+        }
         fprintf(stderr, "warn: write32 to unmapped 0x%08X\n", addr);
         return;
     }
@@ -144,6 +162,8 @@ void mem_write32(CPUState* cpu, u32 addr, u32 value) {
 u16 mem_read16(CPUState* cpu, u32 addr) {
     u32 offset = translate_addr(addr, cpu->ram_size);
     if (offset == (u32)-1 || offset + 2 > cpu->ram_size) {
+        if (cpu->external_read)
+            return (u16)cpu->external_read(cpu, addr, 2);
         fprintf(stderr, "warn: read16 from unmapped 0x%08X\n", addr);
         return 0;
     }
@@ -153,6 +173,10 @@ u16 mem_read16(CPUState* cpu, u32 addr) {
 void mem_write16(CPUState* cpu, u32 addr, u16 value) {
     u32 offset = translate_addr(addr, cpu->ram_size);
     if (offset == (u32)-1 || offset + 2 > cpu->ram_size) {
+        if (cpu->external_write) {
+            cpu->external_write(cpu, addr, value, 2);
+            return;
+        }
         fprintf(stderr, "warn: write16 to unmapped 0x%08X\n", addr);
         return;
     }
@@ -163,6 +187,8 @@ void mem_write16(CPUState* cpu, u32 addr, u16 value) {
 u8 mem_read8(CPUState* cpu, u32 addr) {
     u32 offset = translate_addr(addr, cpu->ram_size);
     if (offset == (u32)-1) {
+        if (cpu->external_read)
+            return (u8)cpu->external_read(cpu, addr, 1);
         fprintf(stderr, "warn: read8 from unmapped 0x%08X\n", addr);
         return 0;
     }
@@ -172,6 +198,10 @@ u8 mem_read8(CPUState* cpu, u32 addr) {
 void mem_write8(CPUState* cpu, u32 addr, u8 value) {
     u32 offset = translate_addr(addr, cpu->ram_size);
     if (offset == (u32)-1) {
+        if (cpu->external_write) {
+            cpu->external_write(cpu, addr, value, 1);
+            return;
+        }
         fprintf(stderr, "warn: write8 to unmapped 0x%08X\n", addr);
         return;
     }

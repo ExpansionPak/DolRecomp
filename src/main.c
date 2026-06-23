@@ -936,6 +936,67 @@ static void emit_chunk_prototype(FILE* out, u32 func_addr) {
 }
 
 typedef struct {
+    u32 start;
+    u32 end;
+} FunctionRange;
+
+typedef struct {
+    FunctionRange* ranges;
+    u32 count;
+    u32 capacity;
+} FunctionList;
+
+static void function_list_free(FunctionList* list) {
+    free(list->ranges);
+    list->ranges = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+static int function_list_add(FunctionList* list, u32 start, u32 end) {
+    if (list->count == list->capacity) {
+        u32 new_capacity = list->capacity ? list->capacity * 2u : 64u;
+        FunctionRange* new_ranges =
+            (FunctionRange*)realloc(list->ranges, new_capacity * sizeof(*new_ranges));
+        if (!new_ranges) {
+            fprintf(stderr, "error: out of memory\n");
+            return 0;
+        }
+        list->ranges = new_ranges;
+        list->capacity = new_capacity;
+    }
+
+    list->ranges[list->count].start = start;
+    list->ranges[list->count].end = end;
+    list->count++;
+    return 1;
+}
+
+static void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point) {
+    fprintf(out, "\n#define DOLRECOMP_ENTRY_POINT 0x%08Xu\n", entry_point);
+    fprintf(out, "\ntypedef void (*DolRecompFunction)(CPUState* ctx);\n");
+    fprintf(out, "\nstatic inline int dolrecomp_call(CPUState* ctx, u32 address) {\n");
+    for (u32 i = 0; i < funcs->count; i++) {
+        fprintf(out,
+                "    if (address >= 0x%08Xu && address < 0x%08Xu && "
+                "((address - 0x%08Xu) & 3u) == 0u) { func_%08X(ctx); return 1; }\n",
+                funcs->ranges[i].start, funcs->ranges[i].end,
+                funcs->ranges[i].start, funcs->ranges[i].start);
+    }
+    fprintf(out, "    return 0;\n");
+    fprintf(out, "}\n");
+    fprintf(out, "\nstatic inline int dolrecomp_run_blocks(CPUState* ctx, u32 max_blocks) {\n");
+    fprintf(out, "    u32 blocks = 0;\n");
+    fprintf(out, "    while (max_blocks == 0u || blocks < max_blocks) {\n");
+    fprintf(out, "        if (!dolrecomp_call(ctx, ctx->pc)) return 0;\n");
+    fprintf(out, "        if (ctx->exception) return 0;\n");
+    fprintf(out, "        blocks++;\n");
+    fprintf(out, "    }\n");
+    fprintf(out, "    return 1;\n");
+    fprintf(out, "}\n");
+}
+
+typedef struct {
     const char* label;
     const char* name;
     const u8* data;
@@ -1322,7 +1383,7 @@ static u32 effective_chunk_jobs(u32 job_count, u32 requested_jobs) {
 static int emit_code_sections_split(const LoadedCodeSection* sections,
                                     u32 section_count,
                                     const char* output_path,
-                                    DolRecompCPU cpu, u32 jobs,
+                                    DolRecompCPU cpu, u32 entry_point, u32 jobs,
                                     int local_chunks_dir) {
     char stem[1024];
     char header_path[1100];
@@ -1382,6 +1443,7 @@ static int emit_code_sections_split(const LoadedCodeSection* sections,
     fprintf(header, "\n// Function entry points\n");
 
     u32 file_count = 0;
+    FunctionList funcs = {0};
 
     for (u32 s = 0; s < section_count; s++) {
         const LoadedCodeSection* section = &sections[s];
@@ -1404,6 +1466,7 @@ static int emit_code_sections_split(const LoadedCodeSection* sections,
         PPCInst* insts = (PPCInst*)malloc(num_insts * sizeof(PPCInst));
         if (!insts) {
             fprintf(stderr, "error: out of memory\n");
+            function_list_free(&funcs);
             fclose(header);
             fclose(manifest);
             return 0;
@@ -1440,6 +1503,7 @@ static int emit_code_sections_split(const LoadedCodeSection* sections,
         ChunkJob* chunk_jobs = (ChunkJob*)calloc(section_job_count, sizeof(ChunkJob));
         if (!chunk_jobs) {
             fprintf(stderr, "error: out of memory\n");
+            function_list_free(&funcs);
             free(insts);
             fclose(header);
             fclose(manifest);
@@ -1460,6 +1524,7 @@ static int emit_code_sections_split(const LoadedCodeSection* sections,
                          section->label, section->index, func_addr) >=
                 (int)sizeof(chunk_name)) {
                 fprintf(stderr, "error: chunk name is too long\n");
+                function_list_free(&funcs);
                 free(chunk_jobs);
                 free(insts);
                 fclose(header);
@@ -1474,6 +1539,7 @@ static int emit_code_sections_split(const LoadedCodeSection* sections,
 
             if (!join_path(job->path, sizeof(job->path), chunks_dir, chunk_name)) {
                 fprintf(stderr, "error: chunk path is too long\n");
+                function_list_free(&funcs);
                 free(chunk_jobs);
                 free(insts);
                 fclose(header);
@@ -1484,6 +1550,7 @@ static int emit_code_sections_split(const LoadedCodeSection* sections,
             if (snprintf(job->include_name, sizeof(job->include_name), "%s",
                          include_name) >= (int)sizeof(job->include_name)) {
                 fprintf(stderr, "error: output include name is too long\n");
+                function_list_free(&funcs);
                 free(chunk_jobs);
                 free(insts);
                 fclose(header);
@@ -1492,6 +1559,14 @@ static int emit_code_sections_split(const LoadedCodeSection* sections,
             }
 
             emit_chunk_prototype(header, func_addr);
+            if (!function_list_add(&funcs, func_addr, func_addr + chunk_count * 4u)) {
+                function_list_free(&funcs);
+                free(chunk_jobs);
+                free(insts);
+                fclose(header);
+                fclose(manifest);
+                return 0;
+            }
             fprintf(manifest, "// %s/%s\n", chunks_label, chunk_name);
             file_count++;
         }
@@ -1500,6 +1575,7 @@ static int emit_code_sections_split(const LoadedCodeSection* sections,
         printf("  writing %u chunks with %u job%s\n",
                section_job_count, active_jobs, active_jobs == 1 ? "" : "s");
         if (!run_chunk_jobs(chunk_jobs, section_job_count, jobs)) {
+            function_list_free(&funcs);
             free(chunk_jobs);
             free(insts);
             fclose(header);
@@ -1511,7 +1587,9 @@ static int emit_code_sections_split(const LoadedCodeSection* sections,
         free(insts);
     }
 
+    emit_dispatch_helpers(header, &funcs, entry_point);
     emit_footer(header);
+    function_list_free(&funcs);
     fprintf(manifest, "\n// %u C files\n", file_count);
 
     fclose(header);
@@ -1548,7 +1626,8 @@ static int emit_dol_split(const DOLFile* dol, const char* output_path,
     }
 
     return emit_code_sections_split(sections, section_count, output_path, cpu,
-                                    jobs, local_chunks_dir);
+                                    dol->header.entry_point, jobs,
+                                    local_chunks_dir);
 }
 
 static int emit_rpx_split(const RPXFile* rpx, const char* output_path,
@@ -1569,7 +1648,8 @@ static int emit_rpx_split(const RPXFile* rpx, const char* output_path,
     }
 
     return emit_code_sections_split(sections, rpx->code_section_count,
-                                    output_path, cpu, jobs, local_chunks_dir);
+                                    output_path, cpu, 0, jobs,
+                                    local_chunks_dir);
 }
 
 int main(int argc, char** argv) {

@@ -302,10 +302,15 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
 }
 
 static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target) {
+    bool local_backward = local_target && inst->branch_target <= inst->address;
+
     if (inst->lk) {
         fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
     }
-    if (local_target) {
+    if (local_backward) {
+        fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
+        fprintf(out, "            return;\n");
+    } else if (local_target) {
         fprintf(out, "            goto label_%08X;\n", inst->branch_target);
     } else {
         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
@@ -1749,11 +1754,20 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     u32 func_end = func_addr + count * 4u;
 
     fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
+    fprintf(out, "    switch (ctx->pc) {\n");
+    for (i = 0; i < count; i++) {
+        fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
+                insts[i].address, insts[i].address);
+    }
+    fprintf(out, "    default: return;\n");
+    fprintf(out, "    }\n");
 
     for (i = 0; i < count; i++) {
         fprintf(out, "label_%08X:\n", insts[i].address);
+        fprintf(out, "    ctx->pc = 0x%08Xu;\n", insts[i].address);
         emit_instruction_with_range(out, &insts[i], func_addr, func_end);
     }
 
+    fprintf(out, "    ctx->pc = 0x%08Xu;\n", func_end);
     fprintf(out, "}\n\n");
 }

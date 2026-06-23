@@ -35,6 +35,8 @@
 #define PPC_HID2_DCHEE  0x00080000u
 
 typedef struct CPUState CPUState;
+typedef u64 (*PPCExternalRead)(CPUState* cpu, u32 ea, u8 size);
+typedef void (*PPCExternalWrite)(CPUState* cpu, u32 ea, u64 value, u8 size);
 typedef u32 (*PPCExternalRead32)(CPUState* cpu, u32 ea, u8 rid);
 typedef void (*PPCExternalWrite32)(CPUState* cpu, u32 ea, u32 value, u8 rid);
 typedef void (*PPCInstructionFallback)(CPUState* cpu, u32 raw, u32 cia);
@@ -73,9 +75,12 @@ struct CPUState {
     bool reserve_valid;
     u32 locked_cache_tag[512];
     bool locked_cache_valid[512];
+    PPCExternalRead external_read;
+    PPCExternalWrite external_write;
     PPCExternalRead32 external_read32;
     PPCExternalWrite32 external_write32;
     PPCInstructionFallback instruction_fallback;
+    void* external_user_data;
 
     u8* ram;
     u32 ram_size;
