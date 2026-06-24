@@ -125,3 +125,8 @@ External contributions are paused while CPU behavior and codegen settle. Forks a
 ## Notice
 
 This repo is still not finished, but it's good enough to work with now. Any problems you run into with it can be reported in the Discord with it's relative channel (#dolrecomp)
+
+
+## SMC (Self-Modifying Code)
+
+SMC is currently *unhandled*. You will need to patch the functions manually. DolRecomp will highlight suspicious instructions for review. Patching it out at analysis-time might silently break real behavior.
