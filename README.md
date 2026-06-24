@@ -121,3 +121,7 @@ DolRecomp is GPLv3. Copied code must be license compatible.
 ## Contribution
 
 External contributions are paused while CPU behavior and codegen settle. Forks are welcome.
+
+## Notice
+
+This repo is still not finished, but it's good enough to work with now. Any problems you run into with it can be reported in the Discord with it's relative channel (#dolrecomp)
