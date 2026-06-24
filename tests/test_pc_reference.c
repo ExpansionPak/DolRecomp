@@ -52,6 +52,16 @@ static void test_instruction_fallback(CPUState* cpu, u32 raw, u32 cia) {
     cpu->gpr[3] = 0x0F1BACCBu;
 }
 
+static bool test_host_call(CPUState* cpu, u32 address) {
+    cpu->external_addr = address;
+    if (address != BASE + 0x1234u)
+        return false;
+
+    cpu->gpr[3] = 0x484C4501u;
+    cpu->pc = cpu->lr & ~3u;
+    return true;
+}
+
 static u32 make_dform(u32 opcd, u32 rt, u32 ra, u16 imm) {
     return (opcd << 26) | (rt << 21) | (ra << 16) | imm;
 }
@@ -3241,6 +3251,23 @@ static void test_branches_cr_spr(CPUState* cpu) {
     check_eq(cpu->gpr[10], XER_CA, "mfspr/mfxer reads XER");
 }
 
+static void test_host_hooks(CPUState* cpu) {
+    printf("--- host hooks ---\n");
+
+    cpu_reset(cpu);
+    check_eq(ppc_host_call(cpu, BASE + 0x1234u), 0, "host call missing callback");
+
+    cpu->host_call = test_host_call;
+    cpu_reset(cpu);
+    cpu->lr = BASE + 0x80u;
+    check_eq(ppc_host_call(cpu, BASE + 0x1200u), 0, "host call rejects unknown address");
+    check_eq(cpu->external_addr, BASE + 0x1200u, "host call sees rejected address");
+    check_eq(ppc_host_call(cpu, BASE + 0x1234u), 1, "host call accepts registered address");
+    check_eq(cpu->gpr[3], 0x484C4501u, "host call writes result register");
+    check_eq(cpu->pc, BASE + 0x80u, "host call returns through LR");
+    cpu->host_call = NULL;
+}
+
 int main(void) {
     CPUState cpu;
     if (!cpu_init(&cpu))
@@ -3262,6 +3289,7 @@ int main(void) {
     test_fpu_arithmetic(&cpu);
     test_new_opcodes(&cpu);
     test_branches_cr_spr(&cpu);
+    test_host_hooks(&cpu);
 
     cpu_free(&cpu);
 

@@ -322,7 +322,7 @@ static int resolve_game_name(const char* title_id, char* out, size_t out_size) {
 
 static void describe_game(char* out, size_t out_size, const char* title_id,
                           int gamecube_mode) {
-    char game_name[256];
+    char game_name[220];
 
     if (gamecube_mode) {
         snprintf(out, out_size, "GameCube DOL");
@@ -976,6 +976,7 @@ static void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entr
     fprintf(out, "\n#define DOLRECOMP_ENTRY_POINT 0x%08Xu\n", entry_point);
     fprintf(out, "\ntypedef void (*DolRecompFunction)(CPUState* ctx);\n");
     fprintf(out, "\nstatic inline int dolrecomp_call(CPUState* ctx, u32 address) {\n");
+    fprintf(out, "    if (ppc_host_call(ctx, address)) return 1;\n");
     for (u32 i = 0; i < funcs->count; i++) {
         fprintf(out,
                 "    if (address >= 0x%08Xu && address < 0x%08Xu && "

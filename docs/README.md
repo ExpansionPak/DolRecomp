@@ -1,10 +1,10 @@
 # docs
 
-design notes, specs, and reference material.
+Project notes and reference material live here.
 
-stuff to put here:
-- PPC 750 (Gekko) instruction set notes
-- GameCube memory map
-- DOL/REL file format docs
-- design decisions and architecture ramblings
-- anything that helps someone new get up to speed
+Good additions for this folder:
+
+- instruction behavior notes
+- memory map notes
+- executable/container format notes
+- design decisions that explain non-obvious codegen choices

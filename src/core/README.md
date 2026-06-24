@@ -1,12 +1,11 @@
 # core
 
-shared foundations that everything else depends on.
+Shared CPU support code used by generated output and tests.
 
-## what goes here
+This layer owns:
 
-- **types** — common typedefs, enums, PPC instruction definitions
-- **config** — project-wide settings, build options
-- **logging** — debug output, error reporting
-- **utilities** — endian helpers, bit manipulation, file I/O wrappers
-
-keep this lean. if something is only used by one module, it belongs in that module.
+- fixed-width types and endian helpers
+- `CPUState`
+- guest memory access helpers
+- CPU behavior helpers that are awkward to inline in emitted C
+- external memory/MMIO and host-call hooks.

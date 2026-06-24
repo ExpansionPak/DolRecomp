@@ -10,6 +10,7 @@ The current project is CPU only. You will need to supply your own runtime.
 - Wii U RPX loading works for executable sections. Compressed RPX sections need zlib.
 - The decoder currently recognizes 236 PowerPC/Gekko/Broadway/Espresso opcodes.
 - The backend emits C in split chunks with `-jN` worker support.
+- Generated dispatch can hand known function addresses to host patches before entering compiled code.
 - The generated C is a compile target and CPU behavior test surface, not a full game runtime yet.
 
 ## Build
@@ -116,3 +117,7 @@ tools/          optional developer utilities
 ## Legal Notes
 
 DolRecomp is GPLv3. Copied code must be license compatible.
+
+## Contribution
+
+External contributions are paused while CPU behavior and codegen settle. Forks are welcome.

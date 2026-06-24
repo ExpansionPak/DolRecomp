@@ -38,6 +38,7 @@ void cpu_reset(CPUState* cpu) {
     PPCExternalRead32 external_read32 = cpu->external_read32;
     PPCExternalWrite32 external_write32 = cpu->external_write32;
     PPCInstructionFallback instruction_fallback = cpu->instruction_fallback;
+    PPCHostCall host_call = cpu->host_call;
     void* external_user_data = cpu->external_user_data;
 
     memset(cpu, 0, sizeof(*cpu));
@@ -48,6 +49,7 @@ void cpu_reset(CPUState* cpu) {
     cpu->external_read32 = external_read32;
     cpu->external_write32 = external_write32;
     cpu->instruction_fallback = instruction_fallback;
+    cpu->host_call = host_call;
     cpu->external_user_data = external_user_data;
 
     if (cpu->ram)
@@ -241,6 +243,10 @@ void ppc_fallback_instruction(CPUState* cpu, u32 raw, u32 cia) {
 
     (void)raw;
     ppc_program_exception(cpu, PPC_PROGRAM_ILLEGAL, cia);
+}
+
+bool ppc_host_call(CPUState* cpu, u32 address) {
+    return cpu->host_call ? cpu->host_call(cpu, address) : false;
 }
 
 void ppc_system_call_exception(CPUState* cpu, u32 cia) {

@@ -40,6 +40,7 @@ typedef void (*PPCExternalWrite)(CPUState* cpu, u32 ea, u64 value, u8 size);
 typedef u32 (*PPCExternalRead32)(CPUState* cpu, u32 ea, u8 rid);
 typedef void (*PPCExternalWrite32)(CPUState* cpu, u32 ea, u32 value, u8 rid);
 typedef void (*PPCInstructionFallback)(CPUState* cpu, u32 raw, u32 cia);
+typedef bool (*PPCHostCall)(CPUState* cpu, u32 address);
 
 struct CPUState {
     u32 gpr[32];
@@ -80,6 +81,7 @@ struct CPUState {
     PPCExternalRead32 external_read32;
     PPCExternalWrite32 external_write32;
     PPCInstructionFallback instruction_fallback;
+    PPCHostCall host_call;
     void* external_user_data;
 
     u8* ram;
@@ -114,6 +116,7 @@ void ppc_set_xer_ov(CPUState* cpu, bool ov);
 void ppc_take_exception(CPUState* cpu, u32 exception, u32 vector, u32 srr0, u32 srr1_info);
 void ppc_program_exception(CPUState* cpu, u32 cause, u32 cia);
 void ppc_fallback_instruction(CPUState* cpu, u32 raw, u32 cia);
+bool ppc_host_call(CPUState* cpu, u32 address);
 void ppc_system_call_exception(CPUState* cpu, u32 cia);
 void ppc_dsi_exception(CPUState* cpu, u32 ea, u32 cia, u32 dsisr);
 void ppc_alignment_exception(CPUState* cpu, u32 ea, u32 cia);

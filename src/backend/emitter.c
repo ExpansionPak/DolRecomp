@@ -306,6 +306,9 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
 
     if (inst->lk) {
         fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
+        fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
+        fprintf(out, "            return;\n");
+        return;
     }
     if (local_backward) {
         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
