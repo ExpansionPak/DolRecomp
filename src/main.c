@@ -7,6 +7,7 @@
 #include <direct.h>
 #include <windows.h>
 #else
+#include <dirent.h>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -19,12 +20,15 @@
 
 #include "core/types.h"
 #include "frontend/dol.h"
+#include "frontend/rel.h"
 #include "frontend/rpx.h"
 #include "frontend/disc_extract.h"
 #include "frontend/decoder.h"
 #include "backend/emitter.h"
 
 #define EMIT_CHUNK_INSTRUCTIONS 4096u
+#define REL_AUTO_BASE 0x80500000u
+#define REL_AUTO_ALIGN 0x10000u
 #define DATABASE_DIR "database"
 #define DATABASE_TITLES_FILE "titles.txt"
 #define DATABASE_SETUP_FLAG ".setup_done.flag"
@@ -56,11 +60,13 @@ static void print_usage(const char* argv0) {
     fprintf(stderr, "extract:  dolrecomp.exe extract game.wbfs output_folder\n");
     fprintf(stderr, "wii:      dolrecomp.exe <input.dol> SUKE01 build\n");
     fprintf(stderr, "gamecube: dolrecomp.exe --gamecube <input.dol> build\n");
+    fprintf(stderr, "rel:      dolrecomp.exe <input.rel | rel_folder> SUKE01 build\n");
     fprintf(stderr, "wii u cpu: dolrecomp.exe --cpu espresso <input.rpx> build\n");
     fprintf(stderr, "with output.c: writes that split C set\n");
     fprintf(stderr, "with output-dir: writes output-dir/<wii-title-id>_generated/<wii-title-id>.c\n");
     fprintf(stderr, "with --gamecube or --cpu espresso output-dir: writes output-dir/generated/generated.c\n");
     fprintf(stderr, "-jN writes split C files with N jobs, like -j14\n");
+    fprintf(stderr, "--rel-base optionally sets the first virtual load address used for REL codegen\n");
     fprintf(stderr, "--setup downloads database/titles.txt and can install wit tools\n");
     fprintf(stderr, "without output: writes generated code under the current directory\n");
 }
@@ -160,6 +166,12 @@ static int has_rpx_extension(const char* path) {
     const char* base = path_basename(path);
     const char* dot = strrchr(base, '.');
     return dot && ascii_case_equal(dot, ".rpx");
+}
+
+static int has_rel_extension(const char* path) {
+    const char* base = path_basename(path);
+    const char* dot = strrchr(base, '.');
+    return dot && ascii_case_equal(dot, ".rel");
 }
 
 static int is_title_id(const char* text) {
@@ -394,6 +406,157 @@ static int file_exists(const char* path) {
         return 0;
     fclose(file);
     return 1;
+}
+
+static int path_is_directory(const char* path) {
+#ifdef _WIN32
+    DWORD attrs = GetFileAttributesA(path);
+    return attrs != INVALID_FILE_ATTRIBUTES &&
+           (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+typedef struct {
+    char** paths;
+    u32 count;
+    u32 capacity;
+} PathList;
+
+static void path_list_free(PathList* list) {
+    for (u32 i = 0; i < list->count; i++)
+        free(list->paths[i]);
+    free(list->paths);
+    list->paths = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+static char* copy_string_alloc(const char* text) {
+    size_t len = strlen(text);
+    char* copy = (char*)malloc(len + 1);
+    if (!copy)
+        return NULL;
+    memcpy(copy, text, len + 1);
+    return copy;
+}
+
+static int path_list_add(PathList* list, const char* path) {
+    if (list->count == list->capacity) {
+        u32 new_capacity = list->capacity ? list->capacity * 2u : 32u;
+        char** new_paths =
+            (char**)realloc(list->paths, new_capacity * sizeof(*new_paths));
+        if (!new_paths) {
+            fprintf(stderr, "error: out of memory\n");
+            return 0;
+        }
+        list->paths = new_paths;
+        list->capacity = new_capacity;
+    }
+
+    list->paths[list->count] = copy_string_alloc(path);
+    if (!list->paths[list->count]) {
+        fprintf(stderr, "error: out of memory\n");
+        return 0;
+    }
+    list->count++;
+    return 1;
+}
+
+static int collect_rel_paths(const char* root, PathList* list) {
+#ifdef _WIN32
+    char pattern[1200];
+    if (!join_path(pattern, sizeof(pattern), root, "*")) {
+        fprintf(stderr, "error: path is too long\n");
+        return 0;
+    }
+
+    WIN32_FIND_DATAA data;
+    HANDLE find = FindFirstFileA(pattern, &data);
+    if (find == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "error: can't read directory '%s'\n", root);
+        return 0;
+    }
+
+    do {
+        if (strcmp(data.cFileName, ".") == 0 ||
+            strcmp(data.cFileName, "..") == 0) {
+            continue;
+        }
+
+        char child[1200];
+        if (!join_path(child, sizeof(child), root, data.cFileName)) {
+            FindClose(find);
+            fprintf(stderr, "error: path is too long\n");
+            return 0;
+        }
+
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            if (!collect_rel_paths(child, list)) {
+                FindClose(find);
+                return 0;
+            }
+        } else if (has_rel_extension(child)) {
+            if (!path_list_add(list, child)) {
+                FindClose(find);
+                return 0;
+            }
+        }
+    } while (FindNextFileA(find, &data));
+
+    FindClose(find);
+    return 1;
+#else
+    DIR* dir = opendir(root);
+    if (!dir) {
+        fprintf(stderr, "error: can't read directory '%s'\n", root);
+        return 0;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        char child[1200];
+        if (!join_path(child, sizeof(child), root, entry->d_name)) {
+            closedir(dir);
+            fprintf(stderr, "error: path is too long\n");
+            return 0;
+        }
+
+        if (path_is_directory(child)) {
+            if (!collect_rel_paths(child, list)) {
+                closedir(dir);
+                return 0;
+            }
+        } else if (has_rel_extension(child)) {
+            if (!path_list_add(list, child)) {
+                closedir(dir);
+                return 0;
+            }
+        }
+    }
+
+    closedir(dir);
+    return 1;
+#endif
+}
+
+static int compare_paths_for_sort(const void* a, const void* b) {
+    const char* const* pa = (const char* const*)a;
+    const char* const* pb = (const char* const*)b;
+    return strcmp(*pa, *pb);
+}
+
+static void path_list_sort(PathList* list) {
+    if (list->count > 1)
+        qsort(list->paths, list->count, sizeof(list->paths[0]),
+              compare_paths_for_sort);
 }
 
 static char* shell_quote_arg(const char* arg) {
@@ -902,6 +1065,98 @@ static int build_gamecube_output_path(const char* output_root, char* output_path
         return 0;
 
     if (!join_path(output_path, output_path_size, folder_path, "generated.c")) {
+        fprintf(stderr, "error: output path is too long\n");
+        return 0;
+    }
+
+    return 1;
+}
+
+static int build_generated_folder_path(const char* output_root,
+                                       const char* title_id,
+                                       int titleless_mode,
+                                       char* folder_path,
+                                       size_t folder_path_size) {
+    if (!make_dir_tree(output_root))
+        return 0;
+
+    if (titleless_mode) {
+        if (!join_path(folder_path, folder_path_size, output_root, "generated")) {
+            fprintf(stderr, "error: output path is too long\n");
+            return 0;
+        }
+    } else {
+        char folder_name[128];
+        if (snprintf(folder_name, sizeof(folder_name), "%s_generated", title_id) >=
+            (int)sizeof(folder_name)) {
+            fprintf(stderr, "error: output path is too long\n");
+            return 0;
+        }
+        if (!join_path(folder_path, folder_path_size, output_root, folder_name)) {
+            fprintf(stderr, "error: output path is too long\n");
+            return 0;
+        }
+    }
+
+    return make_dir_tree(folder_path);
+}
+
+static void safe_module_name(const char* path, char* out, size_t out_size) {
+    const char* base = path_basename(path);
+    size_t len = strlen(base);
+    if (len >= 4 && ascii_case_equal(base + len - 4, ".rel"))
+        len -= 4;
+
+    size_t w = 0;
+    for (size_t i = 0; i < len && w + 1 < out_size; i++) {
+        char ch = base[i];
+        if ((ch >= 'A' && ch <= 'Z') ||
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= '0' && ch <= '9') ||
+            ch == '_' || ch == '-') {
+            out[w++] = ch;
+        } else {
+            out[w++] = '_';
+        }
+    }
+
+    if (w == 0 && out_size > 1)
+        out[w++] = 'm';
+    out[w] = '\0';
+}
+
+static int build_rel_output_path(const char* generated_root,
+                                 const char* rel_path,
+                                 u32 module_id,
+                                 char* output_path,
+                                 size_t output_path_size) {
+    char rels_dir[1200];
+    char module_name[320];
+    char module_dir_name[400];
+    char module_dir[1200];
+
+    if (!join_path(rels_dir, sizeof(rels_dir), generated_root, "rels")) {
+        fprintf(stderr, "error: output path is too long\n");
+        return 0;
+    }
+    if (!make_dir_tree(rels_dir))
+        return 0;
+
+    safe_module_name(rel_path, module_name, sizeof(module_name));
+    if (snprintf(module_dir_name, sizeof(module_dir_name), "%s_%u",
+                 module_name, module_id) >= (int)sizeof(module_dir_name)) {
+        fprintf(stderr, "error: output path is too long\n");
+        return 0;
+    }
+
+    if (!join_path(module_dir, sizeof(module_dir), rels_dir, module_dir_name)) {
+        fprintf(stderr, "error: output path is too long\n");
+        return 0;
+    }
+    if (!make_dir_tree(module_dir))
+        return 0;
+
+    if (!join_path(output_path, output_path_size, module_dir, "generated.c")) {
         fprintf(stderr, "error: output path is too long\n");
         return 0;
     }
@@ -1534,8 +1789,10 @@ typedef struct {
     const char* output_arg;
     DolRecompCPU cpu;
     u32 jobs;
+    u32 rel_base;
     int gamecube_mode;
     int cpu_explicit;
+    int rel_base_set;
     int setup_mode;
     int show_help;
 } CliOptions;
@@ -1550,6 +1807,19 @@ static int parse_job_count(const char* text, u32* jobs) {
     }
 
     *jobs = (u32)value;
+    return 1;
+}
+
+static int parse_u32_arg(const char* text, const char* name, u32* value_out) {
+    char* end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 0);
+    if (errno != 0 || !end || *end != '\0' || value > 0xFFFFFFFFul) {
+        fprintf(stderr, "error: %s must be a 32-bit address\n", name);
+        return 0;
+    }
+
+    *value_out = (u32)value;
     return 1;
 }
 
@@ -1639,6 +1909,24 @@ static int parse_cli(int argc, char** argv, CliOptions* opts) {
         if (strncmp(arg, "--jobs=", 7) == 0) {
             if (!parse_job_count(arg + 7, &opts->jobs))
                 return 0;
+            continue;
+        }
+
+        if (strcmp(arg, "--rel-base") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --rel-base needs an address\n");
+                return 0;
+            }
+            if (!parse_u32_arg(argv[++i], "--rel-base", &opts->rel_base))
+                return 0;
+            opts->rel_base_set = 1;
+            continue;
+        }
+
+        if (strncmp(arg, "--rel-base=", 11) == 0) {
+            if (!parse_u32_arg(arg + 11, "--rel-base", &opts->rel_base))
+                return 0;
+            opts->rel_base_set = 1;
             continue;
         }
 
@@ -2224,6 +2512,164 @@ static int emit_rpx_split(const RPXFile* rpx, const char* output_path,
                                     local_chunks_dir);
 }
 
+static int emit_rel_split(const RELFile* rel, const char* output_path,
+                          DolRecompCPU cpu, u32 jobs, int local_chunks_dir) {
+    LoadedCodeSection* sections =
+        (LoadedCodeSection*)calloc(rel->section_count, sizeof(LoadedCodeSection));
+    if (!sections) {
+        fprintf(stderr, "error: out of memory\n");
+        return 0;
+    }
+
+    u32 section_count = 0;
+    for (u32 i = 0; i < rel->section_count; i++) {
+        const RELSection* rel_section = &rel->sections[i];
+        if (!rel_section->executable || rel_section->size == 0 || !rel_section->data)
+            continue;
+
+        LoadedCodeSection* section = &sections[section_count++];
+        section->label = "rel";
+        section->name = NULL;
+        section->data = rel_section->data;
+        section->index = rel_section->index;
+        section->file_offset = rel_section->offset;
+        section->address = rel_section->address;
+        section->size = rel_section->size;
+        section->embedded_data_mode = EMBEDDED_DATA_DOL;
+    }
+
+    int ok = emit_code_sections_split(sections, section_count, output_path, cpu,
+                                      rel->entry_point, jobs, local_chunks_dir);
+    free(sections);
+    return ok;
+}
+
+typedef struct {
+    RELFile rel;
+} RELBatchItem;
+
+static void rel_batch_free(RELBatchItem* items, u32 count) {
+    if (!items)
+        return;
+    for (u32 i = 0; i < count; i++)
+        rel_free(&items[i].rel);
+    free(items);
+}
+
+static u32 align_up_cli(u32 value, u32 alignment, int* ok) {
+    u64 result = ((u64)value + alignment - 1u) / alignment * alignment;
+    if (result > 0xFFFFFFFFu) {
+        *ok = 0;
+        return 0;
+    }
+    return (u32)result;
+}
+
+static int next_rel_base(const RELFile* rel, u32* cursor) {
+    u32 end;
+    int ok = 1;
+    if (rel->file_size > 0xFFFFFFFFu - rel->base_address ||
+        rel->bss_size > 0xFFFFFFFFu - rel->base_address - rel->file_size) {
+        fprintf(stderr, "error: REL auto address range overflow\n");
+        return 0;
+    }
+
+    end = rel->base_address + rel->file_size + rel->bss_size;
+    *cursor = align_up_cli(end, REL_AUTO_ALIGN, &ok);
+    if (!ok) {
+        fprintf(stderr, "error: REL auto address range overflow\n");
+        return 0;
+    }
+    return 1;
+}
+
+static int check_duplicate_rel_module(const RELBatchItem* items, u32 count,
+                                      u32 module_id) {
+    for (u32 i = 0; i < count; i++) {
+        if (items[i].rel.module_id == module_id) {
+            fprintf(stderr, "error: duplicate REL module id %u\n", module_id);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int emit_rel_directory(const char* input_dir, const char* output_root,
+                              const char* title_id, int titleless_mode,
+                              DolRecompCPU cpu, u32 jobs, u32 start_base) {
+    PathList paths = {0};
+    RELBatchItem* items = NULL;
+    RELModuleMapEntry* map_entries = NULL;
+    char generated_root[1200];
+    int ok = 0;
+    u32 cursor = start_base;
+
+    if (!collect_rel_paths(input_dir, &paths))
+        goto done;
+    path_list_sort(&paths);
+
+    if (paths.count == 0) {
+        fprintf(stderr, "error: no .rel files found in '%s'\n", input_dir);
+        goto done;
+    }
+
+    items = (RELBatchItem*)calloc(paths.count, sizeof(*items));
+    map_entries = (RELModuleMapEntry*)calloc(paths.count, sizeof(*map_entries));
+    if (!items || !map_entries) {
+        fprintf(stderr, "error: out of memory\n");
+        goto done;
+    }
+
+    printf("found %u REL module%s\n", paths.count, paths.count == 1 ? "" : "s");
+    for (u32 i = 0; i < paths.count; i++) {
+        if (!rel_load_image(&items[i].rel, paths.paths[i], cursor))
+            goto done;
+        if (!check_duplicate_rel_module(items, i, items[i].rel.module_id))
+            goto done;
+
+        map_entries[i].module_id = items[i].rel.module_id;
+        map_entries[i].rel = &items[i].rel;
+
+        printf("  module %u: %s -> base 0x%08X\n",
+               items[i].rel.module_id, paths.paths[i], items[i].rel.base_address);
+        if (!next_rel_base(&items[i].rel, &cursor))
+            goto done;
+    }
+
+    RELModuleMap map = { map_entries, paths.count };
+    for (u32 i = 0; i < paths.count; i++) {
+        if (!rel_apply_relocations(&items[i].rel, &map))
+            goto done;
+    }
+
+    if (!build_generated_folder_path(output_root, title_id, titleless_mode,
+                                     generated_root, sizeof(generated_root))) {
+        goto done;
+    }
+
+    for (u32 i = 0; i < paths.count; i++) {
+        char rel_output_path[1200];
+        printf("\nREL %u/%u: %s\n", i + 1, paths.count, paths.paths[i]);
+        rel_print_info(&items[i].rel, NULL);
+        if (!build_rel_output_path(generated_root, paths.paths[i],
+                                   items[i].rel.module_id,
+                                   rel_output_path, sizeof(rel_output_path))) {
+            goto done;
+        }
+        printf("\nwriting output to: %s\n", rel_output_path);
+        if (!emit_rel_split(&items[i].rel, rel_output_path, cpu, jobs, 1))
+            goto done;
+    }
+
+    ok = 1;
+
+done:
+    free(map_entries);
+    rel_batch_free(items, paths.count);
+    path_list_free(&paths);
+    return ok;
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && strcmp(argv[1], "extract") == 0)
         return disc_extract_main(argc - 1, argv + 1);
@@ -2248,6 +2694,9 @@ int main(int argc, char** argv) {
     DolRecompCPU effective_cpu = opts.cpu;
     int titleless_mode = effective_gamecube_mode || effective_cpu == DOLRECOMP_CPU_ESPRESSO;
     int espresso_rpx_mode = effective_cpu == DOLRECOMP_CPU_ESPRESSO;
+    int input_is_directory = path_is_directory(input_path);
+    int rel_mode = has_rel_extension(input_path) || input_is_directory;
+    u32 rel_start_base = opts.rel_base_set ? opts.rel_base : REL_AUTO_BASE;
 
     title_id[0] = '\0';
     game_name[0] = '\0';
@@ -2256,7 +2705,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "error: .rpx input requires --cpu espresso\n");
         return 1;
     }
-
+    if (rel_mode && effective_cpu == DOLRECOMP_CPU_ESPRESSO) {
+        fprintf(stderr, "error: .rel input cannot use espresso mode\n");
+        return 1;
+    }
     if (!titleless_mode && !database_titles_available()) {
         print_database_missing_notice();
         effective_gamecube_mode = 1;
@@ -2286,7 +2738,7 @@ int main(int argc, char** argv) {
     espresso_rpx_mode = effective_cpu == DOLRECOMP_CPU_ESPRESSO;
 
     if (effective_gamecube_mode) {
-        snprintf(game_name, sizeof(game_name), "GameCube DOL");
+        snprintf(game_name, sizeof(game_name), rel_mode ? "GameCube REL" : "GameCube DOL");
     } else if (effective_cpu == DOLRECOMP_CPU_ESPRESSO) {
         snprintf(game_name, sizeof(game_name), "Wii U executable");
     } else {
@@ -2332,6 +2784,69 @@ int main(int argc, char** argv) {
         }
 
         rpx_free(&rpx);
+        return 0;
+    }
+
+    if (input_is_directory) {
+        if (has_c_extension(output_arg ? output_arg : "")) {
+            fprintf(stderr, "error: REL directory output must be a directory\n");
+            return 1;
+        }
+        if (!output_arg) {
+            printf("\ngenerating code...\n");
+            output_arg = ".";
+        }
+
+        printf("REL base start: 0x%08X\n", rel_start_base);
+        if (!emit_rel_directory(input_path, output_arg, title_id,
+                                titleless_mode, effective_cpu, opts.jobs,
+                                rel_start_base)) {
+            return 1;
+        }
+        return 0;
+    }
+
+    if (rel_mode) {
+        RELFile rel;
+        if (!rel_load(&rel, input_path, rel_start_base))
+            return 1;
+
+        rel_print_info(&rel, game_name);
+        printf("cpu: %s\n", cpu_display_name(effective_cpu));
+
+        if (!output_arg) {
+            printf("\ngenerating code...\n");
+            output_arg = ".";
+        }
+
+        if (has_c_extension(output_arg)) {
+            output_path = output_arg;
+        } else if (titleless_mode) {
+            if (!build_gamecube_output_path(output_arg, named_output_path,
+                                            sizeof(named_output_path))) {
+                rel_free(&rel);
+                return 1;
+            }
+            output_path = named_output_path;
+            local_chunks_dir = 1;
+        } else {
+            if (!build_named_output_path(output_arg, title_id,
+                                         named_output_path, sizeof(named_output_path))) {
+                rel_free(&rel);
+                return 1;
+            }
+            output_path = named_output_path;
+            local_chunks_dir = 1;
+        }
+
+        printf("\nwriting output to: %s\n", output_path);
+        if (!emit_rel_split(&rel, output_path, effective_cpu, opts.jobs,
+                            local_chunks_dir)) {
+            rel_free(&rel);
+            return 1;
+        }
+
+        rel_free(&rel);
         return 0;
     }
 

@@ -39,6 +39,7 @@ find_package(ZLIB QUIET)
 add_executable(dolrecomp
     src/main.c
     src/frontend/dol.c
+    src/frontend/rel.c
     src/frontend/rpx.c
     src/frontend/disc_extract.c
     src/frontend/decoder.c
@@ -79,6 +80,13 @@ add_executable(test_dol
 )
 target_include_directories(test_dol PRIVATE src)
 add_test(NAME dol COMMAND test_dol)
+
+add_executable(test_rel
+    tests/test_rel.c
+    src/frontend/rel.c
+)
+target_include_directories(test_rel PRIVATE src)
+add_test(NAME rel COMMAND test_rel)
 
 add_executable(test_rpx
     tests/test_rpx.c

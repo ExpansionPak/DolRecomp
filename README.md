@@ -7,8 +7,9 @@ The current project is CPU only. You will need to supply your own runtime.
 ## Status
 
 - GameCube/Wii DOL loading works.
+- GameCube/Wii REL loading works for single modules and folders of modules.
 - Wii U RPX loading works for executable sections. Compressed RPX sections need zlib.
-- DOL/RPX frontends validate executable entry points before codegen.
+- DOL/RPX/REL frontends validate executable entry points before codegen.
 - The decoder currently recognizes 236 PowerPC/Gekko/Broadway/Espresso opcodes. (Espresso may need more looking at)
 - The backend emits C in split chunks with `-jN` worker support.
 - Generated dispatch can hand known function addresses to host patches before entering compiled code.
@@ -56,6 +57,16 @@ GameCube DOLs do not use a title ID:
 ```sh
 dolrecomp.exe --gamecube path\to\main.dol build
 ```
+
+REL modules can be compiled one at a time or as a folder. Folder mode finds `.rel` files recursively, assigns stable virtual bases, and resolves imports between modules in that folder:
+
+```sh
+dolrecomp.exe path\to\module.rel SUKE01 build
+dolrecomp.exe path\to\rel_folder SUKE01 build
+dolrecomp.exe --gamecube path\to\rel_folder build
+```
+
+Use `--rel-base 0x80500000` only when you need to override the first auto-assigned REL address. REL support applies self-relocations, and imports between modules compiled together.
 
 Wii U uses the Espresso CPU profile and takes an RPX:
 
