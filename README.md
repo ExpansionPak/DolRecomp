@@ -130,3 +130,7 @@ This repo is still not finished, but it's good enough to work with now. Any prob
 ## SMC (Self-Modifying Code)
 
 SMC is currently *unhandled*. You will need to patch the functions manually. DolRecomp will highlight suspicious instructions for review. Patching it out at analysis-time might silently break real behavior.
+
+## Wii U support 
+
+Wii U support is largely unimplemented, it was an experiment of "how much of this already works with the Wii U" thing and not "let's make a Wii U recompiler." It's probably going to stay this way until I can find out what to do wih it
