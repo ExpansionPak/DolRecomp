@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 ExpansionPak
+
 #include "decoder.h"
 #include <stdio.h>
 #include <string.h>

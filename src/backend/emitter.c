@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 ExpansionPak
+
 #include "emitter.h"
 
 static u32 cr_field_shift(u8 crf) {
