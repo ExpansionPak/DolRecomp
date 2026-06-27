@@ -1,7 +1,7 @@
 #ifndef DOLRECOMP_DECODER_H
 #define DOLRECOMP_DECODER_H
 
-#include "../core/types.h"
+#include "../common/types.h"
 
 // PPC instruction decoder
 // current CPU opcode set

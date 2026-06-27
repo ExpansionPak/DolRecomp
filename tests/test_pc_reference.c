@@ -2,8 +2,8 @@
 #include <string.h>
 #include <math.h>
 
-#include "../src/core/types.h"
-#include "../src/core/cpu.h"
+#include "../src/common/types.h"
+#include "../src/cpu/cpu.h"
 #include "../src/frontend/decoder.h"
 
 #define BASE 0x80000000u

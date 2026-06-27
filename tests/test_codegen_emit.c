@@ -2,7 +2,7 @@
 #include <stdlib.h>
 
 #include "../src/backend/emitter.h"
-#include "../src/core/types.h"
+#include "../src/common/types.h"
 #include "../src/frontend/decoder.h"
 
 #define BASE 0x80003000u

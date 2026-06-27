@@ -1,7 +1,7 @@
 #ifndef DOLRECOMP_CPU_H
 #define DOLRECOMP_CPU_H
 
-#include "types.h"
+#include "common/types.h"
 
 // Minimal CPU support ABI for generated code and CPU tests.
 

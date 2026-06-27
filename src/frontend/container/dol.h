@@ -1,7 +1,7 @@
 #ifndef DOLRECOMP_DOL_H
 #define DOLRECOMP_DOL_H
 
-#include "../core/types.h"
+#include "../../common/types.h"
 
 // gamecube DOL executable format
 // 7 text sections, 11 data sections, all BE u32

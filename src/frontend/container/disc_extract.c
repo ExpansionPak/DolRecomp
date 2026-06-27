@@ -13,7 +13,7 @@
 #include <unistd.h>
 #endif
 
-#include "core/types.h"
+#include "common/types.h"
 
 #define GC_MAGIC  0xC2339F3Du
 #define WII_MAGIC 0x5D1C9EA3u

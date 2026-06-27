@@ -389,7 +389,7 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "\n"
         "#include <string.h>\n"
         "#include <math.h>\n"
-        "#include \"core/cpu.h\"\n"
+        "#include \"cpu/cpu.h\"\n"
         "\n"
         "static inline u32 dolrecomp_rotl32(u32 value, u32 sh) {\n"
         "    sh &= 31u;\n"

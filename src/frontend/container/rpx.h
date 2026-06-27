@@ -1,7 +1,7 @@
 #ifndef DOLRECOMP_RPX_H
 #define DOLRECOMP_RPX_H
 
-#include "../core/types.h"
+#include "../../common/types.h"
 
 #define RPX_MAX_CODE_SECTIONS 64
 

@@ -1,7 +1,7 @@
 #ifndef DOLRECOMP_EMITTER_H
 #define DOLRECOMP_EMITTER_H
 
-#include "../core/types.h"
+#include "../common/types.h"
 #include "../frontend/decoder.h"
 #include <stdio.h>
 

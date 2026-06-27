@@ -1,7 +1,7 @@
 #ifndef DOLRECOMP_REL_H
 #define DOLRECOMP_REL_H
 
-#include "../core/types.h"
+#include "../../common/types.h"
 
 typedef struct {
     u32 index;
