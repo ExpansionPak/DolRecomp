@@ -1,13 +1,15 @@
 #ifndef DOLRECOMP_CPU_H
 #define DOLRECOMP_CPU_H
 
-#include "types.h"
-
-// Minimal CPU support ABI for generated code and CPU tests.
+#include "common/types.h"
 
 #define GC_MAIN_RAM_SIZE    (24 * 1024 * 1024)
 #define GC_RAM_BASE         0x80000000u
 #define GC_RAM_UNCACHED     0xC0000000u
+
+#define WII_MEM2_SIZE       (64 * 1024 * 1024)
+#define WII_MEM2_BASE       0x90000000u
+#define WII_MEM2_UNCACHED   0xD0000000u
 
 #define PPC_EXC_PROGRAM       0x00000001u
 #define PPC_EXC_DSI           0x00000002u
@@ -86,9 +88,12 @@ struct CPUState {
 
     u8* ram;
     u32 ram_size;
+    u8* mem2;
+    u32 mem2_size;
 };
 
 bool cpu_init(CPUState* cpu);
+bool cpu_alloc_mem2(CPUState* cpu, u32 size); //mem 2 only exists after first aloc
 void cpu_free(CPUState* cpu);
 void cpu_reset(CPUState* cpu);
 

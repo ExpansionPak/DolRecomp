@@ -13,7 +13,7 @@
 #define PATH_SEP '/'
 #endif
 
-#include "core/types.h"
+#include "common/types.h"
 
 static void put_be32(u8* p, u32 v) {
     p[0] = (u8)(v >> 24);

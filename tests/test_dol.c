@@ -1,5 +1,5 @@
-#include "frontend/dol.h"
-#include "core/types.h"
+#include "frontend/container/dol.h"
+#include "common/types.h"
 #include <stdio.h>
 #include <string.h>
 

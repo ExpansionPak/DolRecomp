@@ -35,100 +35,110 @@ if(NOT DEFINED ZLIB_ROOT)
 endif()
 
 find_package(ZLIB QUIET)
-
-add_executable(dolrecomp
-    src/main.c
-    src/frontend/dol.c
-    src/frontend/rel.c
-    src/frontend/rpx.c
-    src/frontend/disc_extract.c
-    src/frontend/decoder.c
-    src/backend/emitter.c
-)
-
-target_include_directories(dolrecomp PRIVATE src)
-if(ZLIB_FOUND)
-    target_compile_definitions(dolrecomp PRIVATE DOLRECOMP_HAVE_ZLIB)
-    target_link_libraries(dolrecomp PRIVATE ZLIB::ZLIB)
-endif()
 if(NOT WIN32)
     find_package(Threads REQUIRED)
-    target_link_libraries(dolrecomp PRIVATE Threads::Threads)
 endif()
 
-# opcode verification tests
-add_executable(test_opcodes
-    tests/test_opcodes.c
-    src/frontend/decoder.c
+set(DOLRECOMP_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+add_library(dr_cpu STATIC src/cpu/cpu.c)
+target_include_directories(dr_cpu PUBLIC ${DOLRECOMP_SRC})
+if(NOT WIN32)
+    target_link_libraries(dr_cpu PUBLIC m)
+endif()
+
+add_library(dr_platform STATIC
+    src/platform/fs.c
+    src/platform/strutil.c
+    src/platform/pathlist.c
+    src/platform/process.c
 )
-target_include_directories(test_opcodes PRIVATE src)
+target_include_directories(dr_platform PUBLIC ${DOLRECOMP_SRC})
+
+add_library(dr_frontend STATIC
+    src/frontend/decoder.c
+    src/frontend/container/dol.c
+    src/frontend/container/rel.c
+    src/frontend/container/rpx.c
+    src/frontend/container/disc_extract.c
+)
+target_include_directories(dr_frontend PUBLIC ${DOLRECOMP_SRC})
+if(ZLIB_FOUND)
+    target_compile_definitions(dr_frontend PUBLIC DOLRECOMP_HAVE_ZLIB)
+    target_link_libraries(dr_frontend PUBLIC ZLIB::ZLIB)
+endif()
+
+add_library(dr_analysis STATIC
+    src/analysis/embedded_data.c
+    src/analysis/smc.c
+)
+target_include_directories(dr_analysis PUBLIC ${DOLRECOMP_SRC})
+target_link_libraries(dr_analysis PUBLIC dr_frontend)
+
+add_library(dr_backend STATIC
+    src/backend/emitter.c
+    src/backend/dispatch.c
+    src/backend/codegen.c
+)
+target_include_directories(dr_backend PUBLIC ${DOLRECOMP_SRC})
+target_link_libraries(dr_backend PUBLIC dr_frontend dr_analysis)
+if(NOT WIN32)
+    target_link_libraries(dr_backend PUBLIC Threads::Threads)
+endif()
+
+add_library(dr_app STATIC
+    src/app/cli.c
+    src/app/database.c
+    src/app/setup.c
+    src/app/paths.c
+    src/app/pipeline.c
+)
+target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
+target_link_libraries(dr_app PUBLIC dr_backend dr_analysis dr_frontend dr_platform)
+
+add_executable(dolrecomp src/app/main.c)
+target_link_libraries(dolrecomp PRIVATE dr_app)
 
 enable_testing()
+
+add_executable(test_opcodes tests/test_opcodes.c)
+target_link_libraries(test_opcodes PRIVATE dr_frontend)
 add_test(NAME opcodes COMMAND test_opcodes)
 
-# cross-check against devkitPPC machine code
-add_executable(test_cross_check
-    tests/test_cross_check.c
-    src/frontend/decoder.c
-)
-target_include_directories(test_cross_check PRIVATE src)
+add_executable(test_cross_check tests/test_cross_check.c)
+target_link_libraries(test_cross_check PRIVATE dr_frontend)
 add_test(NAME cross_check COMMAND test_cross_check)
 
-add_executable(test_dol
-    tests/test_dol.c
-    src/frontend/dol.c
-)
-target_include_directories(test_dol PRIVATE src)
+add_executable(test_dol tests/test_dol.c)
+target_link_libraries(test_dol PRIVATE dr_frontend)
 add_test(NAME dol COMMAND test_dol)
 
-add_executable(test_rel
-    tests/test_rel.c
-    src/frontend/rel.c
-)
-target_include_directories(test_rel PRIVATE src)
+add_executable(test_rel tests/test_rel.c)
+target_link_libraries(test_rel PRIVATE dr_frontend)
 add_test(NAME rel COMMAND test_rel)
 
-add_executable(test_rpx
-    tests/test_rpx.c
-    src/frontend/rpx.c
-)
-target_include_directories(test_rpx PRIVATE src)
-if(ZLIB_FOUND)
-    target_compile_definitions(test_rpx PRIVATE DOLRECOMP_HAVE_ZLIB)
-    target_link_libraries(test_rpx PRIVATE ZLIB::ZLIB)
-endif()
+add_executable(test_rpx tests/test_rpx.c)
+target_link_libraries(test_rpx PRIVATE dr_frontend)
 add_test(NAME rpx COMMAND test_rpx)
 
-add_executable(test_disc_extract
-    tests/test_disc_extract.c
-)
-target_include_directories(test_disc_extract PRIVATE src)
+add_executable(test_disc_extract tests/test_disc_extract.c)
+target_include_directories(test_disc_extract PRIVATE ${DOLRECOMP_SRC})
 add_test(NAME disc_extract
     COMMAND test_disc_extract
         $<SHELL_PATH:$<TARGET_FILE:dolrecomp>>
         $<SHELL_PATH:${CMAKE_CURRENT_BINARY_DIR}/disc_extract_test>
 )
 
-# PC-side CPU behavior checks.
-add_executable(test_pc_reference
-    tests/test_pc_reference.c
-    src/frontend/decoder.c
-    src/frontend/dol.c
-    src/core/cpu.c
-)
-target_include_directories(test_pc_reference PRIVATE src)
-if(NOT WIN32)
-    target_link_libraries(test_pc_reference PRIVATE m)
-endif()
+add_executable(test_pc_reference tests/test_pc_reference.c)
+target_link_libraries(test_pc_reference PRIVATE dr_frontend dr_cpu)
 add_test(NAME pc_reference COMMAND test_pc_reference)
 
-# Generate C for the current opcode set and make sure the host compiler accepts it.
-add_executable(test_codegen_emit
-    tests/test_codegen_emit.c
-    src/frontend/decoder.c
-    src/backend/emitter.c
-)
-target_include_directories(test_codegen_emit PRIVATE src)
+add_executable(test_jumptables tests/test_jumptables.c)
+target_link_libraries(test_jumptables PRIVATE dr_backend dr_cpu)
+add_test(NAME jumptables COMMAND test_jumptables)
+
+add_executable(test_codegen_emit tests/test_codegen_emit.c)
+target_link_libraries(test_codegen_emit PRIVATE dr_backend)
 add_test(NAME codegen_compile
     COMMAND ${CMAKE_COMMAND}
         -DGENERATOR_EXE=$<TARGET_FILE:test_codegen_emit>
