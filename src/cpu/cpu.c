@@ -26,16 +26,41 @@ bool cpu_init(CPUState* cpu) {
     return true;
 }
 
+bool cpu_alloc_mem2(CPUState* cpu, u32 size) {
+    free(cpu->mem2);
+    cpu->mem2 = NULL;
+    cpu->mem2_size = 0;
+
+    if (size == 0)
+        return true;
+
+    cpu->mem2 = (u8*)calloc(1, size);
+    if (!cpu->mem2) {
+        fprintf(stderr, "error, filed to allocate %u bytes for MEM2 region\n", size);
+        return false;
+    }
+
+    cpu->mem2_size = size;
+    return true;
+}
+
 void cpu_free(CPUState* cpu) {
     if (cpu->ram) {
         free(cpu->ram);
         cpu->ram = NULL;
+    }
+    if (cpu->mem2) {
+        free(cpu->mem2);
+        cpu->mem2 = NULL;
+        cpu->mem2_size = 0;
     }
 }
 
 void cpu_reset(CPUState* cpu) {
     u8* ram = cpu->ram;
     u32 ram_size = cpu->ram_size;
+    u8* mem2 = cpu->mem2;
+    u32 mem2_size = cpu->mem2_size;
     PPCExternalRead external_read = cpu->external_read;
     PPCExternalWrite external_write = cpu->external_write;
     PPCExternalRead32 external_read32 = cpu->external_read32;
@@ -47,6 +72,8 @@ void cpu_reset(CPUState* cpu) {
     memset(cpu, 0, sizeof(*cpu));
     cpu->ram = ram;
     cpu->ram_size = ram_size;
+    cpu->mem2 = mem2;
+    cpu->mem2_size = mem2_size;
     cpu->external_read = external_read;
     cpu->external_write = external_write;
     cpu->external_read32 = external_read32;
@@ -57,16 +84,39 @@ void cpu_reset(CPUState* cpu) {
 
     if (cpu->ram)
         memset(cpu->ram, 0, cpu->ram_size);
+    if (cpu->mem2)
+        memset(cpu->mem2, 0, cpu->mem2_size);
 }
 
-static u32 translate_addr(u32 addr, u32 ram_size) {
-    if (addr >= GC_RAM_BASE && addr < GC_RAM_BASE + ram_size)
-        return addr - GC_RAM_BASE;
+static u8* resolve_addr(CPUState* cpu, u32 addr, u32* avail) {
+    if (addr >= GC_RAM_BASE && addr < GC_RAM_BASE + cpu->ram_size) {
+        u32 offset = addr - GC_RAM_BASE;
+        *avail = cpu->ram_size - offset;
+        return cpu->ram + offset;
+    }
 
-    if (addr >= GC_RAM_UNCACHED && addr < GC_RAM_UNCACHED + ram_size)
-        return addr - GC_RAM_UNCACHED;
+    if (addr >= GC_RAM_UNCACHED && addr < GC_RAM_UNCACHED + cpu->ram_size) {
+        u32 offset = addr - GC_RAM_UNCACHED;
+        *avail = cpu->ram_size - offset;
+        return cpu->ram + offset;
+    }
 
-    return (u32)-1;
+    if (cpu->mem2 && cpu->mem2_size) {
+        if (addr >= WII_MEM2_BASE && addr < WII_MEM2_BASE + cpu->mem2_size) {
+            u32 offset = addr - WII_MEM2_BASE;
+            *avail = cpu->mem2_size - offset;
+            return cpu->mem2 + offset;
+        }
+
+        if (addr >= WII_MEM2_UNCACHED && addr < WII_MEM2_UNCACHED + cpu->mem2_size) {
+            u32 offset = addr - WII_MEM2_UNCACHED;
+            *avail = cpu->mem2_size - offset;
+            return cpu->mem2 + offset;
+        }
+    }
+
+    *avail = 0;
+    return NULL;
 }
 
 static void clear_matching_reservation(CPUState* cpu, u32 addr) {
@@ -115,19 +165,21 @@ static u32 exception_msr(u32 old_msr, u32 exception) {
 }
 
 u64 mem_read64(CPUState* cpu, u32 addr) {
-    u32 offset = translate_addr(addr, cpu->ram_size);
-    if (offset == (u32)-1 || offset + 8 > cpu->ram_size) {
+    u32 avail;
+    u8* host = resolve_addr(cpu, addr, &avail);
+    if (!host || avail < 8) {
         if (cpu->external_read)
             return cpu->external_read(cpu, addr, 8);
         fprintf(stderr, "warn: read64 from unmapped 0x%08X\n", addr);
         return 0;
     }
-    return read_be64(cpu->ram + offset);
+    return read_be64(host);
 }
 
 void mem_write64(CPUState* cpu, u32 addr, u64 value) {
-    u32 offset = translate_addr(addr, cpu->ram_size);
-    if (offset == (u32)-1 || offset + 8 > cpu->ram_size) {
+    u32 avail;
+    u8* host = resolve_addr(cpu, addr, &avail);
+    if (!host || avail < 8) {
         if (cpu->external_write) {
             cpu->external_write(cpu, addr, value, 8);
             return;
@@ -136,23 +188,25 @@ void mem_write64(CPUState* cpu, u32 addr, u64 value) {
         return;
     }
     clear_matching_reservation(cpu, addr);
-    write_be64(cpu->ram + offset, value);
+    write_be64(host, value);
 }
 
 u32 mem_read32(CPUState* cpu, u32 addr) {
-    u32 offset = translate_addr(addr, cpu->ram_size);
-    if (offset == (u32)-1 || offset + 4 > cpu->ram_size) {
+    u32 avail;
+    u8* host = resolve_addr(cpu, addr, &avail);
+    if (!host || avail < 4) {
         if (cpu->external_read)
             return (u32)cpu->external_read(cpu, addr, 4);
         fprintf(stderr, "warn: read32 from unmapped 0x%08X\n", addr);
         return 0;
     }
-    return read_be32(cpu->ram + offset);
+    return read_be32(host);
 }
 
 void mem_write32(CPUState* cpu, u32 addr, u32 value) {
-    u32 offset = translate_addr(addr, cpu->ram_size);
-    if (offset == (u32)-1 || offset + 4 > cpu->ram_size) {
+    u32 avail;
+    u8* host = resolve_addr(cpu, addr, &avail);
+    if (!host || avail < 4) {
         if (cpu->external_write) {
             cpu->external_write(cpu, addr, value, 4);
             return;
@@ -161,23 +215,25 @@ void mem_write32(CPUState* cpu, u32 addr, u32 value) {
         return;
     }
     clear_matching_reservation(cpu, addr);
-    write_be32(cpu->ram + offset, value);
+    write_be32(host, value);
 }
 
 u16 mem_read16(CPUState* cpu, u32 addr) {
-    u32 offset = translate_addr(addr, cpu->ram_size);
-    if (offset == (u32)-1 || offset + 2 > cpu->ram_size) {
+    u32 avail;
+    u8* host = resolve_addr(cpu, addr, &avail);
+    if (!host || avail < 2) {
         if (cpu->external_read)
             return (u16)cpu->external_read(cpu, addr, 2);
         fprintf(stderr, "warn: read16 from unmapped 0x%08X\n", addr);
         return 0;
     }
-    return read_be16(cpu->ram + offset);
+    return read_be16(host);
 }
 
 void mem_write16(CPUState* cpu, u32 addr, u16 value) {
-    u32 offset = translate_addr(addr, cpu->ram_size);
-    if (offset == (u32)-1 || offset + 2 > cpu->ram_size) {
+    u32 avail;
+    u8* host = resolve_addr(cpu, addr, &avail);
+    if (!host || avail < 2) {
         if (cpu->external_write) {
             cpu->external_write(cpu, addr, value, 2);
             return;
@@ -186,23 +242,25 @@ void mem_write16(CPUState* cpu, u32 addr, u16 value) {
         return;
     }
     clear_matching_reservation(cpu, addr);
-    write_be16(cpu->ram + offset, value);
+    write_be16(host, value);
 }
 
 u8 mem_read8(CPUState* cpu, u32 addr) {
-    u32 offset = translate_addr(addr, cpu->ram_size);
-    if (offset == (u32)-1) {
+    u32 avail;
+    u8* host = resolve_addr(cpu, addr, &avail);
+    if (!host) {
         if (cpu->external_read)
             return (u8)cpu->external_read(cpu, addr, 1);
         fprintf(stderr, "warn: read8 from unmapped 0x%08X\n", addr);
         return 0;
     }
-    return cpu->ram[offset];
+    return *host;
 }
 
 void mem_write8(CPUState* cpu, u32 addr, u8 value) {
-    u32 offset = translate_addr(addr, cpu->ram_size);
-    if (offset == (u32)-1) {
+    u32 avail;
+    u8* host = resolve_addr(cpu, addr, &avail);
+    if (!host) {
         if (cpu->external_write) {
             cpu->external_write(cpu, addr, value, 1);
             return;
@@ -211,7 +269,7 @@ void mem_write8(CPUState* cpu, u32 addr, u8 value) {
         return;
     }
     clear_matching_reservation(cpu, addr);
-    cpu->ram[offset] = value;
+    *host = value;
 }
 
 bool ppc_add_overflowed(u32 a, u32 b, u32 result) {
