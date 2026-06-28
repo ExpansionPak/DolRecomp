@@ -191,7 +191,9 @@ tools/          optional developer utilities
 
 ## Contribution
 
-Forks are welcome. Contribution will not be accepted at the very moment, because this codebase changes rapidly.
+Check the `CONTRIBUTING.md` page. 
+
+`CONTRIBUTORS.md` includes details about contributors using `@all-contributors` bot.
 
 # Notices
 
