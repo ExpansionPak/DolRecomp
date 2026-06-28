@@ -41,7 +41,7 @@ From the repo root:
 
 ```sh
 cmake -S . -B build
-cmake --build build --config Release -j 14
+cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
@@ -51,67 +51,110 @@ devkitPro is highly recommended for Wii U recomps.
 
 ## Usage
 
+For help run
+
+```sh
+# Windows
+dolrecomp.exe
+
+# MacOS/Linux
+./dolrecomp
+```
+
+to output a list of commands and arguments.
+
 Set up the local title database if you want Wii title names in CLI output. Setup also offers to download Wiimms ISO Tools if `wit` is missing:
 
 <sub>this was just a fun extra thing, just run in gamecube mode if you want to skip it</sub>
 
-
 ```sh
+# Windows
 dolrecomp.exe --setup
+
+# MacOS/Linux
+./dolrecomp --setup
 ```
 
-Wii DOLs require a six-character title ID:
-
-```sh
-dolrecomp.exe -j14 path\to\main.dol SUKE01 build
-```
-
+### Gamecube
 GameCube DOLs do not use a title ID:
 
 ```sh
 dolrecomp.exe --gamecube path\to\main.dol build
+
+./dolrecomp --gamecube path/to/main.dol build
 ```
+
+### Wii
+Wii DOLs require a six-character title ID:
+
+```sh
+dolrecomp.exe path\to\main.dol SUKE01 build
+
+./dolrecomp path/to/main.dol SUKE01 build
+```
+
+### REL Modules
 
 REL modules can be compiled one at a time or as a folder. Folder mode finds `.rel` files recursively, assigns stable virtual bases, and resolves imports between modules in that folder:
 
 ```sh
+# Windows
 dolrecomp.exe path\to\module.rel SUKE01 build
 dolrecomp.exe path\to\rel_folder SUKE01 build
 dolrecomp.exe --gamecube path\to\rel_folder build
+
+# MacOS/Linux
+./dolrecomp path/to/module.rel SUKE01 build
+./dolrecomp path/to/rel_folder SUKE01 build
+./dolrecomp --gamecube path/to/rel_folder build
 ```
 
 Use `--rel-base 0x80500000` only when you need to override the first auto-assigned REL address. REL support applies self-relocations, and imports between modules compiled together.
 
+### Wii U
 Wii U uses the Espresso CPU profile and takes an RPX:
 
 ```sh
+# Windows
 dolrecomp.exe --cpu espresso path\to\main.rpx build
-```
 
+# MacOS/Linux
+./dolrecomp --cpu espresso path/to/main.rpx build
+```
 
 You cannot specify --gamecube while using espresso.
 
+### Additional Info
 
 Disc extraction is available as a subcommand for future installer work. It accepts `.iso` and `.wbfs` only:
 
 ```sh
+# Windows
 dolrecomp.exe extract game.iso extracted
 dolrecomp.exe extract game.wbfs extracted
+
+# MacOS/Linux
+./dolrecomp extract game.iso extracted
+./dolrecomp extract game.wbfs extracted
 ```
 
 GameCube ISO extraction is built in. Wii ISO/WBFS extraction uses Wiimms ISO Tool (`wit`) when needed. Run `dolrecomp.exe --setup` to install a local copy, or pass a path manually:
 
 ```sh
-dolrecomp.exe extract --wit C:\tools\wit\wit.exe game.wbfs extracted
+# Windows
+dolrecomp.exe extract --wit C:\path\to\wit.exe game.wbfs extracted
+
+# MacOS/Linux
+./dolrecomp extract --wit ./path/to/wit game.wbfs extracted
 ```
 
 Output rules:
 
 - If the last argument ends in `.c`, that exact split-output manifest is used.
-- If the last argument is a directory, Wii output goes under `<title-id>_generated\`.
-- GameCube and Wii U directory output goes under `generated\`.
+- If the last argument is a directory, Wii output goes under `<title-id>_generated` folder.
+- GameCube and Wii U directory output goes under `generated` folder.
 - `-jN` controls how many worker jobs write split C chunks.
-- If `database\titles.txt` is missing during Wii mode, DolRecomp prints a warning and uses GameCube mode.
+- If `database/titles.txt` is missing during Wii mode, DolRecomp prints a warning and uses GameCube mode.
 
 ## CPU Coverage
 

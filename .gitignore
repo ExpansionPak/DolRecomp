@@ -52,7 +52,7 @@ tests/data/*.gcm
 *.gcm
 discs/
 generated/
-
+*_generated/
 
 # Local database for title ids
 database/

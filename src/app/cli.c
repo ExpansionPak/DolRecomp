@@ -8,21 +8,30 @@
 void print_usage(const char* argv0) {
     (void)argv0;
 
-    fprintf(stderr, "usage: dolrecomp.exe [-jN] [--cpu gekko|broadway|espresso] [--gamecube] <input> [wii-title-id] [output.c | output-dir]\n");
+    const char* prog = "dolrecomp.exe";
+
+    fprintf(stderr, "Usage: %s [options] <input> [wii-title-id] [output.c | output-dir]\n", prog);
     fprintf(stderr, "\n");
-    fprintf(stderr, "extract:  dolrecomp.exe extract game.iso output_folder\n");
-    fprintf(stderr, "extract:  dolrecomp.exe extract game.wbfs output_folder\n");
-    fprintf(stderr, "wii:      dolrecomp.exe <input.dol> SUKE01 build\n");
-    fprintf(stderr, "gamecube: dolrecomp.exe --gamecube <input.dol> build\n");
-    fprintf(stderr, "rel:      dolrecomp.exe <input.rel | rel_folder> SUKE01 build\n");
-    fprintf(stderr, "wii u cpu: dolrecomp.exe --cpu espresso <input.rpx> build\n");
-    fprintf(stderr, "with output.c: writes that split C set\n");
-    fprintf(stderr, "with output-dir: writes output-dir/<wii-title-id>_generated/<wii-title-id>.c\n");
-    fprintf(stderr, "with --gamecube or --cpu espresso output-dir: writes output-dir/generated/generated.c\n");
-    fprintf(stderr, "-jN writes split C files with N jobs, like -j14\n");
-    fprintf(stderr, "--rel-base optionally sets the first virtual load address used for REL codegen\n");
-    fprintf(stderr, "--setup downloads database/titles.txt and can install wit tools\n");
-    fprintf(stderr, "without output: writes generated code under the current directory\n");
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  -jN                            Use N worker jobs for split C output (e.g. -j14)\n");
+    fprintf(stderr, "  --cpu gekko|broadway|espresso  Select CPU profile (default: broadway)\n");
+    fprintf(stderr, "  --gamecube                     GameCube mode (no title ID required)\n");
+    fprintf(stderr, "  --rel-base <addr>              Override first virtual load address for REL codegen\n");
+    fprintf(stderr, "  --setup                        Download titles database and optionally install wit\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Examples:\n");
+    fprintf(stderr, "  GameCube:     %s --gamecube <input.dol> build\n", prog);
+    fprintf(stderr, "  Wii DOL:      %s <input.dol> SUKE01 build\n", prog);
+    fprintf(stderr, "  REL module:   %s <input.rel | rel_folder> SUKE01 build\n", prog);
+    fprintf(stderr, "  Wii U RPX:    %s --cpu espresso <input.rpx> build\n", prog);
+    fprintf(stderr, "  Extract ISO:  %s extract game.iso output_folder\n", prog);
+    fprintf(stderr, "  Extract WBFS: %s extract game.wbfs output_folder\n", prog);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Output rules:\n");
+    fprintf(stderr, "  output.c      Writes that exact split C set\n");
+    fprintf(stderr, "  output-dir    Wii: writes output-dir/<title-id>_generated/<title-id>.c\n");
+    fprintf(stderr, "                GameCube/Wii U: writes output-dir/generated/generated.c\n");
+    fprintf(stderr, "  (none)        Writes generated code under the current directory\n");
 }
 
 int is_title_id(const char* text) {
@@ -266,4 +275,3 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
 
     return 1;
 }
-
