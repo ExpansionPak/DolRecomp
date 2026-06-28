@@ -51,6 +51,18 @@ devkitPro is highly recommended for Wii U recomps.
 
 ## Usage
 
+For help run
+
+```sh
+# Windows
+dolrecomp.exe
+
+# MacOS/Linux
+./dolrecomp
+```
+
+to output a list of commands and arguments.
+
 Set up the local title database if you want Wii title names in CLI output. Setup also offers to download Wiimms ISO Tools if `wit` is missing:
 
 <sub>this was just a fun extra thing, just run in gamecube mode if you want to skip it</sub>
