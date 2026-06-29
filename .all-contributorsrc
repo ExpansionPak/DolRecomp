@@ -9,5 +9,43 @@
   "imageSize": 100,
   "commit": true,
   "contributorsPerLine": 7,
-  "contributors": []
+  "contributors": [
+    {
+      "login": "siahisaforker",
+      "name": "jw",
+      "avatar_url": "https://avatars.githubusercontent.com/u/183880766?v=4",
+      "profile": "https://github.com/siahisaforker",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "dreamsailing59-ops",
+      "name": "smallington",
+      "avatar_url": "https://avatars.githubusercontent.com/u/236145528?v=4",
+      "profile": "https://github.com/dreamsailing59-ops",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "flafmg",
+      "name": "flaffy",
+      "avatar_url": "https://avatars.githubusercontent.com/u/100975643?v=4",
+      "profile": "https://github.com/flafmg",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "MrPoloGit",
+      "name": "Marco Frank",
+      "avatar_url": "https://avatars.githubusercontent.com/u/47047767?v=4",
+      "profile": "https://mrpologit.github.io/",
+      "contributions": [
+        "doc"
+      ]
+    }
+  ],
+  "commitConvention": "angular"
 }
