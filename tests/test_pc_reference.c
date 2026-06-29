@@ -701,19 +701,19 @@ static void exec_inst(CPUState* cpu, const PPCInst* inst) {
     }
 
     case PPC_OP_FADDS:
-        cpu->fpr[inst->rD] = (f64)((f32)cpu->fpr[inst->rA] + (f32)cpu->fpr[inst->rB]);
+        cpu->fpr[inst->rD] = (f64)(f32)(cpu->fpr[inst->rA] + cpu->fpr[inst->rB]);
         break;
 
     case PPC_OP_FSUBS:
-        cpu->fpr[inst->rD] = (f64)((f32)cpu->fpr[inst->rA] - (f32)cpu->fpr[inst->rB]);
+        cpu->fpr[inst->rD] = (f64)(f32)(cpu->fpr[inst->rA] - cpu->fpr[inst->rB]);
         break;
 
     case PPC_OP_FMULS:
-        cpu->fpr[inst->rD] = (f64)((f32)cpu->fpr[inst->rA] * (f32)cpu->fpr[inst->rC]);
+        cpu->fpr[inst->rD] = (f64)(f32)(cpu->fpr[inst->rA] * cpu->fpr[inst->rC]);
         break;
 
     case PPC_OP_FDIVS:
-        cpu->fpr[inst->rD] = (f64)((f32)cpu->fpr[inst->rA] / (f32)cpu->fpr[inst->rB]);
+        cpu->fpr[inst->rD] = (f64)(f32)(cpu->fpr[inst->rA] / cpu->fpr[inst->rB]);
         break;
 
     case PPC_OP_FRES:
@@ -2611,6 +2611,19 @@ static void test_fpu_arithmetic(CPUState* cpu) {
     cpu->fpr[12] = 2.0;
     exec_raw(cpu, 0xED4B6024, BASE);
     check_eq(f32_to_bits((f32)cpu->fpr[10]), 0x40600000u, "fdivs result");
+
+    {
+        const f64 int_to_float_magic = 4503601774854144.0;
+        cpu->fpr[2] = int_to_float_magic + 640.0;
+        cpu->fpr[3] = -int_to_float_magic;
+        exec_raw(cpu, 0xEC22182A, BASE);
+        check_eq(f32_to_bits((f32)cpu->fpr[1]), 0x44200000u, "fadds rounds after double add");
+
+        cpu->fpr[5] = int_to_float_magic + 640.0;
+        cpu->fpr[6] = int_to_float_magic;
+        exec_raw(cpu, 0xEC853028, BASE);
+        check_eq(f32_to_bits((f32)cpu->fpr[4]), 0x44200000u, "fsubs rounds after double subtract");
+    }
 
     cpu->fpr[14] = 1.25;
     cpu->fpr[15] = 2.5;

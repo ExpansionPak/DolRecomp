@@ -927,22 +927,22 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_FADDS:
-        fprintf(out, "    ctx->fpr[%u] = (f64)((f32)ctx->fpr[%u] + (f32)ctx->fpr[%u]);\n",
+        fprintf(out, "    ctx->fpr[%u] = (f64)(f32)(ctx->fpr[%u] + ctx->fpr[%u]);\n",
                 inst->rD, inst->rA, inst->rB);
         break;
 
     case PPC_OP_FSUBS:
-        fprintf(out, "    ctx->fpr[%u] = (f64)((f32)ctx->fpr[%u] - (f32)ctx->fpr[%u]);\n",
+        fprintf(out, "    ctx->fpr[%u] = (f64)(f32)(ctx->fpr[%u] - ctx->fpr[%u]);\n",
                 inst->rD, inst->rA, inst->rB);
         break;
 
     case PPC_OP_FMULS:
-        fprintf(out, "    ctx->fpr[%u] = (f64)((f32)ctx->fpr[%u] * (f32)ctx->fpr[%u]);\n",
+        fprintf(out, "    ctx->fpr[%u] = (f64)(f32)(ctx->fpr[%u] * ctx->fpr[%u]);\n",
                 inst->rD, inst->rA, inst->rC);
         break;
 
     case PPC_OP_FDIVS:
-        fprintf(out, "    ctx->fpr[%u] = (f64)((f32)ctx->fpr[%u] / (f32)ctx->fpr[%u]);\n",
+        fprintf(out, "    ctx->fpr[%u] = (f64)(f32)(ctx->fpr[%u] / ctx->fpr[%u]);\n",
                 inst->rD, inst->rA, inst->rB);
         break;
 
