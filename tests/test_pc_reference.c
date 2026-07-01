@@ -1114,7 +1114,9 @@ static void exec_inst(CPUState* cpu, const PPCInst* inst) {
     case PPC_OP_LFSU: {
         bool update = inst->op == PPC_OP_LFSU;
         u32 ea = dform_ea(cpu, inst, update);
-        cpu->fpr[inst->rD] = (f64)f32_from_bits(mem_read32(cpu, ea));
+        f64 value = (f64)f32_from_bits(mem_read32(cpu, ea));
+        cpu->fpr[inst->rD] = value;
+        cpu->ps1[inst->rD] = value;
         if (update) cpu->gpr[inst->rA] = ea;
         break;
     }
@@ -1132,7 +1134,9 @@ static void exec_inst(CPUState* cpu, const PPCInst* inst) {
     case PPC_OP_LFSUX: {
         bool update = inst->op == PPC_OP_LFSUX;
         u32 ea = xform_ea(cpu, inst, update);
-        cpu->fpr[inst->rD] = (f64)f32_from_bits(mem_read32(cpu, ea));
+        f64 value = (f64)f32_from_bits(mem_read32(cpu, ea));
+        cpu->fpr[inst->rD] = value;
+        cpu->ps1[inst->rD] = value;
         if (update) cpu->gpr[inst->rA] = ea;
         break;
     }
@@ -2174,13 +2178,17 @@ static void test_fpu_memory(CPUState* cpu) {
     cpu_reset(cpu);
     cpu->gpr[4] = base;
 
+    cpu->ps1[1] = (f64)f32_from_bits(0x7FC12345u);
     mem_write32(cpu, base, 0x3F800000u);
     exec_raw(cpu, 0xC0240000, BASE);
     check_eq(f32_to_bits((f32)cpu->fpr[1]), 0x3F800000u, "lfs loads single");
+    check_eq(f32_to_bits((f32)cpu->ps1[1]), 0x3F800000u, "lfs updates paired half");
 
+    cpu->ps1[2] = (f64)f32_from_bits(0x7FC12345u);
     mem_write32(cpu, base + 4, 0x80000000u);
     exec_raw(cpu, 0xC4440004, BASE);
     check_eq(f32_to_bits((f32)cpu->fpr[2]), 0x80000000u, "lfsu preserves negative zero");
+    check_eq(f32_to_bits((f32)cpu->ps1[2]), 0x80000000u, "lfsu updates paired half");
     check_eq(cpu->gpr[4], base + 4, "lfsu updates rA");
 
     cpu->gpr[4] = base;
@@ -2215,15 +2223,19 @@ static void test_fpu_memory(CPUState* cpu) {
 
     cpu->gpr[4] = base;
     cpu->gpr[5] = 0x80;
+    cpu->ps1[9] = (f64)f32_from_bits(0x7FC12345u);
     mem_write32(cpu, base + 0x80, 0x40490FDBu);
     exec_raw(cpu, 0x7D242C2E, BASE);
     check_eq(f32_to_bits((f32)cpu->fpr[9]), 0x40490FDBu, "lfsx loads single");
+    check_eq(f32_to_bits((f32)cpu->ps1[9]), 0x40490FDBu, "lfsx updates paired half");
 
     cpu->gpr[4] = base;
     cpu->gpr[5] = 0x84;
+    cpu->ps1[10] = (f64)f32_from_bits(0x7FC12345u);
     mem_write32(cpu, base + 0x84, 0xC0200000u);
     exec_raw(cpu, 0x7D442C6E, BASE);
     check_eq(f32_to_bits((f32)cpu->fpr[10]), 0xC0200000u, "lfsux loads single");
+    check_eq(f32_to_bits((f32)cpu->ps1[10]), 0xC0200000u, "lfsux updates paired half");
     check_eq(cpu->gpr[4], base + 0x84, "lfsux updates rA");
 
     cpu->gpr[4] = base;

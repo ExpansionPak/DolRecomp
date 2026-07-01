@@ -160,8 +160,9 @@ static void emit_fload(FILE* out, const PPCInst* inst, bool single,
     emit_dform_ea(out, inst->rA, inst->simm, update);
     fprintf(out, ";\n");
     if (single) {
-        fprintf(out, "        ctx->fpr[%u] = (f64)dolrecomp_f32_from_bits(mem_read32(ctx, ea));\n",
-                inst->rD);
+        fprintf(out, "        f64 value = (f64)dolrecomp_f32_from_bits(mem_read32(ctx, ea));\n");
+        fprintf(out, "        ctx->fpr[%u] = value;\n", inst->rD);
+        fprintf(out, "        ctx->ps1[%u] = value;\n", inst->rD);
     } else {
         fprintf(out, "        ctx->fpr[%u] = dolrecomp_f64_from_bits(mem_read64(ctx, ea));\n",
                 inst->rD);
@@ -179,8 +180,9 @@ static void emit_floadx(FILE* out, const PPCInst* inst, bool single,
     emit_xform_ea(out, inst->rA, inst->rB, update);
     fprintf(out, ";\n");
     if (single) {
-        fprintf(out, "        ctx->fpr[%u] = (f64)dolrecomp_f32_from_bits(mem_read32(ctx, ea));\n",
-                inst->rD);
+        fprintf(out, "        f64 value = (f64)dolrecomp_f32_from_bits(mem_read32(ctx, ea));\n");
+        fprintf(out, "        ctx->fpr[%u] = value;\n", inst->rD);
+        fprintf(out, "        ctx->ps1[%u] = value;\n", inst->rD);
     } else {
         fprintf(out, "        ctx->fpr[%u] = dolrecomp_f64_from_bits(mem_read64(ctx, ea));\n",
                 inst->rD);

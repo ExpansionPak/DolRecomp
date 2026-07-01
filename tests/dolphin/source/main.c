@@ -1345,15 +1345,37 @@ static void test_fpu_memory(void) {
     double fs;
     volatile u8* ptr;
     u32 off;
+    static volatile u8 ps_out[8] __attribute__((aligned(32)));
 
     be_store32(&mem[0], 0x3F800000u);
     asm volatile("lfs %0,0(%1)" : "=f"(fd) : "r"(&mem[0]) : "memory");
     check_eq(f32_bits((float)fd), 0x3F800000u, "lfs loads single");
+    memset((void*)ps_out, 0xCC, sizeof(ps_out));
+    asm volatile(
+        "lfs %0,0(%1)\n\t"
+        "psq_st %0,0(%2),0,0"
+        : "=&f"(fd)
+        : "r"(&mem[0]), "r"(&ps_out[0])
+        : "memory"
+    );
+    check_eq(be_load32(&ps_out[0]), 0x3F800000u, "lfs paired ps0");
+    check_eq(be_load32(&ps_out[4]), 0x3F800000u, "lfs paired ps1");
 
     be_store32(&mem[4], 0x80000000u);
     ptr = &mem[0];
     asm volatile("lfsu %0,4(%1)" : "=f"(fd), "+r"(ptr) : : "memory");
     check_eq(f32_bits((float)fd), 0x80000000u, "lfsu preserves negative zero");
+    memset((void*)ps_out, 0xCC, sizeof(ps_out));
+    ptr = &mem[0];
+    asm volatile(
+        "lfsu %0,4(%1)\n\t"
+        "psq_st %0,0(%2),0,0"
+        : "=&f"(fd), "+r"(ptr)
+        : "r"(&ps_out[0])
+        : "memory"
+    );
+    check_eq(be_load32(&ps_out[0]), 0x80000000u, "lfsu paired ps0");
+    check_eq(be_load32(&ps_out[4]), 0x80000000u, "lfsu paired ps1");
     check((u32)ptr == (u32)&mem[4], "lfsu updates rA");
 
     be_store64(&mem[8], 0x400921FB54442D18ull);
@@ -1390,12 +1412,33 @@ static void test_fpu_memory(void) {
     be_store32(&mem[0x80], 0x40490FDBu);
     asm volatile("lfsx %0,%1,%2" : "=f"(fd) : "r"(&mem[0]), "r"(off) : "memory");
     check_eq(f32_bits((float)fd), 0x40490FDBu, "lfsx loads single");
+    memset((void*)ps_out, 0xCC, sizeof(ps_out));
+    asm volatile(
+        "lfsx %0,%1,%2\n\t"
+        "psq_st %0,0(%3),0,0"
+        : "=&f"(fd)
+        : "r"(&mem[0]), "r"(off), "r"(&ps_out[0])
+        : "memory"
+    );
+    check_eq(be_load32(&ps_out[0]), 0x40490FDBu, "lfsx paired ps0");
+    check_eq(be_load32(&ps_out[4]), 0x40490FDBu, "lfsx paired ps1");
 
     off = 0x84;
     be_store32(&mem[0x84], 0xC0200000u);
     ptr = &mem[0];
     asm volatile("lfsux %0,%1,%2" : "=f"(fd), "+r"(ptr) : "r"(off) : "memory");
     check_eq(f32_bits((float)fd), 0xC0200000u, "lfsux loads single");
+    memset((void*)ps_out, 0xCC, sizeof(ps_out));
+    ptr = &mem[0];
+    asm volatile(
+        "lfsux %0,%1,%2\n\t"
+        "psq_st %0,0(%3),0,0"
+        : "=&f"(fd), "+r"(ptr)
+        : "r"(off), "r"(&ps_out[0])
+        : "memory"
+    );
+    check_eq(be_load32(&ps_out[0]), 0xC0200000u, "lfsux paired ps0");
+    check_eq(be_load32(&ps_out[4]), 0xC0200000u, "lfsux paired ps1");
     check((u32)ptr == (u32)&mem[0x84], "lfsux updates rA");
 
     off = 0x88;
