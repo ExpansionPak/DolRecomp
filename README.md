@@ -6,7 +6,7 @@ The current project is CPU only. You will need to supply your own runtime.
 
 ## Actual Progress
 
-We'd rather not waste your time on meaningless "tests" or "demos", so here's Luigi's Mansion running via DolRecomp:
+We'd rather show real game progress than pad the README with synthetic tests and tiny demos, so here is Luigi's Mansion reaching the title screen through DolRecomp:
 
 ![Luigi's Mansion title screen running via DolRecomp](assets/mansion.png)
 
