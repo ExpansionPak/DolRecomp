@@ -78,7 +78,11 @@ int main(void) {
           "call helpers set the entry pc");
     check(strstr(code, "if (ppc_host_call(ctx, address)) return 1;") != NULL,
           "public dispatcher checks host replacements first");
-    check(strstr(code, "return dolrecomp_call_original(ctx, address);") != NULL,
+    check(strstr(code, "dolrecomp_physical_pc_alias") != NULL &&
+          strstr(code, "if (ppc_host_call(ctx, alias)) return 1;") != NULL &&
+          strstr(code, "if (dolrecomp_call_original(ctx, alias)) return 1;") != NULL,
+          "public dispatcher retries physical MEM1 aliases");
+    check(strstr(code, "if (dolrecomp_call_original(ctx, address)) return 1;") != NULL,
           "public dispatcher can fall back to original code");
 
     free(code);
