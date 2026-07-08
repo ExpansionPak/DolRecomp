@@ -155,3 +155,72 @@ add_test(NAME codegen_compile
         -DHOST_BUILD_CONFIG=$<CONFIG>
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/codegen_compile.cmake
 )
+
+# Emitted-code acceptance differential.
+# Decode + emit each probe through the REAL emitter, run the generated C, and
+# byte-compare the resulting CPU state against real-Gekko expectations (oracle).
+# Catches emitter-semantics defects -- known (catalogued xfail) and unknown.
+add_executable(diff_gen
+    tests/diff/gen.c
+    src/frontend/decoder.c
+    src/backend/emitter.c
+)
+target_include_directories(diff_gen PRIVATE src tests/diff)
+
+set(DIFF_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/probes_generated.c)
+add_custom_command(
+    OUTPUT ${DIFF_GENERATED}
+    COMMAND $<TARGET_FILE:diff_gen> ${DIFF_GENERATED}
+    DEPENDS diff_gen
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/diff/probes.inc
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/diff/probe.h
+    COMMENT "Emitting instruction probes through the DolRecomp emitter"
+)
+
+add_executable(test_emitted_diff
+    tests/diff/run.c
+    ${DIFF_GENERATED}
+    src/cpu/cpu.c
+)
+target_include_directories(test_emitted_diff PRIVATE src tests/diff)
+# Match Gekko IEEE-754 round-once semantics on the host: no fma contraction,
+# no fast-math reassociation.
+if(NOT MSVC)
+    target_compile_options(test_emitted_diff PRIVATE -ffp-contract=off -fno-fast-math)
+endif()
+if(NOT WIN32)
+    target_link_libraries(test_emitted_diff PRIVATE m)
+endif()
+add_test(NAME emitted_diff COMMAND test_emitted_diff)
+
+# Dedicated emitted-code checks for non-fallthrough/control/system/cache forms
+# that cannot live in the ordinary producer-DOL fallthrough matrix.
+add_executable(dedicated_diff_gen
+    tests/diff/dedicated_gen.c
+    src/frontend/decoder.c
+    src/backend/emitter.c
+)
+target_include_directories(dedicated_diff_gen PRIVATE src tests/diff)
+
+set(DEDICATED_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/dedicated_generated.c)
+add_custom_command(
+    OUTPUT ${DEDICATED_GENERATED}
+    COMMAND $<TARGET_FILE:dedicated_diff_gen> ${DEDICATED_GENERATED}
+    DEPENDS dedicated_diff_gen
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/diff/dedicated_cases.h
+    COMMENT "Emitting dedicated control/system probes through the DolRecomp emitter"
+)
+
+add_executable(test_dedicated_diff
+    tests/diff/dedicated_run.c
+    ${DEDICATED_GENERATED}
+    src/cpu/cpu.c
+)
+target_include_directories(test_dedicated_diff PRIVATE src tests/diff)
+if(NOT MSVC)
+    target_compile_options(test_dedicated_diff PRIVATE -ffp-contract=off -fno-fast-math)
+endif()
+if(NOT WIN32)
+    target_link_libraries(test_dedicated_diff PRIVATE m)
+endif()
+add_test(NAME dedicated_diff COMMAND test_dedicated_diff)
