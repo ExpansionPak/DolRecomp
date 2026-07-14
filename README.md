@@ -4,11 +4,15 @@ DolRecomp is a static recompiler for GameCube, Wii, and experimental Wii U CPU c
 
 The current project is CPU only. You will need to supply your own runtime.
 
+Luckily, we have you covered there. check out ![ModernGekko!](https://github.com/ExpansionPak/ModernGekko)
+
 ## Actual Progress
 
 We'd rather show real game progress than pad the README with synthetic tests and tiny demos, so here is Luigi's Mansion reaching the title screen through DolRecomp:
 
 ![Luigi's Mansion title screen running via DolRecomp](assets/mansion.png)
+
+And many more in the discord!
 
 ## Important!
 
