@@ -290,6 +290,10 @@ PPCInst ppc_decode(u32 raw, u32 address);
 // opcode name string
 const char* ppc_op_name(PPCOpcode op);
 
+static inline bool ppc_op_uses_fpu(PPCOpcode op) {
+    return op >= PPC_OP_STFIWX && op <= PPC_OP_PS_SEL;
+}
+
 // disassemble to buf, returns buf
 char* ppc_disasm(char* buf, size_t buf_size, const PPCInst* inst);
 

@@ -136,7 +136,7 @@ static void test_codegen_supports_jumptable(const char* code) {
           "computed branch hands the target to the dispatcher");
     check(strstr(code, "mem_read32(ctx, ea)") != NULL,
           "lwzx table load lowers to a memory read");
-    check(strstr(code, "ppc_mtspr(ctx, 9u, ctx->gpr[12]") != NULL,
+    check(strstr(code, "ctx->ctr = ctx->gpr[12]") != NULL,
           "mtctr loads the table entry into CTR");
 
     char needle[64];

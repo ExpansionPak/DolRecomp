@@ -3,6 +3,8 @@
 
 #include "emitter.h"
 
+#include <stdlib.h>
+
 static u32 cr_field_shift(u8 crf) {
     return 4u * (7u - (u32)crf);
 }
@@ -386,6 +388,9 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "// DolRecomp output\n"
         "// cpu: %s\n"
         "\n"
+        "#ifndef RECOMP_GENERATED_H\n"
+        "#define RECOMP_GENERATED_H\n"
+        "\n"
         "#define DOLRECOMP_CPU_%s 1\n"
         "#define DOLRECOMP_CPU_NAME \"%s\"\n"
         "\n"
@@ -445,7 +450,7 @@ void emit_header(FILE* out) {
 }
 
 void emit_footer(FILE* out) {
-    fprintf(out, "\n// end\n");
+    fprintf(out, "\n#endif /* RECOMP_GENERATED_H */\n\n// end\n");
 }
 
 static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
@@ -458,6 +463,9 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "    // embedded data\n\n");
         return;
     }
+
+    if (ppc_op_uses_fpu(inst->op))
+        fprintf(out, "    if (!ppc_fp_available(ctx, 0x%08Xu)) return;\n", inst->address);
 
     switch (inst->op) {
     case PPC_OP_MULLI:
@@ -1496,10 +1504,15 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     case PPC_OP_DCBST:
     case PPC_OP_DCBF:
-    case PPC_OP_DCBTST:
-    case PPC_OP_DCBT:
     case PPC_OP_DCBI:
     case PPC_OP_ICBI:
+        fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
+                inst->raw, inst->address);
+        fprintf(out, "    return;\n");
+        break;
+
+    case PPC_OP_DCBTST:
+    case PPC_OP_DCBT:
         fprintf(out, "    (void)ctx;\n");
         break;
 
@@ -1657,15 +1670,59 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_MFSPR:
-        fprintf(out, "    ctx->gpr[%u] = ppc_mfspr(ctx, %uu, 0x%08Xu);\n",
-                inst->rD, inst->spr, inst->address);
-        fprintf(out, "    if (ctx->exception) return;\n");
+        switch (inst->spr) {
+        case 1: fprintf(out, "    ctx->gpr[%u] = ctx->xer;\n", inst->rD); break;
+        case 8: fprintf(out, "    ctx->gpr[%u] = ctx->lr;\n", inst->rD); break;
+        case 9: fprintf(out, "    ctx->gpr[%u] = ctx->ctr;\n", inst->rD); break;
+        case 26: fprintf(out, "    ctx->gpr[%u] = ctx->srr0;\n", inst->rD); break;
+        case 27: fprintf(out, "    ctx->gpr[%u] = ctx->srr1;\n", inst->rD); break;
+        case 268:
+        case 269:
+            fprintf(out, "    ctx->gpr[%u] = ppc_mftb(ctx, %uu, 0x%08Xu);\n",
+                    inst->rD, inst->spr, inst->address);
+            fprintf(out, "    if (ctx->exception) return;\n");
+            break;
+        case 912: fprintf(out, "    ctx->gpr[%u] = ctx->gqr[0];\n", inst->rD); break;
+        case 913: fprintf(out, "    ctx->gpr[%u] = ctx->gqr[1];\n", inst->rD); break;
+        case 914: fprintf(out, "    ctx->gpr[%u] = ctx->gqr[2];\n", inst->rD); break;
+        case 915: fprintf(out, "    ctx->gpr[%u] = ctx->gqr[3];\n", inst->rD); break;
+        case 916: fprintf(out, "    ctx->gpr[%u] = ctx->gqr[4];\n", inst->rD); break;
+        case 917: fprintf(out, "    ctx->gpr[%u] = ctx->gqr[5];\n", inst->rD); break;
+        case 918: fprintf(out, "    ctx->gpr[%u] = ctx->gqr[6];\n", inst->rD); break;
+        case 919: fprintf(out, "    ctx->gpr[%u] = ctx->gqr[7];\n", inst->rD); break;
+        case 282: fprintf(out, "    ctx->gpr[%u] = ctx->ear;\n", inst->rD); break;
+        case 920: fprintf(out, "    ctx->gpr[%u] = ctx->hid2;\n", inst->rD); break;
+        default:
+            fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
+                    inst->raw, inst->address);
+            fprintf(out, "    return;\n");
+            break;
+        }
         break;
 
     case PPC_OP_MTSPR:
-        fprintf(out, "    ppc_mtspr(ctx, %uu, ctx->gpr[%u], 0x%08Xu);\n",
-                inst->spr, inst->rS, inst->address);
-        fprintf(out, "    if (ctx->exception) return;\n");
+        switch (inst->spr) {
+        case 1: fprintf(out, "    ctx->xer = ctx->gpr[%u];\n", inst->rS); break;
+        case 8: fprintf(out, "    ctx->lr = ctx->gpr[%u];\n", inst->rS); break;
+        case 9: fprintf(out, "    ctx->ctr = ctx->gpr[%u];\n", inst->rS); break;
+        case 26: fprintf(out, "    ctx->srr0 = ctx->gpr[%u];\n", inst->rS); break;
+        case 27: fprintf(out, "    ctx->srr1 = ctx->gpr[%u];\n", inst->rS); break;
+        case 282: fprintf(out, "    ctx->ear = ctx->gpr[%u];\n", inst->rS); break;
+        case 912: fprintf(out, "    ctx->gqr[0] = ctx->gpr[%u];\n", inst->rS); break;
+        case 913: fprintf(out, "    ctx->gqr[1] = ctx->gpr[%u];\n", inst->rS); break;
+        case 914: fprintf(out, "    ctx->gqr[2] = ctx->gpr[%u];\n", inst->rS); break;
+        case 915: fprintf(out, "    ctx->gqr[3] = ctx->gpr[%u];\n", inst->rS); break;
+        case 916: fprintf(out, "    ctx->gqr[4] = ctx->gpr[%u];\n", inst->rS); break;
+        case 917: fprintf(out, "    ctx->gqr[5] = ctx->gpr[%u];\n", inst->rS); break;
+        case 918: fprintf(out, "    ctx->gqr[6] = ctx->gpr[%u];\n", inst->rS); break;
+        case 919: fprintf(out, "    ctx->gqr[7] = ctx->gpr[%u];\n", inst->rS); break;
+        case 920: fprintf(out, "    ctx->hid2 = ctx->gpr[%u];\n", inst->rS); break;
+        default:
+            fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
+                    inst->raw, inst->address);
+            fprintf(out, "    return;\n");
+            break;
+        }
         break;
 
     case PPC_OP_TLBIE:
@@ -1716,9 +1773,147 @@ void emit_instruction(FILE* out, const PPCInst* inst) {
     emit_instruction_with_range(out, inst, 0, (u32)-1);
 }
 
+static bool mfspr_is_modeled(u16 spr) {
+    switch (spr) {
+    case 1: case 8: case 9: case 26: case 27:
+    case 268: case 269: case 282:
+    case 912: case 913: case 914: case 915:
+    case 916: case 917: case 918: case 919: case 920:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool mtspr_is_modeled(u16 spr) {
+    switch (spr) {
+    case 1: case 8: case 9: case 26: case 27: case 282:
+    case 912: case 913: case 914: case 915:
+    case 916: case 917: case 918: case 919: case 920:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool inst_routes_to_fallback(const PPCInst* inst) {
+    switch (inst->op) {
+    case PPC_OP_DCBST:
+    case PPC_OP_DCBF:
+    case PPC_OP_DCBI:
+    case PPC_OP_ICBI:
+    case PPC_OP_UNKNOWN:
+        return true;
+    case PPC_OP_MFSPR:
+        return !mfspr_is_modeled(inst->spr);
+    case PPC_OP_MTSPR:
+        return !mtspr_is_modeled(inst->spr);
+    default:
+        return false;
+    }
+}
+
+static bool inst_ends_block(const PPCInst* inst) {
+    switch (inst->op) {
+    case PPC_OP_B:
+    case PPC_OP_BC:
+    case PPC_OP_BCLR:
+    case PPC_OP_BCCTR:
+    case PPC_OP_SC:
+    case PPC_OP_RFI:
+        return true;
+    default:
+        return inst_routes_to_fallback(inst);
+    }
+}
+
+static u32 inst_cycle_cost(const PPCInst* inst) {
+    if (inst->embedded_data || inst_routes_to_fallback(inst))
+        return 0;
+
+    switch (inst->op) {
+    case PPC_OP_MULLI:
+        return 3;
+    case PPC_OP_SC:
+    case PPC_OP_RFI:
+    case PPC_OP_TW:
+        return 2;
+    case PPC_OP_LMW:
+    case PPC_OP_STMW:
+        return 11;
+    case PPC_OP_MULLW:
+    case PPC_OP_MULLWO:
+    case PPC_OP_MULHW:
+    case PPC_OP_MULHWU:
+        return 5;
+    case PPC_OP_DIVW:
+    case PPC_OP_DIVWO:
+    case PPC_OP_DIVWU:
+    case PPC_OP_DIVWUO:
+        return 40;
+    case PPC_OP_DCBZ:
+        return 5;
+    case PPC_OP_DCBTST:
+    case PPC_OP_DCBT:
+        return 2;
+    case PPC_OP_MFSR:
+    case PPC_OP_MFSRIN:
+        return 3;
+    case PPC_OP_MTSPR:
+        return 2;
+    case PPC_OP_SYNC:
+        return 3;
+    case PPC_OP_MTFSB0:
+    case PPC_OP_MTFSB1:
+    case PPC_OP_MTFSF:
+    case PPC_OP_MTFSFI:
+        return 3;
+    case PPC_OP_FDIVS:
+        return 17;
+    case PPC_OP_FDIV:
+        return 31;
+    case PPC_OP_PS_DIV:
+        return 17;
+    case PPC_OP_PS_RSQRTE:
+        return 2;
+    default:
+        return 1;
+    }
+}
+
 void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     u32 i;
     u32 func_end = func_addr + count * 4u;
+
+    u8* leader = (u8*)calloc(count ? count : 1u, sizeof(u8));
+    u32* block_cost = (u32*)calloc(count ? count : 1u, sizeof(u32));
+
+    if (count)
+        leader[0] = 1;
+    for (i = 0; i < count; i++) {
+        const PPCInst* inst = &insts[i];
+        if (inst->embedded_data)
+            continue;
+        if (inst_ends_block(inst) && i + 1u < count)
+            leader[i + 1u] = 1;
+        if ((inst->op == PPC_OP_B || inst->op == PPC_OP_BC) &&
+            branch_target_is_local(func_addr, func_end, inst->branch_target)) {
+            leader[(inst->branch_target - func_addr) / 4u] = 1;
+        }
+    }
+    for (i = 0; i < count; i++) {
+        u32 j;
+        if (!leader[i])
+            continue;
+        for (j = i;;) {
+            block_cost[i] += inst_cycle_cost(&insts[j]);
+            if (inst_ends_block(&insts[j]))
+                break;
+            j++;
+            if (j >= count || leader[j])
+                break;
+        }
+    }
 
     fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
     fprintf(out, "    switch (ctx->pc) {\n");
@@ -1732,8 +1927,13 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     for (i = 0; i < count; i++) {
         fprintf(out, "label_%08X:\n", insts[i].address);
         fprintf(out, "    ctx->pc = 0x%08Xu;\n", insts[i].address);
+        if (leader[i] && block_cost[i] != 0)
+            fprintf(out, "    ctx->downcount -= %u;\n", block_cost[i]);
         emit_instruction_with_range(out, &insts[i], func_addr, func_end);
     }
+
+    free(leader);
+    free(block_cost);
 
     fprintf(out, "    ctx->pc = 0x%08Xu;\n", func_end);
     fprintf(out, "}\n\n");

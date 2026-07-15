@@ -122,10 +122,14 @@ int main(int argc, char** argv) {
     adjacent_branch[2] = ppc_decode(0x4E800020, BASE + 0x1014);
     emit_function(out, adjacent_branch, 3, BASE + 0x100C);
 
+    PPCInst linked_lr_branch = ppc_decode(0x4E800021, BASE + 0x1018);
+    emit_function(out, &linked_lr_branch, 1, BASE + 0x1018);
+
     FunctionList funcs = {0};
     if (!function_list_add(&funcs, BASE, BASE + (u32)count * 4u) ||
         !function_list_add(&funcs, BASE + 0x1000, BASE + 0x100C) ||
-        !function_list_add(&funcs, BASE + 0x100C, BASE + 0x1018)) {
+        !function_list_add(&funcs, BASE + 0x100C, BASE + 0x1018) ||
+        !function_list_add(&funcs, BASE + 0x1018, BASE + 0x101C)) {
         function_list_free(&funcs);
         free(insts);
         if (out != stdout) fclose(out);

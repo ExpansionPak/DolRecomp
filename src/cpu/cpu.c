@@ -300,6 +300,13 @@ void ppc_program_exception(CPUState* cpu, u32 cause, u32 cia) {
     ppc_take_exception(cpu, PPC_EXC_PROGRAM, PPC_VECTOR_PROGRAM, cia, cause);
 }
 
+bool ppc_fp_available(CPUState* cpu, u32 cia) {
+    if (cpu->msr & PPC_MSR_FP)
+        return true;
+    ppc_take_exception(cpu, PPC_EXC_FP_UNAVAILABLE, PPC_VECTOR_FP_UNAVAILABLE, cia, 0);
+    return false;
+}
+
 void ppc_fallback_instruction(CPUState* cpu, u32 raw, u32 cia) {
     if (cpu->instruction_fallback) {
         cpu->instruction_fallback(cpu, raw, cia);
