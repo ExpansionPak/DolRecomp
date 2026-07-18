@@ -10,6 +10,7 @@
 #include "backend/emitter.h"
 #include "backend/dispatch.h"
 #include "backend/codegen.h"
+#include "backend/symbols.h"
 #include "analysis/code_section.h"
 #include "analysis/embedded_data.h"
 #include "analysis/smc.h"
@@ -21,9 +22,11 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
                                     u32 section_count,
                                     const char* output_path,
                                     DolRecompCPU cpu, u32 entry_point, u32 jobs,
-                                    int local_chunks_dir) {
+                                    int local_chunks_dir,
+                                    const DolRecompSymbolMap* symbols) {
     char stem[1024];
     char header_path[1100];
+    char symbol_header_path[1100];
     char chunks_dir[1100];
     char chunks_label[512];
     char include_name[512];
@@ -36,6 +39,11 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
     }
 
     if (snprintf(header_path, sizeof(header_path), "%s.h", stem) >= (int)sizeof(header_path)) {
+        fprintf(stderr, "error: output path is too long\n");
+        return 0;
+    }
+    if (snprintf(symbol_header_path, sizeof(symbol_header_path), "%s_symbols.h", stem) >=
+        (int)sizeof(symbol_header_path)) {
         fprintf(stderr, "error: output path is too long\n");
         return 0;
     }
@@ -77,6 +85,33 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
     fprintf(manifest, "// Build these C files too:\n");
 
     emit_header_for_cpu(header, cpu);
+    if (symbols) {
+        u32 symbol_count = count_code_symbols(symbols, sections, section_count);
+        if (symbol_count == 0) {
+            fprintf(stderr, "error: symbol map has no entries in executable sections\n");
+            fclose(header);
+            fclose(manifest);
+            return 0;
+        }
+        FILE* symbol_header = fopen(symbol_header_path, "w");
+        if (!symbol_header) {
+            fprintf(stderr, "error: can't open output '%s'\n", symbol_header_path);
+            fclose(header);
+            fclose(manifest);
+            return 0;
+        }
+        if (!emit_symbol_definitions(symbol_header, symbols, sections, section_count)) {
+            fprintf(stderr, "error: failed to emit symbol map\n");
+            fclose(symbol_header);
+            fclose(header);
+            fclose(manifest);
+            return 0;
+        }
+        fclose(symbol_header);
+        printf("loaded %u executable symbols\n", symbol_count);
+    } else {
+        remove(symbol_header_path);
+    }
     fprintf(header, "\n// Function entry points\n");
 
     u32 file_count = 0;
@@ -289,12 +324,15 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
 
     printf("done!\n");
     printf("  header: %s\n", header_path);
+    if (symbols)
+        printf("  symbols: %s\n", symbol_header_path);
     printf("  chunks: %s (%u files)\n", chunks_dir, file_count);
     return 1;
 }
 
 int emit_dol_split(const DOLFile* dol, const char* output_path,
-                          DolRecompCPU cpu, u32 jobs, int local_chunks_dir) {
+                          DolRecompCPU cpu, u32 jobs, int local_chunks_dir,
+                          const DolRecompSymbolMap* symbols) {
     LoadedCodeSection sections[DOL_NUM_TEXT];
     u32 section_count = 0;
 
@@ -319,7 +357,7 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
 
     return emit_code_sections_split(sections, section_count, output_path, cpu,
                                     dol->header.entry_point, jobs,
-                                    local_chunks_dir);
+                                    local_chunks_dir, symbols);
 }
 
 int emit_rpx_split(const RPXFile* rpx, const char* output_path,
@@ -341,7 +379,7 @@ int emit_rpx_split(const RPXFile* rpx, const char* output_path,
 
     return emit_code_sections_split(sections, rpx->code_section_count,
                                     output_path, cpu, 0, jobs,
-                                    local_chunks_dir);
+                                    local_chunks_dir, NULL);
 }
 
 int emit_rel_split(const RELFile* rel, const char* output_path,
@@ -371,7 +409,7 @@ int emit_rel_split(const RELFile* rel, const char* output_path,
     }
 
     int ok = emit_code_sections_split(sections, section_count, output_path, cpu,
-                                      rel->entry_point, jobs, local_chunks_dir);
+                                      rel->entry_point, jobs, local_chunks_dir, NULL);
     free(sections);
     return ok;
 }
@@ -501,4 +539,3 @@ done:
     path_list_free(&paths);
     return ok;
 }
-

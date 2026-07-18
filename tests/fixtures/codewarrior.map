@@ -1,0 +1,11 @@
+Link map of main
+
+.text section layout
+  Starting  Size     Virtual   File     Align Name Object
+  00000000 00000020 80004000 00000100  4 Start main.o
+  00000020 00000010 80004020 00000120  4 Game-Update main.o
+  00000020 00000010 80004020 00000120  4 Game-Update main.o
+80004030 00000010 Game.Update
+80004040 Tail
+80300000 00000020 DataSymbol
+80004003 00000004 Unaligned

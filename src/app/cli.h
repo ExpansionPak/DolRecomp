@@ -9,6 +9,7 @@ typedef struct {
     const char* input_path;
     const char* title_id_arg;
     const char* output_arg;
+    const char* map_path;
     DolRecompCPU cpu;
     u32 jobs;
     u32 rel_base;

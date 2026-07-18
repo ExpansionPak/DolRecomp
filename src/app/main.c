@@ -10,6 +10,7 @@
 #include "frontend/container/rpx.h"
 #include "frontend/container/disc_extract.h"
 #include "backend/emitter.h"
+#include "analysis/symbol_map.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +42,7 @@ int main(int argc, char** argv) {
     int input_is_directory = path_is_directory(input_path);
     int rel_mode = has_rel_extension(input_path) || input_is_directory;
     u32 rel_start_base = opts.rel_base_set ? opts.rel_base : REL_AUTO_BASE;
+    DolRecompSymbolMap symbols = {0};
 
     title_id[0] = '\0';
     game_name[0] = '\0';
@@ -51,6 +53,10 @@ int main(int argc, char** argv) {
     }
     if (rel_mode && effective_cpu == DOLRECOMP_CPU_ESPRESSO) {
         fprintf(stderr, "error: .rel input cannot use espresso mode\n");
+        return 1;
+    }
+    if (opts.map_path && (rel_mode || has_rpx_extension(input_path))) {
+        fprintf(stderr, "error: --map currently supports DOL input only\n");
         return 1;
     }
     if (!titleless_mode && !database_titles_available()) {
@@ -226,11 +232,18 @@ int main(int argc, char** argv) {
     }
 
     printf("\nwriting output to: %s\n", output_path);
-    if (!emit_dol_split(&dol, output_path, effective_cpu, opts.jobs, local_chunks_dir)) {
+    if (opts.map_path && !symbol_map_load(&symbols, opts.map_path)) {
+        dol_free(&dol);
+        return 1;
+    }
+    if (!emit_dol_split(&dol, output_path, effective_cpu, opts.jobs, local_chunks_dir,
+                        opts.map_path ? &symbols : NULL)) {
+        symbol_map_free(&symbols);
         dol_free(&dol);
         return 1;
     }
 
+    symbol_map_free(&symbols);
     dol_free(&dol);
     return 0;
 }

@@ -85,6 +85,10 @@ int main(void) {
           "contiguous chunks use indexed dispatch");
     check(strstr(code, "ctx->pc = address;") != NULL,
           "call helpers set the entry pc");
+    check(strstr(code, "#if defined(DOLRECOMP_ENABLE_REPLACEMENTS)") != NULL &&
+          strstr(code,
+                 "if (dolrecomp_dispatch_replacement(ctx, address)) return 1;") != NULL,
+          "public dispatcher supports module replacements");
     check(strstr(code,
                  "if (ctx->host_call && ppc_host_call(ctx, address)) return 1;") != NULL,
           "public dispatcher checks installed host replacements first");

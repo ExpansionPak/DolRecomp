@@ -100,6 +100,15 @@ static void emit_lookup_run(FILE* out, const FunctionList* funcs,
 void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point) {
     fprintf(out, "\n#define DOLRECOMP_ENTRY_POINT 0x%08Xu\n", entry_point);
     fprintf(out, "\ntypedef void (*DolRecompFunction)(CPUState* ctx);\n");
+    fprintf(out, "\n#if defined(DOLRECOMP_ENABLE_REPLACEMENTS)\n");
+    fprintf(out, "int dolrecomp_dispatch_replacement(CPUState* ctx, u32 address);\n");
+    fprintf(out, "#else\n");
+    fprintf(out, "static inline int dolrecomp_dispatch_replacement(CPUState* ctx, u32 address) {\n");
+    fprintf(out, "    (void)ctx;\n");
+    fprintf(out, "    (void)address;\n");
+    fprintf(out, "    return 0;\n");
+    fprintf(out, "}\n");
+    fprintf(out, "#endif\n");
     fprintf(out, "\nstatic inline DolRecompFunction dolrecomp_find_original(u32 address) {\n");
     for (u32 first = 0; first < funcs->count;) {
         u32 end = uniform_run_end(funcs, first);
@@ -125,10 +134,12 @@ void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point
     fprintf(out, "\nstatic inline int dolrecomp_call(CPUState* ctx, u32 address) {\n");
     fprintf(out, "    u32 alias;\n");
     fprintf(out, "    ctx->pc = address;\n");
+    fprintf(out, "    if (dolrecomp_dispatch_replacement(ctx, address)) return 1;\n");
     fprintf(out, "    if (ctx->host_call && ppc_host_call(ctx, address)) return 1;\n");
     fprintf(out, "    if (dolrecomp_call_original(ctx, address)) return 1;\n");
     fprintf(out, "    if (dolrecomp_physical_pc_alias(ctx, address, &alias)) {\n");
     fprintf(out, "        ctx->pc = alias;\n");
+    fprintf(out, "        if (dolrecomp_dispatch_replacement(ctx, alias)) return 1;\n");
     fprintf(out, "        if (ctx->host_call && ppc_host_call(ctx, alias)) return 1;\n");
     fprintf(out, "        if (dolrecomp_call_original(ctx, alias)) return 1;\n");
     fprintf(out, "    }\n");

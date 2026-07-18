@@ -136,6 +136,42 @@ You cannot specify --gamecube while using espresso.
 
 ### Additional Info
 
+Function maps are optional. Existing address-only generation remains the default:
+
+```sh
+dolrecomp.exe --map path\to\main.map path\to\main.dol SUKE01 build
+
+./dolrecomp --map path/to/main.map path/to/main.dol SUKE01 build
+```
+
+When a MAP is supplied, the generated `<name>_symbols.h` exposes
+`DOLRECOMP_SYMBOL_<name>` and `DOLRECOMP_SYMBOL_SIZE_<name>`. Names that are not
+valid C identifiers are sanitized, and collisions receive an address suffix.
+
+Module-local function replacements are enabled by defining
+`DOLRECOMP_ENABLE_REPLACEMENTS` before including the generated header and
+implementing `dolrecomp_dispatch_replacement`:
+
+```c
+#include "generated_symbols.h"
+#define DOLRECOMP_ENABLE_REPLACEMENTS
+#include "generated.h"
+
+int dolrecomp_dispatch_replacement(CPUState* ctx, u32 address) {
+    switch (address) {
+    case DOLRECOMP_SYMBOL_GameUpdate:
+        game_update_mod(ctx);
+        return 1;
+    default:
+        return 0;
+    }
+}
+```
+
+Without a MAP, the same replacement dispatcher can use literal guest addresses.
+An explicitly supplied MAP that cannot be parsed or does not match any executable
+section is rejected.
+
 Disc extraction is available as a subcommand for future installer work. It accepts `.iso` and `.wbfs` only:
 
 ```sh

@@ -71,6 +71,7 @@ endif()
 add_library(dr_analysis STATIC
     src/analysis/embedded_data.c
     src/analysis/smc.c
+    src/analysis/symbol_map.c
 )
 target_include_directories(dr_analysis PUBLIC ${DOLRECOMP_SRC})
 target_link_libraries(dr_analysis PUBLIC dr_frontend)
@@ -79,6 +80,7 @@ add_library(dr_backend STATIC
     src/backend/emitter.c
     src/backend/dispatch.c
     src/backend/codegen.c
+    src/backend/symbols.c
 )
 target_include_directories(dr_backend PUBLIC ${DOLRECOMP_SRC})
 target_link_libraries(dr_backend PUBLIC dr_frontend dr_analysis)
@@ -140,6 +142,11 @@ add_test(NAME jumptables COMMAND test_jumptables)
 add_executable(test_dispatch tests/test_dispatch.c)
 target_link_libraries(test_dispatch PRIVATE dr_backend)
 add_test(NAME dispatch COMMAND test_dispatch)
+
+add_executable(test_symbols tests/test_symbols.c)
+target_link_libraries(test_symbols PRIVATE dr_backend)
+add_test(NAME symbols COMMAND test_symbols
+    $<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/codewarrior.map>)
 
 add_executable(test_codegen_emit tests/test_codegen_emit.c)
 target_link_libraries(test_codegen_emit PRIVATE dr_backend)

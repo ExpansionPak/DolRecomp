@@ -17,6 +17,7 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  --cpu gekko|broadway|espresso  Select CPU profile (default: broadway)\n");
     fprintf(stderr, "  --gamecube                     GameCube mode (no title ID required)\n");
     fprintf(stderr, "  --rel-base <addr>              Override first virtual load address for REL codegen\n");
+    fprintf(stderr, "  --map <path>                   Load optional function names from a linker MAP\n");
     fprintf(stderr, "  --setup                        Download titles database and optionally install wit\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Examples:\n");
@@ -227,6 +228,24 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             if (!parse_u32_arg(arg + 11, "--rel-base", &opts->rel_base))
                 return 0;
             opts->rel_base_set = 1;
+            continue;
+        }
+
+        if (strcmp(arg, "--map") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --map needs a path\n");
+                return 0;
+            }
+            opts->map_path = argv[++i];
+            continue;
+        }
+
+        if (strncmp(arg, "--map=", 6) == 0) {
+            if (arg[6] == '\0') {
+                fprintf(stderr, "error: --map needs a path\n");
+                return 0;
+            }
+            opts->map_path = arg + 6;
             continue;
         }
 
