@@ -175,6 +175,14 @@ void ppc_set_xer_ov(CPUState* cpu, bool ov);
 void ppc_take_exception(CPUState* cpu, u32 exception, u32 vector, u32 srr0, u32 srr1_info);
 void ppc_program_exception(CPUState* cpu, u32 cause, u32 cia);
 bool ppc_fp_available(CPUState* cpu, u32 cia);
+
+/* MSR[FP] spelled out rather than via PPC_MSR_FP: that macro is defined in
+   cpu.c, not here, and defining it in the header would collide with it. */
+static inline bool ppc_fp_available_inline(CPUState* cpu, u32 cia) {
+    if (cpu->msr & 0x00002000u) /* MSR[FP], PPC bit 18 */
+        return true;
+    return ppc_fp_available(cpu, cia);
+}
 void ppc_fallback_instruction(CPUState* cpu, u32 raw, u32 cia);
 bool ppc_host_call(CPUState* cpu, u32 address);
 void ppc_system_call_exception(CPUState* cpu, u32 cia);
@@ -187,6 +195,19 @@ void ppc_rfi(CPUState* cpu, u32 cia);
 void ppc_dcbz_l(CPUState* cpu, u32 ea, u32 cia);
 bool ppc_psq_load(CPUState* cpu, u8 frD, u32 ea, bool w, u8 gqr, bool indexed, u32 cia);
 bool ppc_psq_store(CPUState* cpu, u8 frS, u32 ea, bool w, u8 gqr, bool indexed, u32 cia);
+
+/* The emitter emits the _inline forms so the hosting runtime can provide a fast
+   path (GXRuntime does, for the unquantised GQR type-0 case). This standalone
+   runtime backs the tests rather than a shipping port, so it simply forwards. */
+static inline bool ppc_psq_load_inline(CPUState* cpu, u8 frD, u32 ea, bool w,
+                                       u8 gqr, bool indexed, u32 cia) {
+    return ppc_psq_load(cpu, frD, ea, w, gqr, indexed, cia);
+}
+
+static inline bool ppc_psq_store_inline(CPUState* cpu, u8 frS, u32 ea, bool w,
+                                        u8 gqr, bool indexed, u32 cia) {
+    return ppc_psq_store(cpu, frS, ea, w, gqr, indexed, cia);
+}
 u32 ppc_eciwx(CPUState* cpu, u32 ea, u32 cia);
 void ppc_ecowx(CPUState* cpu, u32 ea, u32 value, u32 cia);
 void ppc_tlbie(CPUState* cpu, u32 ea, u32 cia);
