@@ -325,6 +325,14 @@ void ppc_program_exception(CPUState* cpu, u32 cause, u32 cia) {
     ppc_take_exception(cpu, PPC_EXC_PROGRAM, PPC_VECTOR_PROGRAM, cia, cause);
 }
 
+/* Depth of the generated code's native call chain. Cross-chunk direct calls
+   turn guest recursion into host recursion, and the chunk headers declare this
+   extern so all ~180 chunk translation units share one counter -- as a static
+   in the header each would get its own and the guard would bound nothing.
+   It lives here because the C backend compiles only chunk source files, so generated.c
+   is not linked and cannot hold the definition. */
+unsigned dolrecomp_call_depth = 0;
+
 bool ppc_fp_available(CPUState* cpu, u32 cia) {
     if (cpu->msr & PPC_MSR_FP)
         return true;

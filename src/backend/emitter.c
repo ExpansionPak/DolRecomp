@@ -312,9 +312,73 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
     return target >= func_start && target < func_end && ((target - func_start) & 3u) == 0;
 }
 
+// Chunk entry addresses, sorted. Written once before the worker pool starts and
+// read-only thereafter, so no locking. NULL means "no table": every cross-chunk
+// branch falls back to the return-to-chassis form, which is what shipped before
+// direct calls existed and remains the escape hatch if they misbehave.
+static const u32* g_chunk_starts = NULL;
+static u32 g_chunk_count = 0;
+
+void emit_set_chunk_table(const u32* starts, u32 count) {
+    g_chunk_starts = count ? starts : NULL;
+    g_chunk_count = count ? count : 0;
+}
+
+// The chunk whose func_<start>() covers `addr`, or 0 if none does. Chunks tile
+// the text sections but the first one does not start on the common stride, so
+// this binary-searches rather than dividing.
+static u32 chunk_start_for(u32 addr) {
+    if (!g_chunk_starts || !g_chunk_count)
+        return 0;
+    u32 lo = 0, hi = g_chunk_count;
+    while (lo < hi) {
+        u32 mid = lo + (hi - lo) / 2u;
+        if (g_chunk_starts[mid] <= addr)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    return lo ? g_chunk_starts[lo - 1u] : 0;
+}
+
+
+// A cross-chunk `bl` whose target chunk is known: call it directly instead of
+// returning to the chassis. The chassis round trip costs two rel-section scans,
+// two IsHostCallAddress hash lookups, a ModManager dispatch and a downcount
+// flush, none of which a same-module call needs.
+//
+// Resume inline only if the callee came back to the instruction after the call.
+// Any other pc means it stopped early -- budget exhausted, an exception, a
+// tail-call elsewhere -- and only the chassis knows what to do next.
+//
+// The prototype is declared at block scope so this needs no header plumbing;
+// the definition lives in another translation unit and the linker resolves it.
+static bool emit_cross_chunk_call(FILE* out, const PPCInst* inst,
+                                  u32 func_start, u32 func_end) {
+    u32 continuation = inst->address + 4u;
+    u32 target_chunk = chunk_start_for(inst->branch_target);
+    if (!target_chunk)
+        return false;
+    // Without a local continuation label there is nothing to resume into, so
+    // the call would buy nothing over the plain return.
+    if (!branch_target_is_local(func_start, func_end, continuation))
+        return false;
+
+    fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
+    fprintf(out, "            if (dolrecomp_call_enter()) {\n");
+    fprintf(out, "                void func_%08X(CPUState* ctx);\n", target_chunk);
+    fprintf(out, "                func_%08X(ctx);\n", target_chunk);
+    fprintf(out, "                dolrecomp_call_leave();\n");
+    fprintf(out, "                if (ctx->pc == 0x%08Xu) goto label_%08X;\n",
+            continuation, continuation);
+    fprintf(out, "            }\n");
+    fprintf(out, "            return;\n");
+    return true;
+}
 
 static void emit_direct_branch(FILE* out, const PPCInst* inst,
-                               bool local_target, bool direct_backedge) {
+                               bool local_target, bool direct_backedge,
+                               u32 func_start, u32 func_end) {
     bool local_backward = local_target && inst->branch_target <= inst->address;
 
     if (inst->lk) {
@@ -327,7 +391,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
                 fprintf(out, "            }\n");
             }
             fprintf(out, "            goto label_%08X;\n", inst->branch_target);
-        } else {
+        } else if (!emit_cross_chunk_call(out, inst, func_start, func_end)) {
             fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
             fprintf(out, "            return;\n");
         }
@@ -433,6 +497,29 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "#ifndef DOLRECOMP_C_LOOP_CYCLE_BUDGET\n"
         "#define DOLRECOMP_C_LOOP_CYCLE_BUDGET 256\n"
         "#endif\n"
+        "\n"
+        "/* Cross-chunk calls turn guest recursion into host recursion, and a\n"
+        "   chunk frame is not small. Without a ceiling a deep guest call chain\n"
+        "   overflows the host stack, which is a crash rather than a slow\n"
+        "   emulator. Past the limit the call site falls back to returning to\n"
+        "   the chassis, which is always correct -- ctx->pc already names the\n"
+        "   target, so the chassis simply dispatches it as it did before.\n"
+        "   The counter is plain static, not atomic: the chassis runs the module\n"
+        "   on one CPU thread. */\n"
+        "#ifndef DOLRECOMP_C_MAX_CALL_DEPTH\n"
+        "#define DOLRECOMP_C_MAX_CALL_DEPTH 24\n"
+        "#endif\n"
+        "extern unsigned dolrecomp_call_depth;\n"
+        "static inline int dolrecomp_call_enter(void) {\n"
+        "    if (dolrecomp_call_depth >= (unsigned)DOLRECOMP_C_MAX_CALL_DEPTH)\n"
+        "        return 0;\n"
+        "    dolrecomp_call_depth++;\n"
+        "    return 1;\n"
+        "}\n"
+        "static inline void dolrecomp_call_leave(void) {\n"
+        "    if (dolrecomp_call_depth)\n"
+        "        dolrecomp_call_depth--;\n"
+        "}\n"
         "\n"
         "static inline u32 dolrecomp_rotl32(u32 value, u32 sh) {\n"
         "    sh &= 31u;\n"
@@ -1559,7 +1646,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "    {\n");
         emit_direct_branch(out, inst,
                            branch_target_is_local(func_start, func_end, inst->branch_target),
-                           direct_backedge);
+                           direct_backedge, func_start, func_end);
         fprintf(out, "    }\n");
         break;
 
@@ -1569,7 +1656,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        if (ctr_ok && cr_ok) {\n");
         emit_direct_branch(out, inst,
                            branch_target_is_local(func_start, func_end, inst->branch_target),
-                           direct_backedge);
+                           direct_backedge, func_start, func_end);
         fprintf(out, "        }\n");
         fprintf(out, "    }\n");
         break;

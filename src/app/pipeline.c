@@ -1015,10 +1015,40 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
             file_count++;
         }
 
+        // Hand the emitter every chunk entry known so far so a cross-chunk bl
+        // can be emitted as a direct call. funcs accumulates across sections and
+        // this section's chunks were just added, so a target in this or any
+        // earlier section resolves; one in a later section does not yet exist as
+        // a symbol and falls back to the return-to-chassis form. That costs
+        // almost nothing in practice -- .text1 holds 181 of this title's 182
+        // chunks, so nearly every call is intra-section.
+        // emitter.c calls "no chunk table" the escape hatch if direct calls
+        // misbehave, but only this function could set it, so there was no way to
+        // emit a module *without* the calls. -DDOLRECOMP_C_MAX_CALL_DEPTH=0
+        // stops the path being taken, which is the right switch for a module
+        // already built, but it leaves every call site and guard branch in the
+        // generated C -- so it cannot answer what the feature costs when it is
+        // absent. Same idiom as DOLRECOMP_C_CHUNK_INSTRUCTIONS above.
+        const char* no_direct = getenv("DOLRECOMP_NO_DIRECT_CALLS");
+        u32* chunk_starts = NULL;
+        if (no_direct && *no_direct && *no_direct != '0') {
+            printf("  cross-chunk direct calls disabled "
+                   "(DOLRECOMP_NO_DIRECT_CALLS)\n");
+        } else {
+            chunk_starts = (u32*)malloc((size_t)funcs.count * sizeof(u32));
+            if (chunk_starts) {
+                for (u32 i = 0; i < funcs.count; ++i)
+                    chunk_starts[i] = funcs.ranges[i].start;
+                emit_set_chunk_table(chunk_starts, funcs.count);
+            }
+        }
+
         u32 active_jobs = effective_chunk_jobs(section_job_count, jobs);
         printf("  writing %u chunks with %u job%s\n",
                section_job_count, active_jobs, active_jobs == 1 ? "" : "s");
         if (!run_chunk_jobs(chunk_jobs, section_job_count, jobs)) {
+            emit_set_chunk_table(NULL, 0);
+            free(chunk_starts);
             smc_analysis_free(&smc);
             function_list_free(&funcs);
             free(chunk_jobs);
@@ -1027,6 +1057,8 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
             fclose(manifest);
             return 0;
         }
+        emit_set_chunk_table(NULL, 0);
+        free(chunk_starts);
 
         free(chunk_jobs);
         free(insts);

@@ -17,6 +17,13 @@ typedef enum {
 void emit_header(FILE* out);
 void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
 
+// Register the chunk entry addresses so a cross-chunk `bl` can be emitted as a
+// direct call to func_<chunk>() instead of a return to the chassis. Must be
+// called before emission starts: chunk files are emitted on a worker pool and
+// the table is read-only from then on. Passing count == 0 disables direct calls
+// and restores the return-to-chassis form.
+void emit_set_chunk_table(const u32* starts, u32 count);
+
 // emit a single recompiled function as C code
 bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);
 
