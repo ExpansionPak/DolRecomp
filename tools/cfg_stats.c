@@ -26,6 +26,7 @@ int main(int argc, char** argv) {
 
     const char* map_path = NULL;
     const char* report_path = NULL;
+    const char* profile_path = NULL;
     int compare_modes = 0;
     DolRegionMode mode = DOLREGION_MODE_CFG;
     DolRegionLimits limits;
@@ -47,6 +48,8 @@ int main(int argc, char** argv) {
             limits.max_ir_instructions = (u32)strtoul(argv[++i], NULL, 0);
         } else if (strcmp(argv[i], "--compare-modes") == 0) {
             compare_modes = 1;
+        } else if (strcmp(argv[i], "--region-profile") == 0 && i + 1 < argc) {
+            profile_path = argv[++i];
         } else if (strcmp(argv[i], "--no-adjacency") == 0) {
             limits.merge_address_adjacent = 0;
         } else if (strcmp(argv[i], "--adjacency-gap") == 0 && i + 1 < argc) {
@@ -114,6 +117,20 @@ int main(int argc, char** argv) {
         dolcfg_free(&program);
         dol_free(&dol);
         return 1;
+    }
+
+    /* Without this, --region-mode pgo silently degrades to cfg ordering and the
+       two report identical plans -- which looks like "PGO changes nothing"
+       rather than "no profile was loaded". */
+    if (profile_path) {
+        u32 matched = 0, unmatched = 0;
+        if (!dolcfg_load_profile(&program, profile_path, &matched, &unmatched,
+                                 stderr)) {
+            dolcfg_free(&program);
+            dol_free(&dol);
+            return 1;
+        }
+        printf("profile: %u matched, %u unmatched\n", matched, unmatched);
     }
 
     u32 code_instructions = 0;
