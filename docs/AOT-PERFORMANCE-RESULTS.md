@@ -364,6 +364,72 @@ unit count. That is measured in §5e.
 
 ---
 
+## 5e. Measurement methodology, and two things that had to be fixed
+
+Two defects in the first harness produced numbers that looked like results.
+
+### Savestate loads stalled the run
+
+Three Luigi's Mansion runs and one Mario Kart run returned **0 frames** and were
+written out as `0.00 fps`. `frame_count` was frozen at 2776 with a stale `speed`
+value: the runtime reports `booted=1, state=running` while a 30-45 MB savestate
+is still being restored, so a fixed warmup expired before a single frame
+advanced. A mean over those rows would have dragged every comparison toward zero
+while looking like data.
+
+Measurement now waits for `frame_count` to actually move before starting the
+clock, and runs are marked valid/invalid (no frame progress, or a speed reading
+frozen across the whole window). Invalid runs are excluded from means and listed
+separately.
+
+### Time-boxing measured different guest work every run
+
+With the stall fixed, three repeats still gave sd 86.9% (LM) and 26.2% (MKDD 1P).
+The per-run numbers show why:
+
+| Run | fps | frames | cycles/frame |
+|---|---:|---:|---:|
+| lm-foyer r1 | 19.38 | 873 | 20,801,406 |
+| lm-foyer r2 | 19.27 | 868 | 21,219,888 |
+| lm-foyer r3 | 77.63 | 3,496 | 9,345,147 |
+| mkdd-1p r1 | 57.12 | 2,572 | 10,265,489 |
+| mkdd-1p r2 | 83.52 | 3,761 | 9,893,494 |
+| mkdd-1p r3 | 52.25 | 2,353 | 10,435,600 |
+
+Two different failures hide in there:
+
+* **Mario Kart** holds cycles/frame at 10.2M ±2% while fps swings 52-84. Guest
+  work per frame is stable; the spread is **host contention** -- builds were
+  running on the same machine. Benchmarks need a quiet host.
+* **Luigi's Mansion** does 21M cycles/frame twice and 9.3M once. That is a
+  *different scene*, not a faster run: time-boxing means a faster arm covers
+  more of the game, so what is being measured changes with the result.
+
+The harness now measures the wall time for a **fixed frame count**, so every arm
+executes the same guest instructions and only host time varies, and reports
+counters per frame (bursts, cycles, native, native_exc, hook_fb) so host speed
+and scene length drop out of the comparison entirely.
+
+### Baseline, fixed-chunk LLVM module
+
+Recorded before the AOT comparison, 3 repeats, time-boxed 45 s (superseded
+methodology, kept for provenance):
+
+| Scene | fps | sd% | bursts/frame | cycles/frame | fallback |
+|---|---:|---:|---:|---:|---:|
+| lm-foyer | 38.76 | 86.9 | 1,928.0 | see above | 0 |
+| mkdd-1p-race | 64.30 | 26.2 | 1,822.7 | 10.2M | 0 |
+| mkdd-4p-race | 48.69 | 7.3 | 2,308.7 | 10.3M | 0 |
+
+4-player split screen costs **+27% bursts/frame** over 1 player at essentially
+the same cycles/frame, which is what a second and third viewport does to
+dispatcher pressure. `fallback=0` throughout.
+
+There is no 2-player savestate in the MKDD project; only `race.sav` and
+`race-4p.sav` exist, so 2P is absent rather than substituted.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
