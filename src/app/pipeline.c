@@ -103,7 +103,9 @@ static u32 c_chunk_instructions(void) {
 // instead of everything the function touches. Generated code changed, so every
 // cached object from v7 is stale -- and because the cache key does not hash the
 // emitter's source, nothing else would have noticed.
-#define DOLLLVM_CACHE_VERSION "dolllvm-v8"
+// v9: materialize() skips slots no path to the barrier has written, so the
+// store side of every barrier shrinks too.
+#define DOLLLVM_CACHE_VERSION "dolllvm-v9"
 // The LLVM optimisation level used for generated objects. Named so it can be
 // folded into the cache key; changing it must not reuse cached objects.
 #define DOLLLVM_OPT_LEVEL 2

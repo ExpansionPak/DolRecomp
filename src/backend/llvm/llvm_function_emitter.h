@@ -50,6 +50,11 @@ private:
   void computeLiveness();
   bool liveAt(u32 block, DolIRStateSlot slot) const;
   void reloadLiveState(u32 block);
+  // Forward dataflow: may a slot have been written on some path reaching this
+  // block? A slot never written still holds its entry value in CPUState, so
+  // storing it back at a barrier is pure waste.
+  void computeReachingWrites();
+  bool mayBeDirty(u32 block, DolIRStateSlot slot) const;
   void scanExactFloat(u64 descriptor);
   void scanExactPaired(u64 descriptor);
   void scanContinuations();
@@ -129,6 +134,12 @@ private:
   // live_in_[block * DOLIR_STATE_COUNT + slot]. Flat rather than nested so the
   // fixpoint loop touches one contiguous buffer.
   std::vector<unsigned char> live_in_;
+  // dirty_in_[block * DOLIR_STATE_COUNT + slot]: written on some path to here.
+  std::vector<unsigned char> dirty_in_;
+  // Slots written anywhere inside a block, folded in so a barrier partway
+  // through the block still stores what the block itself has written.
+  std::vector<unsigned char> writes_in_block_;
+  u32 current_block_ = 0;
   std::vector<llvm::BasicBlock *> blocks_;
   std::vector<bool> loop_headers_;
   std::vector<llvm::Value *> values_;

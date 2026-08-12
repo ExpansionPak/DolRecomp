@@ -52,8 +52,9 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
     blocks_.push_back(BasicBlock::Create(context_, blockName(i), function_));
   scanState();
   // After scanState: liveness treats an escaping block as keeping everything in
-  // `used_` live, so that set has to exist first.
+  // `used_` live, and reaching-writes falls back to `dirty_`, so both need it.
   computeLiveness();
+  computeReachingWrites();
   scanContinuations();
   scanLoopHeaders();
   emitEntry();
@@ -298,6 +299,93 @@ void FunctionEmitter::computeLiveness() {
   }
 }
 
+bool FunctionEmitter::mayBeDirty(u32 block, DolIRStateSlot slot) const {
+  if (dirty_in_.empty())
+    return dirty_[slot];  // No analysis: fall back to the safe superset.
+  std::size_t index = (std::size_t)block * DOLIR_STATE_COUNT + (std::size_t)slot;
+  if (index >= dirty_in_.size())
+    return dirty_[slot];
+  // Written on a path to this block, or written by this block itself. The
+  // second term is why this is safe without tracking position inside a block:
+  // a barrier partway through still stores anything the block writes, even
+  // writes that come after it.
+  return dirty_in_[index] || writes_in_block_[index];
+}
+
+// Which guest state slots may have been written on some path from entry.
+//
+// materialize() stores every slot in `dirty_`, which is a whole-function flag:
+// a slot written anywhere is stored at every barrier, including barriers on
+// paths where it was never touched. A slot that no path to here has written
+// still holds its entry value in CPUState, so storing it back writes the value
+// that is already there.
+//
+// This narrows the store side. It cannot narrow it by "what the caller reads":
+// every run start is a public func_XXXXXXXX the dispatcher may enter, and the
+// runtime can snapshot CPUState at any exit -- savestates, mods, debugger,
+// exception paths. Architectural state has to be complete whenever control
+// leaves generated code. What it can do is skip stores that are provably
+// redundant, which is a different and safe claim.
+void FunctionEmitter::computeReachingWrites() {
+  const u32 blocks = source_.block_count;
+  if (blocks == 0)
+    return;
+
+  const std::size_t span = (std::size_t)blocks * DOLIR_STATE_COUNT;
+  dirty_in_.assign(span, 0);
+  writes_in_block_.assign(span, 0);
+
+  for (u32 b = 0; b < blocks; b++) {
+    const DolIRBlock &block = source_.blocks[b];
+    std::size_t base = (std::size_t)b * DOLIR_STATE_COUNT;
+    for (u32 i = 0; i < block.instruction_count; i++) {
+      const DolIRInstruction &inst = block.instructions[i];
+      if (inst.op == DOLIR_OP_STATE_WRITE)
+        writes_in_block_[base + inst.aux] = 1;
+    }
+  }
+
+  // Predecessors, from the terminator edges.
+  std::vector<std::vector<u32>> preds(blocks);
+  for (u32 b = 0; b < blocks; b++) {
+    for (u32 s = 0; s < 2; s++) {
+      u32 target = source_.blocks[b].terminator.targets[s];
+      if (target != DOLIR_NO_BLOCK && target < blocks)
+        preds[target].push_back(b);
+    }
+  }
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (u32 b = 0; b < blocks; b++) {
+      std::size_t base = (std::size_t)b * DOLIR_STATE_COUNT;
+      for (u32 p : preds[b]) {
+        std::size_t pbase = (std::size_t)p * DOLIR_STATE_COUNT;
+        for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
+          if (dirty_in_[base + slot])
+            continue;
+          if (dirty_in_[pbase + slot] || writes_in_block_[pbase + slot]) {
+            dirty_in_[base + slot] = 1;
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
+  // A block reachable only indirectly has no predecessor edge in this model,
+  // and its entry state is whatever the caller left. Treat every slot the
+  // function writes as possibly dirty there rather than assuming clean.
+  for (u32 b = 1; b < blocks; b++) {
+    if (!preds[b].empty())
+      continue;
+    std::size_t base = (std::size_t)b * DOLIR_STATE_COUNT;
+    for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++)
+      dirty_in_[base + slot] = dirty_[slot] ? 1 : 0;
+  }
+}
+
 void FunctionEmitter::reloadLiveState(u32 block) {
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (!used_[slot])
@@ -521,6 +609,11 @@ void FunctionEmitter::materialize(u32 pc) {
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (!dirty_[slot])
       continue;
+    // Skip slots no path to here has written: CPUState already holds the value
+    // that would be stored. Correctness does not depend on this analysis being
+    // tight, only on it never claiming clean where a write may have happened.
+    if (!mayBeDirty(current_block_, static_cast<DolIRStateSlot>(slot)))
+      continue;
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
     storeContext(
         stateSlot,
@@ -566,6 +659,9 @@ void FunctionEmitter::emitBudgetGuard(u32 pc) {
 bool FunctionEmitter::emitBlock(u32 index, raw_ostream &diagnostics) {
   const DolIRBlock &block = source_.blocks[index];
   builder_.SetInsertPoint(blocks_[index]);
+  // Every materialize() emitted while this block is being lowered consults the
+  // reaching-writes set for it.
+  current_block_ = index;
   if (loop_headers_[index])
     emitBudgetGuard(block.guest_address);
   chargeCycles(block.cycle_cost);
