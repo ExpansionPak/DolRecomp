@@ -79,9 +79,13 @@ int main(int argc, char** argv) {
         for (u32 i = 0; i < count; i++) {
             u32 raw = read_be32(data + i * 4u);
             insts[i] = ppc_decode(raw, base + i * 4u);
-            /* Same classifier the emitter uses, so the model sees exactly the
-               words the backends would treat as code. */
-            insts[i].embedded_data = embedded_data_word(EMBEDDED_DATA_DOL, raw) != 0;
+            /* Must match pipeline.c exactly: a word is data only if it did not
+               decode AND looks like data. Testing the data predicate alone
+               reclassifies decodable instructions as data and reports a
+               different program than the backends actually compile. */
+            if (insts[i].op == PPC_OP_UNKNOWN &&
+                embedded_data_word(EMBEDDED_DATA_DOL, raw))
+                insts[i].embedded_data = true;
         }
 
         decoded[sections] = insts;

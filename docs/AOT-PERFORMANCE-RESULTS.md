@@ -149,34 +149,39 @@ path is retained and why cache-hit time is tracked separately.
 | | Mario Kart: Double Dash!! | Luigi's Mansion |
 |---|---:|---:|
 | Sections | 2 | 2 |
-| Code instructions (non-data) | 727,020 | 518,717 |
-| Covered by blocks | 727,020 (100.00%) | 518,717 (100.00%) |
-| Basic blocks | 161,404 | 111,912 |
-| Functions | 29,021 | 24,418 |
-| SCCs | 146,182 | 103,294 |
-| Loop headers | 4,307 | 2,517 |
+| Code instructions (non-data) | 740,889 | 529,738 |
+| Covered by blocks | 740,889 (100.00%) | 529,738 (100.00%) |
+| Basic blocks | 151,357 | 103,409 |
+| Functions | 16,141 | 13,861 |
+| SCCs | 128,442 | 91,533 |
+| Loop headers | 5,304 | 3,189 |
 | Indirect sites | 20,134 | 14,003 |
 | Blocks owned by no function | 0 | 0 |
 
-MKDD terminator mix: 49,176 conditional branches, 40,316 calls, 20,464
-branches, 19,906 fallthroughs, 14,988 returns, 5,146 indirect, 11,349 unknown
-(section end or data boundary), 38 system, 21 tail calls.
+MKDD terminator mix: 49,176 conditional branches, 41,264 calls, 20,465
+branches, 20,245 fallthroughs, 14,988 returns, 5,146 indirect, 38 system,
+21 tail calls, 14 unknown.
 
 ### Function entries cannot come from `bl` targets alone
 
 Seeding function entries only from direct call targets left **59.47% of Mario
 Kart's code owned by no function**. The roots of that were 22,010 blocks with no
-in-edge anywhere in the program — reached only through a vtable slot, a
+in-edge anywhere in the program -- reached only through a vtable slot, a
 function-pointer table, or a jump table, which is what a C++ title looks like.
 
 Treating a block that no direct edge reaches as an entry point by elimination
-brought unowned code to 0.11%, and seeding the residual — cycles where every
-member has an in-edge from inside the cycle — closed it to **0.00%** on both
-titles. Function count rises from 6,997 to 29,021 on MKDD accordingly.
+brought unowned code to 0.11%, and seeding the residual -- cycles where every
+member has an in-edge from inside the cycle -- closed it to **0.00%** on both
+titles.
 
 This infers *entries*, never edges. Nothing here claims to know which indirect
 site reaches which entry; that is Phase 4's job. But it means region formation
-sees the whole title rather than the directly-called 40% of it.
+sees the whole title rather than the directly-called fraction of it.
+
+> The counts above are from the corrected `cfg_stats` described in §5b. The
+> earlier revision reported 161,404 blocks / 29,021 functions for MKDD, which
+> was the looser embedded-data predicate splitting the address space more than
+> the backends do.
 
 ---
 
@@ -186,42 +191,44 @@ sees the whole title rather than the directly-called 40% of it.
 
 Region crossings are the metric: each one is a boundary control flow has to
 traverse, which under the current backend means a state materialization and a
-dispatcher round trip. Internal edges are the mirror — control flow that stays
+dispatcher round trip. Internal edges are the mirror -- control flow that stays
 inside one compiled unit and can be a native branch.
 
-### Mario Kart: Double Dash!!, limit 1024
+All three modes run at the same size limit and through the identical edge
+model, so only the choice of boundary differs.
 
-| Mode | Regions | Instr/region | **Crossings** | Internal edges | Split functions |
-|---|---:|---:|---:|---:|---:|
-| fixed | 13,281 | 54.7 | 52,249 | 170,970 | 0 |
-| function | 29,025 | 25.0 | 50,814 | 172,405 | 4 |
-| cfg | 19,563 | 37.2 | **35,035** | 188,184 | 4 |
+### Limit 1024
 
-### Luigi's Mansion, limit 1024
+| Title | Mode | Regions | Instr/region | **Crossings** | Internal edges |
+|---|---|---:|---:|---:|---:|
+| MKDD | fixed | 774 | 957.2 | 40,754 | 186,164 |
+| MKDD | function | 16,160 | 45.8 | 44,818 | 182,100 |
+| MKDD | **cfg** | 8,928 | 83.0 | **31,506** | 195,412 |
+| Luigi's Mansion | fixed | 909 | 582.8 | 31,882 | 121,751 |
+| Luigi's Mansion | function | 13,864 | 38.2 | 35,471 | 118,162 |
+| Luigi's Mansion | **cfg** | 7,520 | 70.4 | **24,015** | 129,618 |
 
-| Mode | Regions | Instr/region | **Crossings** | Internal edges | Split functions |
-|---|---:|---:|---:|---:|---:|
-| fixed | 11,254 | 46.1 | 40,603 | 110,321 | 0 |
-| function | 24,418 | 21.2 | 39,794 | 111,130 | 0 |
-| cfg | 16,495 | 31.4 | **26,965** | 123,959 | 0 |
+**CFG accretion removes 22.7% of crossings on MKDD and 24.7% on Luigi's
+Mansion** against the CFG-blind arm at the same size limit.
 
-**CFG accretion removes 33.0% of crossings on MKDD and 33.6% on Luigi's
-Mansion** against the CFG-blind arm — two unrelated titles landing within 0.6
-points of each other. `function` mode barely helps on its own (2.7% / 2.0%),
-which is the useful negative result: the win is co-locating callers with
-callees, not respecting function boundaries.
+**`function` mode is worse than `fixed`** -- +10.0% crossings on MKDD, +11.3% on
+Luigi's Mansion. Cutting at every function boundary produces more crossings than
+cutting arbitrarily at a large granularity, because most functions are small
+(38-46 instructions) and every call then leaves its region. This is the sharpest
+result in the phase: the mechanism that pays is *accreting callers with
+callees*, not respecting function boundaries. Phase 3's direct-linking work
+should be scoped accordingly.
 
-At limit 128 the same comparison gives 58,989 → 47,613 crossings on MKDD
-(19.3%), so the benefit grows with the size budget, as expected.
-
-> **Comparison caveat.** The `fixed` arm here is CFG-blind cutting every N guest
-> instructions, additionally broken at address discontinuities where embedded
-> data interrupts code. The shipped LLVM backend chunks raw instruction indices
-> *including* data and produces 5,803 regions of exactly 128. So `fixed` here is
-> not a byte-for-byte reproduction of the shipped chunker — it is a controlled
-> arm measured through the identical edge model as the other two modes. The
-> shipped backend's real crossing count is not measurable until the region
-> backend emits code and the runtime counters populate.
+> **Correction.** An earlier revision of this document reported 33.0% / 33.6%.
+> Those numbers came from a defect in `cfg_stats`, not from the planner: it
+> classified a word as embedded data whenever `embedded_data_word()` matched,
+> while `pipeline.c` requires the word to have *failed to decode* as well. The
+> looser predicate marked decodable instructions as data, which fragmented the
+> address space and forced the `fixed` arm to break at every fabricated
+> discontinuity -- 13,281 regions of 54.7 instructions instead of 774 of 957.2.
+> That made the baseline look far worse than it is. `cfg_stats` now uses the
+> pipeline's predicate verbatim and the table above is the corrected
+> measurement. The planner itself did not change.
 
 ### Call edges are counted explicitly
 

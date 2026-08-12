@@ -14,7 +14,10 @@
 #include "analysis/code_section.h"
 #include "analysis/embedded_data.h"
 #include "analysis/smc.h"
+#include "analysis/cfg.h"
+#include "analysis/regions.h"
 #include "common/perf.h"
+#include <stdint.h>
 #ifdef DOLRECOMP_ENABLE_LLVM
 #include "ir/dolir_builder.h"
 #include "backend/llvm/llvm_backend.h"
@@ -25,6 +28,19 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+
+static DolRecompRegionOptions g_region_options;
+
+void pipeline_set_region_options(const DolRecompRegionOptions* options) {
+    if (options)
+        g_region_options = *options;
+    else
+        memset(&g_region_options, 0, sizeof(g_region_options));
+}
+
+const DolRecompRegionOptions* pipeline_region_options(void) {
+    return &g_region_options;
+}
 
 /* Emitted code size per region. Reported, never load-bearing: a size that
    cannot be read is recorded as zero rather than failing the build. */
@@ -88,10 +104,25 @@ static u32 c_chunk_instructions(void) {
 // folded into the cache key; changing it must not reuse cached objects.
 #define DOLLLVM_OPT_LEVEL 2
 
+/* One contiguous stretch of guest code. A fixed chunk is exactly one of these;
+   a planned region is one or more, because accreting a caller with a callee
+   that does not sit next to it in memory produces a region with a hole. */
 typedef struct {
     const PPCInst* insts;
     u32 count;
+    u32 address;
+} LLVMRun;
+
+typedef struct {
+    /* The first run, kept as named fields so the fixed path is untouched.
+       runs == NULL means "this job is exactly the single run described here". */
+    const PPCInst* insts;
+    u32 count;
     u32 function_address;
+
+    const LLVMRun* runs;
+    u32 run_count;
+
     u32 index;
     u32 total;
     const DolLLVMFunctionRange* ranges;
@@ -101,6 +132,21 @@ typedef struct {
     char path[1400];
     char cache_path[1400];
 } LLVMChunkJob;
+
+/* Uniform access to a job's runs whether or not it carries an explicit list. */
+static u32 llvm_job_run_count(const LLVMChunkJob* job) {
+    return job->runs ? job->run_count : 1u;
+}
+
+static LLVMRun llvm_job_run(const LLVMChunkJob* job, u32 index) {
+    if (job->runs)
+        return job->runs[index];
+    LLVMRun run;
+    run.insts = job->insts;
+    run.count = job->count;
+    run.address = job->function_address;
+    return run;
+}
 
 // The floor is 32, not the 128 the C path uses.
 //
@@ -268,12 +314,22 @@ static u64 llvm_job_hash(const LLVMChunkJob* job) {
         hash = hash_bytes(hash, codegen, strlen(codegen));
     u32 opt_level = (u32)DOLLLVM_OPT_LEVEL;
     hash = hash_bytes(hash, &opt_level, sizeof(opt_level));
-    for (u32 i = 0; i < job->count; i++) {
-        hash = hash_bytes(hash, &job->insts[i].address,
-                          sizeof(job->insts[i].address));
-        hash = hash_bytes(hash, &job->insts[i].raw, sizeof(job->insts[i].raw));
-        hash = hash_bytes(hash, &job->insts[i].embedded_data,
-                          sizeof(job->insts[i].embedded_data));
+    /* Every run, and the run partition itself: two regions covering the same
+       instructions in a different grouping generate different code, so they
+       must not collide in the cache. */
+    u32 run_count = llvm_job_run_count(job);
+    hash = hash_bytes(hash, &run_count, sizeof(run_count));
+    for (u32 r = 0; r < run_count; r++) {
+        LLVMRun run = llvm_job_run(job, r);
+        hash = hash_bytes(hash, &run.address, sizeof(run.address));
+        hash = hash_bytes(hash, &run.count, sizeof(run.count));
+        for (u32 i = 0; i < run.count; i++) {
+            hash = hash_bytes(hash, &run.insts[i].address,
+                              sizeof(run.insts[i].address));
+            hash = hash_bytes(hash, &run.insts[i].raw, sizeof(run.insts[i].raw));
+            hash = hash_bytes(hash, &run.insts[i].embedded_data,
+                              sizeof(run.insts[i].embedded_data));
+        }
     }
     for (u32 i = 0; i < job->range_count; i++)
         hash = hash_bytes(hash, &job->ranges[i], sizeof(job->ranges[i]));
@@ -372,9 +428,17 @@ static int emit_llvm_chunk_job(const void* data, void* user) {
     remove(temp_path);
     DolIRModule module;
     dolir_module_init(&module);
-    if (!dolir_build_chunk(&module, job->insts, job->count,
-                           job->function_address) ||
-        !dolir_verify(&module, stderr)) {
+    /* One DolIRFunction per run. A region's runs land in one module, which is
+       what lets LLVM see a caller and its callee together. */
+    u32 run_count = llvm_job_run_count(job);
+    for (u32 r = 0; r < run_count; r++) {
+        LLVMRun run = llvm_job_run(job, r);
+        if (!dolir_build_chunk(&module, run.insts, run.count, run.address)) {
+            dolir_module_free(&module);
+            return 0;
+        }
+    }
+    if (!dolir_verify(&module, stderr)) {
         dolir_module_free(&module);
         return 0;
     }
@@ -574,6 +638,331 @@ static int run_llvm_chunk_jobs(const LLVMChunkJob* jobs, u32 count,
 #endif
 }
 
+static int compare_function_range(const void* a, const void* b) {
+    u32 left = ((const DolLLVMFunctionRange*)a)->start;
+    u32 right = ((const DolLLVMFunctionRange*)b)->start;
+    return (left > right) - (left < right);
+}
+
+/* Region-planned LLVM emission.
+ *
+ * Deliberately a separate path from the fixed-chunk emitter rather than a flag
+ * threaded through it. The brief requires the fixed path stay available until
+ * this one reaches parity, and the surest way to keep it available is to not
+ * touch it.
+ *
+ * The shape differs in one structural way: the fixed path can precompute every
+ * chunk boundary from a formula before decoding anything, whereas region
+ * boundaries are a result of analysis. So this decodes every section first,
+ * builds one CFG across all of them, plans, and only then emits.
+ */
+static int emit_llvm_regions(const LoadedCodeSection* sections, u32 section_count,
+                             DolRecompCPU cpu, u32 entry_point, u32 requested_jobs,
+                             const char* chunks_dir, const char* stem,
+                             const char* header_path, FILE* header,
+                             FILE* manifest, FILE* fallback_report) {
+    (void)cpu;
+    const DolRecompRegionOptions* options = pipeline_region_options();
+
+    DolCfgProgram cfg;
+    dolcfg_init(&cfg);
+    DolRegionPlan plan;
+    dolregion_plan_init(&plan);
+    FunctionList funcs = {0};
+    SMCAnalysis smc = {0};
+
+    PPCInst** decoded = (PPCInst**)calloc(section_count ? section_count : 1u,
+                                          sizeof(PPCInst*));
+    LLVMRun* runs = NULL;
+    LLVMChunkJob* jobs = NULL;
+    DolLLVMFunctionRange* ranges = NULL;
+    unsigned char* cached_before_run = NULL;
+    u32 file_count = 0;
+    int status = 0;
+
+    if (!decoded)
+        goto done;
+
+    cfg.entry_point = entry_point;
+
+    for (u32 s = 0; s < section_count; s++) {
+        const LoadedCodeSection* section = &sections[s];
+        if (!section->data || !section->size)
+            continue;
+
+        u32 num_insts = section->size / 4u;
+        PPCInst* insts = (PPCInst*)malloc((size_t)num_insts * sizeof(*insts));
+        if (!insts) {
+            fprintf(stderr, "error: out of memory\n");
+            goto done;
+        }
+        decoded[s] = insts;
+
+        u32 embedded = 0;
+        u32 unknown = 0;
+        for (u32 i = 0; i < num_insts; i++) {
+            u32 raw = read_be32(section->data + i * 4u);
+            insts[i] = ppc_decode(raw, section->address + i * 4u);
+            if (insts[i].op == PPC_OP_UNKNOWN &&
+                embedded_data_word(section->embedded_data_mode, raw))
+                insts[i].embedded_data = true;
+            embedded += insts[i].embedded_data;
+            unknown += insts[i].op == PPC_OP_UNKNOWN && !insts[i].embedded_data;
+        }
+        printf("decoding %s[%u]: %u instructions at 0x%08X\n",
+               section->label, section->index, num_insts, section->address);
+        printf("  %u known, %u embedded data, %u unknown\n",
+               num_insts - embedded - unknown, embedded, unknown);
+
+        if (section->embedded_data_mode == EMBEDDED_DATA_DOL) {
+            analyze_smc_section(sections, section_count, insts, num_insts, &smc);
+            if (smc.allocation_failed)
+                goto done;
+        }
+
+        if (!dolcfg_add_section(&cfg, insts, num_insts, section->address,
+                                section->label))
+            goto done;
+    }
+
+    /* SMC-suspect code must be able to end a region: a boundary there is what
+       keeps a conservative path available for it. */
+    for (u32 i = 0; i < smc.range_count; i++) {
+        if (!dolcfg_add_smc_range(&cfg, smc.ranges[i].start, smc.ranges[i].end))
+            goto done;
+    }
+
+    if (!dolcfg_build(&cfg, stderr))
+        goto done;
+
+    DolRegionMode mode = DOLREGION_MODE_CFG;
+    if (options->mode_name && !dolregion_parse_mode(options->mode_name, &mode)) {
+        fprintf(stderr, "error: unknown region mode '%s'\n", options->mode_name);
+        goto done;
+    }
+
+    DolRegionLimits limits;
+    dolregion_default_limits(&limits);
+    if (options->max_instructions)
+        limits.max_instructions = options->max_instructions;
+    if (options->max_ir_instructions)
+        limits.max_ir_instructions = options->max_ir_instructions;
+
+    if (!dolregion_plan_build(&plan, &cfg, mode, &limits, stderr))
+        goto done;
+
+    printf("planned %u regions (%s, max %u instructions): "
+           "%u blocks, %u functions, %u crossings\n",
+           plan.region_count, dolregion_mode_name(mode), limits.max_instructions,
+           cfg.block_count, cfg.function_count, plan.cross_region_edges);
+
+    if (options->report_path &&
+        !dolregion_write_report(&plan, &cfg, options->report_path, stderr))
+        goto done;
+
+    /* Flatten every region into contiguous runs. A region's blocks are sorted
+       by address, so adjacent blocks whose addresses touch form one run. */
+    u32 run_capacity = cfg.block_count ? cfg.block_count : 1u;
+    runs = (LLVMRun*)malloc(run_capacity * sizeof(*runs));
+    jobs = (LLVMChunkJob*)calloc(plan.region_count ? plan.region_count : 1u,
+                                 sizeof(*jobs));
+    if (!runs || !jobs)
+        goto done;
+
+    u32 run_total = 0;
+    for (u32 r = 0; r < plan.region_count; r++) {
+        DolRegion* region = &plan.regions[r];
+        jobs[r].runs = NULL; /* set after the array stops moving */
+        jobs[r].run_count = 0;
+        u32 first_run = run_total;
+
+        /* Blocks arrive grouped by function, so sort by address before
+           coalescing or two adjacent blocks from different functions would not
+           be recognised as touching. */
+        u32* ordered = (u32*)malloc((region->block_count ? region->block_count : 1u) *
+                                    sizeof(u32));
+        if (!ordered)
+            goto done;
+        memcpy(ordered, region->blocks, region->block_count * sizeof(u32));
+        for (u32 i = 1; i < region->block_count; i++) {
+            u32 key = ordered[i];
+            u32 j = i;
+            while (j > 0 && cfg.blocks[ordered[j - 1u]].start > cfg.blocks[key].start) {
+                ordered[j] = ordered[j - 1u];
+                j--;
+            }
+            ordered[j] = key;
+        }
+
+        for (u32 i = 0; i < region->block_count; i++) {
+            const DolCfgBlock* block = &cfg.blocks[ordered[i]];
+            if (run_total > first_run &&
+                runs[run_total - 1u].address +
+                        runs[run_total - 1u].count * 4u == block->start) {
+                runs[run_total - 1u].count += block->instruction_count;
+                continue;
+            }
+            const DolCfgSection* section = NULL;
+            for (u32 s = 0; s < cfg.section_count; s++) {
+                u32 end = cfg.sections[s].base_address + cfg.sections[s].count * 4u;
+                if (block->start >= cfg.sections[s].base_address && block->start < end) {
+                    section = &cfg.sections[s];
+                    break;
+                }
+            }
+            if (!section) {
+                free(ordered);
+                goto done;
+            }
+            if (run_total == run_capacity) {
+                run_capacity *= 2u;
+                LLVMRun* grown = (LLVMRun*)realloc(runs, run_capacity * sizeof(*runs));
+                if (!grown) {
+                    free(ordered);
+                    goto done;
+                }
+                runs = grown;
+            }
+            runs[run_total].address = block->start;
+            runs[run_total].count = block->instruction_count;
+            runs[run_total].insts =
+                section->insts + (block->start - section->base_address) / 4u;
+            run_total++;
+        }
+        free(ordered);
+
+        jobs[r].run_count = run_total - first_run;
+        /* Stored as an offset for now; rebased once `runs` stops reallocating. */
+        jobs[r].runs = (const LLVMRun*)(uintptr_t)first_run;
+    }
+
+    /* Every run is a separately generated entry point, so the emitter needs all
+       of them to tell an intra-module target from a cross-module one. */
+    ranges = (DolLLVMFunctionRange*)calloc(run_total ? run_total : 1u,
+                                           sizeof(*ranges));
+    if (!ranges)
+        goto done;
+    for (u32 i = 0; i < run_total; i++) {
+        ranges[i].start = runs[i].address;
+        ranges[i].end = runs[i].address + runs[i].count * 4u;
+    }
+    /* rangeFor() binary-searches these. Runs are emitted in region order, which
+       is not address order, so the sort is required for correctness here --
+       unlike the fixed path, where chunks are already ascending. */
+    qsort(ranges, run_total, sizeof(*ranges), compare_function_range);
+
+    char cache_dir[1100] = "";
+    if (!llvm_cache_dir(cache_dir, sizeof(cache_dir)))
+        cache_dir[0] = '\0';
+
+    for (u32 r = 0; r < plan.region_count; r++) {
+        LLVMChunkJob* job = &jobs[r];
+        u32 first_run = (u32)(uintptr_t)job->runs;
+        job->runs = runs + first_run;
+        if (job->run_count == 0)
+            continue;
+
+        job->insts = job->runs[0].insts;
+        job->count = job->runs[0].count;
+        job->function_address = job->runs[0].address;
+        job->index = r + 1u;
+        job->total = plan.region_count;
+        job->ranges = ranges;
+        job->range_count = run_total;
+
+        if (snprintf(job->name, sizeof(job->name), "region_%06u_%08X.o", r,
+                     job->function_address) >= (int)sizeof(job->name) ||
+            !join_path(job->path, sizeof(job->path), chunks_dir, job->name))
+            goto done;
+
+        job->hash = llvm_job_hash(job);
+        if (cache_dir[0]) {
+            char cache_name[64];
+            snprintf(cache_name, sizeof(cache_name), "%016llx.o",
+                     (unsigned long long)job->hash);
+            if (!join_path(job->cache_path, sizeof(job->cache_path), cache_dir,
+                           cache_name))
+                job->cache_path[0] = '\0';
+        }
+
+        /* Each run keeps its own public entry point, so dispatch and every
+           ModernGekko replacement address still resolve exactly as before. */
+        for (u32 i = 0; i < job->run_count; i++) {
+            emit_chunk_prototype(header, job->runs[i].address);
+            if (!function_list_add(&funcs, job->runs[i].address,
+                                   job->runs[i].address + job->runs[i].count * 4u))
+                goto done;
+        }
+        fprintf(manifest, "// object: chunks/%s (%u run%s)\n", job->name,
+                job->run_count, job->run_count == 1u ? "" : "s");
+        file_count++;
+    }
+
+    u32 active_jobs = effective_chunk_jobs(plan.region_count, requested_jobs);
+    printf("  writing %u LLVM region objects with %u job%s\n", plan.region_count,
+           active_jobs, active_jobs == 1 ? "" : "s");
+
+    cached_before_run = (unsigned char*)calloc(
+        plan.region_count ? plan.region_count : 1u, 1u);
+    if (cached_before_run) {
+        for (u32 r = 0; r < plan.region_count; r++)
+            cached_before_run[r] = reuse_llvm_object(&jobs[r]) ? 1u : 0u;
+    }
+
+    if (!run_llvm_chunk_jobs(jobs, plan.region_count, requested_jobs))
+        goto done;
+
+    for (u32 r = 0; r < plan.region_count; r++) {
+        const DolRegion* region = &plan.regions[r];
+        DolPerfRegion record;
+        memset(&record, 0, sizeof(record));
+        record.region_id = r;
+        record.guest_start = region->guest_start;
+        record.guest_end = region->guest_end;
+        record.guest_instructions = region->instruction_count;
+        record.ir_instructions = region->estimated_ir_instructions;
+        record.blocks = region->block_count;
+        record.loops = region->loop_count;
+        record.code_bytes = perf_file_size(jobs[r].path);
+        record.cache_hit = cached_before_run ? cached_before_run[r] : 0;
+        dolperf_add_region(dolperf_report(), &record);
+    }
+    snprintf(dolperf_report()->region_mode, sizeof(dolperf_report()->region_mode),
+             "%s", dolregion_mode_name(mode));
+
+    {
+        char report[1100];
+        if (snprintf(report, sizeof(report), "%s_smc.txt", stem) >= (int)sizeof(report) ||
+            !write_smc_report(&smc, report))
+            goto done;
+        if (smc.possible)
+            printf("warning: executable memory writes detected; report: %s\n", report);
+    }
+
+    emit_dispatch_helpers(header, &funcs, entry_point);
+    emit_footer(header);
+    fprintf(manifest, "\n// %u native objects\n", file_count);
+    printf("done!\n  header: %s\n  objects: %s (%u files)\n", header_path,
+           chunks_dir, file_count);
+    status = 1;
+
+done:
+    free(cached_before_run);
+    free(ranges);
+    free(jobs);
+    free(runs);
+    dolregion_plan_free(&plan);
+    dolcfg_free(&cfg);
+    function_list_free(&funcs);
+    smc_analysis_free(&smc);
+    if (decoded) {
+        for (u32 s = 0; s < section_count; s++)
+            free(decoded[s]);
+        free(decoded);
+    }
+    return status;
+}
+
 static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                                    u32 section_count,
                                    const char* output_path,
@@ -647,6 +1036,16 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
         remove(symbol_header_path);
     }
     fprintf(header, "\n// Function entry points\n");
+
+    if (pipeline_region_options()->enabled) {
+        int ok = emit_llvm_regions(sections, section_count, cpu, entry_point,
+                                   requested_jobs, chunks_dir, stem, header_path,
+                                   header, manifest, fallback_report);
+        fclose(header);
+        fclose(manifest);
+        fclose(fallback_report);
+        return ok;
+    }
 
     FunctionList funcs = {0};
     SMCAnalysis smc = {0};
@@ -885,11 +1284,13 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
                                     const DolRecompSymbolMap* symbols,
                                     DolRecompBackend backend) {
 #ifdef DOLRECOMP_ENABLE_LLVM
-    if (backend == DOLRECOMP_BACKEND_LLVM)
+    if (backend == DOLRECOMP_BACKEND_LLVM ||
+        backend == DOLRECOMP_BACKEND_LLVM_AOT)
         return emit_code_sections_llvm(sections, section_count, output_path, cpu,
                                        entry_point, jobs, local_chunks_dir, symbols);
 #else
-    if (backend == DOLRECOMP_BACKEND_LLVM) {
+    if (backend == DOLRECOMP_BACKEND_LLVM ||
+        backend == DOLRECOMP_BACKEND_LLVM_AOT) {
         fprintf(stderr, "error: LLVM backend is unavailable in this build\n");
         return 0;
     }

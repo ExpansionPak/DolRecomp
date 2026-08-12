@@ -8,6 +8,10 @@
 typedef enum {
     DOLRECOMP_BACKEND_C,
     DOLRECOMP_BACKEND_LLVM,
+    /* CFG-planned regions instead of fixed chunks. Additive: the fixed LLVM
+       path above stays available until this reaches correctness and
+       performance parity. */
+    DOLRECOMP_BACKEND_LLVM_AOT,
 } DolRecompBackend;
 
 typedef struct {
@@ -18,6 +22,10 @@ typedef struct {
     /* NULL disables reporting entirely; instrumentation stays collected but
        unwritten, which is what keeps --perf-report free when unused. */
     const char* perf_report_path;
+    const char* region_report_path;
+    const char* region_mode_arg;
+    u32 region_max_instructions;
+    u32 region_max_ir;
     DolRecompCPU cpu;
     DolRecompBackend backend;
     u32 jobs;

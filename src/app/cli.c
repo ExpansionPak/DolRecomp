@@ -15,7 +15,11 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -jN                            Use N worker jobs for split C output (e.g. -j14)\n");
     fprintf(stderr, "  --cpu gekko|broadway|espresso  Select CPU profile (default: broadway)\n");
-    fprintf(stderr, "  --backend c|llvm               Select generated-code backend (default: c)\n");
+    fprintf(stderr, "  --backend c|llvm|llvm-aot      Select generated-code backend (default: c)\n");
+    fprintf(stderr, "  --region-mode MODE             fixed|function|cfg|pgo for llvm-aot (default: cfg)\n");
+    fprintf(stderr, "  --region-max-instructions N    Guest instructions per region\n");
+    fprintf(stderr, "  --region-max-ir N              Estimated DolIR instructions per region\n");
+    fprintf(stderr, "  --emit-region-report <path>    Write the region plan as JSON\n");
     fprintf(stderr, "  --gamecube                     GameCube mode (no title ID required)\n");
     fprintf(stderr, "  --rel-base <addr>              Override first virtual load address for REL codegen\n");
     fprintf(stderr, "  --map <path>                   Load optional function names from a linker MAP\n");
@@ -156,7 +160,7 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
 
         if (strcmp(arg, "--backend") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "error: --backend needs c or llvm\n");
+                fprintf(stderr, "error: --backend needs c, llvm, or llvm-aot\n");
                 return 0;
             }
             arg = argv[++i];
@@ -164,6 +168,9 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
                 opts->backend = DOLRECOMP_BACKEND_C;
             else if (ascii_case_equal(arg, "llvm"))
                 opts->backend = DOLRECOMP_BACKEND_LLVM;
+            else if (ascii_case_equal(arg, "llvm-aot") ||
+                     ascii_case_equal(arg, "llvm-regions"))
+                opts->backend = DOLRECOMP_BACKEND_LLVM_AOT;
             else {
                 fprintf(stderr, "error: unknown backend '%s'\n", arg);
                 return 0;
@@ -177,6 +184,9 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
                 opts->backend = DOLRECOMP_BACKEND_C;
             else if (ascii_case_equal(name, "llvm"))
                 opts->backend = DOLRECOMP_BACKEND_LLVM;
+            else if (ascii_case_equal(name, "llvm-aot") ||
+                     ascii_case_equal(name, "llvm-regions"))
+                opts->backend = DOLRECOMP_BACKEND_LLVM_AOT;
             else {
                 fprintf(stderr, "error: unknown backend '%s'\n", name);
                 return 0;
@@ -282,6 +292,49 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             continue;
         }
 
+        if (strcmp(arg, "--region-mode") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --region-mode needs fixed, function, cfg, or pgo\n");
+                return 0;
+            }
+            opts->region_mode_arg = argv[++i];
+            continue;
+        }
+
+        if (strncmp(arg, "--region-mode=", 14) == 0) {
+            opts->region_mode_arg = arg + 14;
+            continue;
+        }
+
+        if (strcmp(arg, "--region-max-instructions") == 0) {
+            if (i + 1 >= argc ||
+                !parse_u32_arg(argv[++i], "--region-max-instructions",
+                               &opts->region_max_instructions))
+                return 0;
+            continue;
+        }
+
+        if (strcmp(arg, "--region-max-ir") == 0) {
+            if (i + 1 >= argc ||
+                !parse_u32_arg(argv[++i], "--region-max-ir", &opts->region_max_ir))
+                return 0;
+            continue;
+        }
+
+        if (strcmp(arg, "--emit-region-report") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --emit-region-report needs a path\n");
+                return 0;
+            }
+            opts->region_report_path = argv[++i];
+            continue;
+        }
+
+        if (strncmp(arg, "--emit-region-report=", 21) == 0) {
+            opts->region_report_path = arg + 21;
+            continue;
+        }
+
         if (strcmp(arg, "--perf-report") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "error: --perf-report needs a path\n");
@@ -330,7 +383,8 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
     }
 
 #ifndef DOLRECOMP_ENABLE_LLVM
-    if (opts->backend == DOLRECOMP_BACKEND_LLVM) {
+    if (opts->backend == DOLRECOMP_BACKEND_LLVM ||
+        opts->backend == DOLRECOMP_BACKEND_LLVM_AOT) {
         fprintf(stderr, "error: LLVM backend is not built; configure with -DDOLRECOMP_ENABLE_LLVM=ON\n");
         return 0;
     }

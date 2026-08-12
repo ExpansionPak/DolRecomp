@@ -20,10 +20,31 @@ BasicBlock *FunctionEmitter::directDestination(const DolIRTerminator &term,
   return externalDestination(term, slot);
 }
 
+// Ranges are sorted by start address and do not overlap, so this is a binary
+// search rather than the scan it used to be.
+//
+// The scan was tolerable while a range was a fixed chunk and there were a few
+// thousand of them. Planned regions produce one range per contiguous run, which
+// is several times as many, and this is called for every external destination
+// in every block -- so the cost is (ranges x edges) and it dominated emission:
+// region objects came out at roughly a ninth the rate of fixed chunks until
+// this changed.
+//
+// The caller guarantees the sort. Both producers in pipeline.c emit ranges in
+// ascending address order.
 const DolLLVMFunctionRange *FunctionEmitter::rangeFor(u32 address) const {
-  for (u32 i = 0; i < range_count_; i++)
-    if (address >= ranges_[i].start && address < ranges_[i].end)
-      return &ranges_[i];
+  u32 low = 0;
+  u32 high = range_count_;
+  while (low < high) {
+    u32 mid = low + (high - low) / 2;
+    if (address < ranges_[mid].start) {
+      high = mid;
+    } else if (address >= ranges_[mid].end) {
+      low = mid + 1;
+    } else {
+      return &ranges_[mid];
+    }
+  }
   return nullptr;
 }
 

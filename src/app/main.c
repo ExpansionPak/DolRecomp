@@ -24,6 +24,23 @@ static int run_recompile(int argc, char** argv, CliOptions* opts_out) {
     if (!parse_cli(argc, argv, &opts))
         return 1;
     *opts_out = opts;
+
+    DolRecompRegionOptions region_options;
+    memset(&region_options, 0, sizeof(region_options));
+    region_options.enabled = opts.backend == DOLRECOMP_BACKEND_LLVM_AOT;
+    region_options.mode_name = opts.region_mode_arg;
+    region_options.max_instructions = opts.region_max_instructions;
+    region_options.max_ir_instructions = opts.region_max_ir;
+    region_options.report_path = opts.region_report_path;
+    pipeline_set_region_options(&region_options);
+
+    if (!region_options.enabled &&
+        (opts.region_mode_arg || opts.region_report_path ||
+         opts.region_max_instructions || opts.region_max_ir)) {
+        fprintf(stderr,
+                "error: region options require --backend llvm-aot\n");
+        return 1;
+    }
     if (opts.show_help)
         return 0;
     if (opts.setup_mode)
@@ -264,7 +281,9 @@ int main(int argc, char** argv) {
 
     report->wall_ns = dolperf_now_ns() - started_ns;
     snprintf(report->backend, sizeof(report->backend), "%s",
-             opts.backend == DOLRECOMP_BACKEND_LLVM ? "llvm" : "c");
+             opts.backend == DOLRECOMP_BACKEND_LLVM_AOT ? "llvm-aot"
+             : opts.backend == DOLRECOMP_BACKEND_LLVM   ? "llvm"
+                                                        : "c");
     if (report->region_mode[0] == '\0')
         snprintf(report->region_mode, sizeof(report->region_mode), "fixed");
 
