@@ -319,17 +319,48 @@ correctness signal from the same run.
 
 ---
 
-## 5d. Build cost — Luigi's Mansion
+## 5d. Build cost — Luigi's Mansion, and what it costs to make regions bigger
 
-| Backend | Units | Instr/unit | Clean build | Object bytes |
-|---|---:|---:|---:|---:|
-| fixed-chunk LLVM | 4,164 | 128.0 | 859 s | 235,179,859 |
-| llvm-aot, pre-adjacency | 7,520 | 70.4 | 524 s | 247,014,853 |
-| llvm-aot, adjacency | 1,724 | 307.3 | _in flight_ | _in flight_ |
+| Backend | Units | Instr/unit | Clean build | Object bytes | Crossings |
+|---|---:|---:|---:|---:|---:|
+| fixed-chunk LLVM (shipped) | 4,164 | 128.0 | 859 s | 235,179,859 | — |
+| llvm-aot cfg, no adjacency | 7,520 | 70.4 | **524 s** | 247,014,853 | 24,015 |
+| llvm-aot cfg, adjacency | 1,724 | 307.3 | 1,147 s | 262,695,877 | 24,287 |
 
-The pre-adjacency AOT build was already faster than the fixed arm despite
-emitting 80% more objects, because each one is smaller. The adjacency planner
-cuts unit count 4.4x again.
+### The adjacency merge does not pay for itself
+
+This is a negative result and it reverses the framing in the commit that
+introduced it. Cutting compilation units 4.4x (7,520 -> 1,724) cost:
+
+- **2.2x build time** (524 s -> 1,147 s)
+- **+6.3% object bytes** (247 MB -> 263 MB)
+- **+1.1% crossings** (24,015 -> 24,287)
+
+Strictly worse on every measured axis except the unit count itself, and unit
+count is not a goal -- it was a proxy for build cost, and the proxy was wrong.
+
+The cause is the effect `pipeline.c` already documented for chunk sizes: a
+region becomes an LLVM function, and both compile time and generated code grow
+superlinearly with the scope the register allocator has to keep the guest
+register file live across. Growing regions from 70 to 307 instructions
+reproduced the same curve that made 1024-instruction chunks untenable.
+
+The compile-time tail is where it shows worst. Per-region times in the
+adjacency build:
+
+    668 s, 397 s, 119 s, 114 s, 108 s, 93 s, 90 s, 83 s, ...
+
+A single region took **668 seconds** against a median under a second. The
+brief's requirement that a region end at "excessive IR or compile-time size" is
+not satisfiable from instruction count alone -- region 526 is 944 instructions
+and 95 blocks, unremarkable by size, and took 397 s.
+
+### Consequence
+
+Smaller regions win on build cost while giving up almost nothing in crossings.
+The next tuning step is a lower default region size with adjacency off or
+tightly bounded, chosen against crossings-per-build-second rather than against
+unit count. That is measured in §5e.
 
 ---
 
