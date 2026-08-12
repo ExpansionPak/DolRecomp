@@ -679,6 +679,64 @@ build time against roughly 500 s.
 
 ---
 
+## 5j. Region formation does not change the dispatcher rate -- and why
+
+Mario Kart 1P, every valid run across every session, `bursts` per guest Mcycle:
+
+| Arm | runs | mean | min | max |
+|---|---:|---:|---:|---:|
+| fixed (128) | 12 | 175.2 | 167.2 | 180.4 |
+| aot cfg @256 | 3 | 178.9 | 178.9 | 178.9 |
+| aot cfg @512 | 3 | 178.7 | 178.4 | 178.9 |
+| aot cfg @1024 | 3 | 179.0 | 178.9 | 179.0 |
+| **pgo @1024** | 3 | **178.8** | 177.6 | 179.4 |
+
+The spread *within* the fixed arm alone (167.2-180.4) is wider than any
+difference between arms. Uniform region enlargement does not move it. Neither
+does profile-guided formation, despite planning a visibly different program:
+3,244 regions of 228 instructions against cfg's 2,033 of 364.
+
+### The reason, which took three nulls to see
+
+`bursts` counts **dispatcher re-entries**, and cross-region calls were never
+dispatcher re-entries. `externalDestination()` has always emitted a direct call
+to `func_XXXXXXXX_budget`. A dispatcher entry happens when generated code
+*returns to the runtime* and the top-level loop calls back in -- at an indirect
+branch, at a `blr` whose target is not statically known, at a side exit, at an
+exception.
+
+Region formation regroups code. It does not make an indirect branch direct.
+Mario Kart has 20,134 indirect sites, and every one of them still leaves through
+the dispatcher no matter which region it sits in.
+
+So the first performance gate -- "at least 50% fewer central dispatcher
+entries" -- is not reachable by region planning at all. It is reachable by
+Phase 4: per-site indirect target caches and BLR shadow returns, which convert
+an indirect transfer into a compare-and-direct-branch.
+
+### What region formation is worth, then
+
+Not nothing, but not this. The per-crossing cost is a state round trip --
+materialise every dirty slot, call, validate the returned PC, reload state --
+and that cost is paid per *executed* call. Fewer boundaries means fewer such
+round trips on paths that execute. But the sweep shows the boundaries removed by
+uniform merging are overwhelmingly cold, and the profile-guided variant did not
+find enough hot ones to matter either.
+
+The conclusion the evidence supports: **stop tuning region formation**. The
+remaining performance is in what a crossing costs (Phase 3) and in not returning
+to the dispatcher for indirect control flow (Phase 4).
+
+### Measurement discipline note
+
+The fps columns in this section carry 28-31% spread on two arms because builds
+were running concurrently with the benchmark. That is a procedural error, not
+host noise -- an idle-host run of the same rig measured 1.1-1.8%. bursts/Mcycle
+is unaffected, which is why the conclusion rests on it. No fps claim is made
+from these runs.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
