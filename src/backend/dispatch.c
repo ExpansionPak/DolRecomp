@@ -296,6 +296,30 @@ static int emit_lookup_indexed(FILE* out, const FunctionList* funcs) {
         }
     }
 
+    /* Coverage manifest.
+     *
+     * The module template's gen_module_tables.py recovers a module's address
+     * coverage by grepping this header for the dispatcher's own range tests.
+     * The page index does not emit those tests, so switching to it left the
+     * tool with nothing to find and the module build failed with "no coverage
+     * ranges found".
+     *
+     * Restating the ranges here in the offset-table form that tool already
+     * recognises keeps the contract without coupling the two repositories over
+     * it. The regex scans raw text, so a comment satisfies it: none of this is
+     * compiled, and the emitted lookup below is unaffected. */
+    fprintf(out,
+            "\n/* Coverage manifest for gen_module_tables.py. Not compiled --\n"
+            " * the page index below is the actual lookup. Restated in the\n"
+            " * offset-table form that tool greps for.\n");
+    for (u32 i = 0; i < run_count; i++) {
+        u32 start = sorted[run_first[i]].start;
+        u32 end = sorted[run_first[i + 1u] - 1u].end;
+        fprintf(out, " * u32 offset = address - 0x%08Xu; if (offset < 0x%08Xu)\n",
+                start, end - start);
+    }
+    fprintf(out, " */\n");
+
     fprintf(out, "\n#define DOLRECOMP_LOOKUP_RUNS %uu\n", run_count);
     fprintf(out, "#define DOLRECOMP_LOOKUP_BASE 0x%08Xu\n", base);
     fprintf(out, "#define DOLRECOMP_LOOKUP_PAGES %uu\n", page_count);
