@@ -525,7 +525,18 @@ extern "C" bool dolllvm_codegen_fingerprint(char *out, size_t size) {
       (dolllvm_pgo_mode() == DOLLLVM_PGO_GEN ? "|pgo=gen" : "") +
       (dolllvm_pgo_mode() == DOLLLVM_PGO_USE
            ? "|pgo=use:" + pgoProfileFingerprint()
-           : "");
+           : "") +
+      // Emitter behaviour flags. These change generated code, and the cache key
+      // does not hash the emitter's source -- so leaving them out means flipping
+      // one silently reuses objects built with the other setting and the
+      // measurement compares nothing. That has happened three times in this
+      // project; absent when off, so default objects stay byte-identical.
+      (std::getenv("DOLRECOMP_NARROW_BARRIERS") &&
+               std::getenv("DOLRECOMP_NARROW_BARRIERS")[0] == '1'
+           ? "|narrow=1" : "") +
+      (std::getenv("DOLRECOMP_INLINE_REGIONS") &&
+               std::getenv("DOLRECOMP_INLINE_REGIONS")[0] == '1'
+           ? "|inline=1" : "");
   if (fingerprint.size() + 1 > size)
     return false;
   memcpy(out, fingerprint.c_str(), fingerprint.size() + 1);

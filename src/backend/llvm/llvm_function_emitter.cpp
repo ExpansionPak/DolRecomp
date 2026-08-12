@@ -2,6 +2,7 @@
 #include "cpu/cpu.h"
 
 #include <cstdio>
+#include <cstdlib>
 
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Constants.h>
@@ -15,6 +16,38 @@
 namespace dolllvm {
 
 using namespace llvm;
+
+// Off by default: measured -4.3% module size for +50% build time, with
+// bursts/Mcycle unchanged. Correct, but not worth its cost as it stands. Kept
+// because the indirect-switch edge fix it forced is the prerequisite for
+// passing live state in registers.
+//   DOLRECOMP_NARROW_BARRIERS=1   narrow barrier stores by reaching-writes
+static bool narrowBarriers() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("DOLRECOMP_NARROW_BARRIERS");
+    return value && value[0] == '1';
+  }();
+  return enabled;
+}
+
+// Off by default, and the reason is measured rather than assumed: chunk size
+// drives how much guest state the register allocator keeps live, and that is
+// what made 1024-instruction chunks cost 3x the code size of 128 for a third
+// less speed (pipeline.c, LLVM-EXPERIMENTS E002/E003). Inlining a callee into
+// its caller has the same shape -- it merges two live ranges.
+//
+// Worth measuring precisely because fastcc makes it possible: with the internal
+// bodies no longer NoInline, LLVM can inline a small or hot callee across a
+// region boundary, which is Phase 3's direct-linking benefit rather than a
+// dispatcher saving.
+//   DOLRECOMP_INLINE_REGIONS=1    let LLVM inline internal region bodies
+static bool inlineRegions() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("DOLRECOMP_INLINE_REGIONS");
+    return value && value[0] == '1';
+  }();
+  return enabled;
+}
 
 FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
                                  const DolIRFunction &source,
@@ -49,7 +82,8 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   function_->setCallingConv(CallingConv::Fast);
   function_->setVisibility(GlobalValue::HiddenVisibility);
   function_->setDSOLocal(true);
-  function_->addFnAttr(Attribute::NoInline);
+  if (!inlineRegions())
+    function_->addFnAttr(Attribute::NoInline);
   ctx_ = function_->getArg(0);
   ctx_->setName("ctx");
   guard_cycles_ = function_->getArg(1);
@@ -714,7 +748,8 @@ void FunctionEmitter::materialize(u32 pc) {
     // edges the emitter actually generates -- and the way to establish that is
     // to derive both from one description rather than to keep patching the
     // analysis after each failure.
-    if (!mayBeDirty(current_block_, static_cast<DolIRStateSlot>(slot)))
+    if (narrowBarriers() &&
+        !mayBeDirty(current_block_, static_cast<DolIRStateSlot>(slot)))
       continue;
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
     storeContext(
