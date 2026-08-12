@@ -70,8 +70,12 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   if (auto *calleeFunction = dyn_cast<Function>(callee.getCallee())) {
     calleeFunction->setVisibility(GlobalValue::HiddenVisibility);
     calleeFunction->setDSOLocal(true);
+    // Must match the definition, or the call is undefined behaviour rather than
+    // merely slow.
+    calleeFunction->setCallingConv(CallingConv::Fast);
   }
-  builder_.CreateCall(callee, {ctx_, guard_cycles_, guard_steps_});
+  CallInst *direct = builder_.CreateCall(callee, {ctx_, guard_cycles_, guard_steps_});
+  direct->setCallingConv(CallingConv::Fast);
   if (!term.linked) {
     builder_.CreateRetVoid();
     builder_.restoreIP(saved);

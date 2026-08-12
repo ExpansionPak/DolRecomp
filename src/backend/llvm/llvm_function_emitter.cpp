@@ -36,7 +36,17 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
     diagnostics << "dolllvm: conflicting native body " << bodyName << "\n";
     return false;
   }
-  function_->setCallingConv(CallingConv::C);
+  // The internal body uses fastcc; the public wrapper below keeps the C
+  // convention because that is the ModernGekko ABI and mods, hooks and the
+  // dispatcher all call through it.
+  //
+  // This is the first step of the private internal ABI (D3). On its own it only
+  // frees the register allocator to place the three pointer arguments, which is
+  // marginal. The substantive version passes live guest state in registers
+  // instead of through CPUState, and that needs correct cross-region live-in
+  // and live-out sets -- the analysis this emitter has now got wrong twice, so
+  // it is deliberately not attempted here.
+  function_->setCallingConv(CallingConv::Fast);
   function_->setVisibility(GlobalValue::HiddenVisibility);
   function_->setDSOLocal(true);
   function_->addFnAttr(Attribute::NoInline);
@@ -90,7 +100,9 @@ bool FunctionEmitter::emitWrapper(raw_ostream &diagnostics) {
       builder.CreateAlloca(Type::getInt64Ty(context_), nullptr, "guard_steps");
   builder.CreateStore(builder.getInt64(0), guardCycles);
   builder.CreateStore(builder.getInt64(0), guardSteps);
-  builder.CreateCall(function_, {wrapper->getArg(0), guardCycles, guardSteps});
+  CallInst *body =
+      builder.CreateCall(function_, {wrapper->getArg(0), guardCycles, guardSteps});
+  body->setCallingConv(CallingConv::Fast);
   builder.CreateRetVoid();
   return !verifyFunction(*wrapper, &diagnostics);
 }
