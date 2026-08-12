@@ -898,19 +898,43 @@ and forgetting one is exactly how v1 broke. Narrowing is surrendered inside
 blocks containing a helper and kept everywhere else, which is most blocks and
 all the integer ones.
 
-### Measured, Mario Kart, region cap 1024
+### RETRACTED
 
-| | Module size | Build time |
-|---|---:|---:|
-| no narrowing (v7) | 444,321,280 | 874 s |
-| **store narrowing (v12)** | **391,159,808** | **669 s** |
-| | **-12.0%** | **-23.4%** |
+An earlier revision of this section reported the corrected store narrowing as a
+win: module 444,321,280 -> 391,159,808 bytes and build 874s -> 669s, -12.0% and
+-23.4%.
 
-Correctness: 240 differential pairs across 5 seeds, call-shaped sequences of 32
-instructions with LR save/restore, comparing every GPR, FPR and paired-single
-lane as bit patterns plus CR, XER, LR, CTR, FPSCR, exception and reservation
-state and written memory. The v1 version failed that same suite on its first
-seed.
+**Those numbers are real and worthless: the module does not run.** Benchmarking
+it against the fixed backend produced four consecutive runs of "booted but never
+advanced a frame in 180s" -- the same failure as the reverted liveness reload.
+The size and build-time reductions were measured on a module that hangs Mario
+Kart at boot.
+
+The narrowing is disabled. Both barrier sides are fully conservative.
+
+| | Module size | Build time | Runs? |
+|---|---:|---:|---|
+| no narrowing (v7) | 444,321,280 | 874 s | yes |
+| store narrowing (v12) | 391,159,808 | 669 s | **no** |
+
+240 differential pairs across 5 seeds agree with the C backend, including
+call-shaped sequences with LR save/restore. The v1 version failed that same
+suite on its first seed, so the suite is not useless -- but it passed v2, and v2
+hangs a real title.
+
+That bounds the blind spot precisely. Whatever breaks is not reached by
+straight-line code nor by one level of direct calls. What the suite still does
+not generate: branch-shaped control flow inside a region, indirect transfers
+through the `continuations_` switch, exception paths, and dispatcher re-entry
+part-way through a region.
+
+**Three attempts, three failures, one pattern.** Every narrowing of a
+materialisation barrier has failed on a path the emitter reaches by a route the
+analysis did not model -- indirect-continuation edges, then helper writes, now
+something still unidentified. The recommendation is not to patch the analysis a
+fourth time. It is to derive the successor model and the emitted edges from one
+description, so that "the analysis models what the emitter generates" is
+structural rather than a claim to be re-checked after each failure.
 
 ### What this cost to get right
 

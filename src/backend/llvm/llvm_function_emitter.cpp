@@ -663,16 +663,25 @@ void FunctionEmitter::materialize(u32 pc) {
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (!dirty_[slot])
       continue;
-    // Skip slots no path to here has written: CPUState already holds the value
-    // that would be stored.
+    // DISABLED. Even with helper writes handled conservatively, this hung Mario
+    // Kart: the module loaded, reported running, and never advanced a frame in
+    // 180 seconds across four attempts. The -12% module size and -23% build time
+    // it produced are real and worthless, because the module does not run.
     //
-    // The first version of this diverged on floating-point state because it
-    // counted DOLIR_OP_STATE_WRITE only and missed helpers that write slots
-    // inside the runtime. computeReachingWrites() now treats any helper call as
-    // dirtying every slot the function uses, so a helper-written slot can never
-    // look clean.
-    if (!mayBeDirty(current_block_, static_cast<DolIRStateSlot>(slot)))
-      continue;
+    // 240 differential pairs across 5 seeds agree with the C backend, including
+    // call-shaped sequences with LR save/restore. So whatever it breaks is not
+    // reached by straight-line code, nor by one level of direct calls -- the
+    // suite's remaining blind spots are branch-shaped control flow inside a
+    // region, indirect transfers through the continuations switch, exception
+    // paths, and re-entry from the dispatcher mid-region.
+    //
+    // The pattern across three attempts is consistent and worth stating: every
+    // narrowing of a materialisation barrier has failed on a path the emitter
+    // reaches by a route the analysis did not model. Barrier narrowing should
+    // not be attempted again until the successor model provably matches the
+    // edges the emitter actually generates -- and the way to establish that is
+    // to derive both from one description rather than to keep patching the
+    // analysis after each failure.
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
     storeContext(
         stateSlot,
