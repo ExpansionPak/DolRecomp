@@ -915,7 +915,41 @@ The narrowing is disabled. Both barrier sides are fully conservative.
 | | Module size | Build time | Runs? |
 |---|---:|---:|---|
 | no narrowing (v7) | 444,321,280 | 874 s | yes |
-| store narrowing (v12) | 391,159,808 | 669 s | **no** |
+| store narrowing (v12) | 391,159,808 (-12.0%) | 669 s | **no** |
+| store narrowing (v15, correct) | 425,043,456 (**-4.3%**) | **1,308 s (+50%)** | yes |
+
+### The third root cause, and what correct actually costs
+
+v12 hung because both dataflow passes built their graph from
+`terminator.targets[]` alone, while `DOLIR_TERM_INDIRECT` lowers to a switch
+over `continuations_` -- an indirect transfer whose target matches a call-return
+point branches straight into that block. Those edges are absent from
+`targets[]`.
+
+The no-predecessor safety case did not catch it: a continuation block normally
+*does* have a targets-predecessor, the fallthrough after the call, so it
+inherited a dirty set from a path the indirect route does not justify.
+
+This is the same root cause as the reverted liveness reload. It was diagnosed
+there, written into the comment there, and then rebuilt in the store pass --
+because only the *helper* lesson was carried forward, not the *edge* lesson.
+Three failures, two distinct causes, one of them twice.
+
+Both passes now include the indirect-switch edges and `scanContinuations()` runs
+before either. The module runs: 612 frames, `fallback=0`, `smc_failed=0`.
+
+**And the win mostly evaporates.** -4.3% module size against v12's -12.0%, with
+build time up 50% rather than down 23%. v12 looked good precisely because it
+skipped stores it should not have. The extra dataflow is
+O(blocks x continuations x slots) per fixpoint iteration, which is where the
+build time goes.
+
+`bursts/Mcycle` on the probe is 178.3, indistinguishable from every other arm
+measured this session (175-179). **On this evidence the optimisation is not
+worth its build-time cost**, and the recommendation is to leave it disabled by
+default until either the dataflow is made cheaper or a proper A/B shows a
+runtime gain. It is kept in the tree, correct, because the edge fix it forced is
+the prerequisite for the register-passing ABI that is the real target.
 
 240 differential pairs across 5 seeds agree with the C backend, including
 call-shaped sequences with LR save/restore. The v1 version failed that same

@@ -61,11 +61,12 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   for (u32 i = 0; i < source_.block_count; i++)
     blocks_.push_back(BasicBlock::Create(context_, blockName(i), function_));
   scanState();
-  // After scanState: liveness treats an escaping block as keeping everything in
-  // `used_` live, and reaching-writes falls back to `dirty_`, so both need it.
+  // scanContinuations() first: both dataflow passes need the indirect-switch
+  // edges it discovers, and running them before it is what made the first two
+  // attempts model a different graph than the emitter generates.
+  scanContinuations();
   computeLiveness();
   computeReachingWrites();
-  scanContinuations();
   scanLoopHeaders();
   emitEntry();
   for (u32 i = 0; i < source_.block_count; i++)
@@ -298,6 +299,17 @@ void FunctionEmitter::computeLiveness() {
         for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++)
           out[slot] |= live_in_[tbase + slot];
       }
+      // The indirect switch reaches every continuation block, so anything live
+      // there is live out of an indirect terminator.
+      if (block.terminator.kind == DOLIR_TERM_INDIRECT) {
+        for (u32 continuation : continuations_) {
+          if (continuation >= blocks)
+            continue;
+          std::size_t cbase = (std::size_t)continuation * DOLIR_STATE_COUNT;
+          for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++)
+            out[slot] |= live_in_[cbase + slot];
+        }
+      }
 
       for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
         unsigned char live = gen[base + slot] ||
@@ -381,13 +393,27 @@ void FunctionEmitter::computeReachingWrites() {
     }
   }
 
-  // Predecessors, from the terminator edges.
+  // Predecessors: the terminator edges, plus the indirect-switch edges.
+  //
+  // DOLIR_TERM_INDIRECT lowers to a switch over `continuations_` -- an indirect
+  // transfer whose target matches a known call-return point branches straight to
+  // that block. Those edges do not appear in terminator.targets[], and leaving
+  // them out is what broke the first two barrier-narrowing attempts: a
+  // continuation block normally has a targets-predecessor too, so it did not
+  // fall into the no-predecessor case, and it inherited a dirty set from the
+  // fallthrough path that the indirect path does not justify.
   std::vector<std::vector<u32>> preds(blocks);
   for (u32 b = 0; b < blocks; b++) {
     for (u32 s = 0; s < 2; s++) {
       u32 target = source_.blocks[b].terminator.targets[s];
       if (target != DOLIR_NO_BLOCK && target < blocks)
         preds[target].push_back(b);
+    }
+    if (source_.blocks[b].terminator.kind == DOLIR_TERM_INDIRECT) {
+      for (u32 continuation : continuations_) {
+        if (continuation < blocks)
+          preds[continuation].push_back(b);
+      }
     }
   }
 
@@ -663,9 +689,15 @@ void FunctionEmitter::materialize(u32 pc) {
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (!dirty_[slot])
       continue;
-    // DISABLED. Even with helper writes handled conservatively, this hung Mario
-    // Kart: the module loaded, reported running, and never advanced a frame in
-    // 180 seconds across four attempts. The -12% module size and -23% build time
+    // Re-enabled after the third root cause: the predecessor model was missing
+    // the indirect-switch edges that DOLIR_TERM_INDIRECT lowers to. A
+    // continuation block normally has a targets-predecessor as well, so it never
+    // fell into the no-predecessor case, and inherited a dirty set the indirect
+    // path does not justify. Both dataflow passes now include those edges.
+    //
+    // Previously DISABLED because, even with helper writes handled, this hung
+    // Mario Kart: the module loaded, reported running, and never advanced a
+    // frame in 180 seconds across four attempts. The -12% module size and -23% build time
     // it produced are real and worthless, because the module does not run.
     //
     // 240 differential pairs across 5 seeds agree with the C backend, including
@@ -682,6 +714,8 @@ void FunctionEmitter::materialize(u32 pc) {
     // edges the emitter actually generates -- and the way to establish that is
     // to derive both from one description rather than to keep patching the
     // analysis after each failure.
+    if (!mayBeDirty(current_block_, static_cast<DolIRStateSlot>(slot)))
+      continue;
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
     storeContext(
         stateSlot,
