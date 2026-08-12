@@ -98,6 +98,16 @@ Two things bite here, both recorded because neither error names its cause:
   then failed looking for a file literally named
   `region_000000_80003100.o (16 runs)`. Run counts live in the region report.
 
+> **Cache hazard.** `moderngekko-port` keys its module cache on
+> `backend=<c|llvm>` plus the `dolrecomp` binary hash. Region settings arrive
+> through the environment, so they are **not** in that key: two different region
+> configurations built into the same `--output` directory collide and the second
+> silently reuses the first. Give every configuration its own `--output`
+> directory, and verify which backend actually ran by looking at the generated
+> manifest -- region builds list `chunks/region_*.o`, fixed builds list
+> `chunks/chunk_*.o`. DolRecomp's own object cache is not affected: its key
+> hashes every run and the run partition.
+
 Both arms of a comparison are built through this same path -- same port tool,
 same toolchain, differing only in `DOLRECOMP_FORCE_BACKEND` -- rather than
 against a module built earlier under unknown settings.
