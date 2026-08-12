@@ -158,6 +158,26 @@ int main(int argc, char** argv) {
 
     g_state = seed;
 
+    // Sequences do not call each other, and making them do so needs more than
+    // an offset.
+    //
+    // This is the coverage gap that let a wrong reload narrowing pass 23/23 and
+    // then hang Mario Kart: reloadLiveState only runs on a cross-function call
+    // return, and nothing here reaches it.
+    //
+    // Adding `bl` between generated functions does not work as-is. The C
+    // backend emits a switch(pc)->goto preamble per function and hands anything
+    // outside its own address range to the runtime dispatcher; with no
+    // dispatcher linked, a cross-function call has nowhere to go and the test
+    // hangs. The LLVM backend resolves the same call internally through its
+    // function ranges, so the two arms are not even attempting the same thing.
+    //
+    // Closing this properly means emitting dispatch helpers for the C arm --
+    // emit_dispatch_helpers() over a FunctionList of the C copies -- so both
+    // arms can resolve a call, one through the dispatcher and one directly, and
+    // still be required to agree on the guest-visible result. That is the next
+    // piece of work here and it is a prerequisite for trusting anything that
+    // touches the call/return path.
     std::vector<std::vector<u32>> bodies;
     for (u32 f = 0; f < functions; f++) {
         std::vector<u32> words;
