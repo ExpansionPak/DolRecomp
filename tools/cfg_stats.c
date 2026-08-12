@@ -191,6 +191,41 @@ int main(int argc, char** argv) {
         }
     }
 
+    /* Terminator mix weighted by execution.
+     *
+     * The unweighted mix says returns are 74% of indirect sites, but a site
+     * that never runs costs nothing. Dispatcher entries come from whatever
+     * *executes* and cannot resolve in-module, so the weighted mix is what
+     * says where Phase 4 should aim. Three separate nulls came from optimising
+     * a statically-large quantity that was dynamically irrelevant. */
+    if (profile_path) {
+        u64 weighted[16];
+        u64 sites[16];
+        memset(weighted, 0, sizeof(weighted));
+        memset(sites, 0, sizeof(sites));
+        u64 total = 0;
+        for (u32 i = 0; i < program.block_count; i++) {
+            const DolCfgBlock* block = &program.blocks[i];
+            u32 kind = (u32)block->terminator;
+            if (kind >= 16u)
+                continue;
+            weighted[kind] += block->weight;
+            sites[kind]++;
+            total += block->weight;
+        }
+        printf("\nterminator mix weighted by profile\n");
+        printf("  %-14s %12s %10s %12s\n", "kind", "sites", "% sites", "% weight");
+        for (u32 k = 0; k < 16; k++) {
+            if (!sites[k])
+                continue;
+            printf("  %-14s %12llu %9.1f%% %11.2f%%\n",
+                   dolcfg_terminator_name((DolCfgTerminator)k),
+                   (unsigned long long)sites[k],
+                   100.0 * (double)sites[k] / (double)program.block_count,
+                   total ? 100.0 * (double)weighted[k] / (double)total : 0.0);
+        }
+    }
+
     printf("sections            %u\n", program.section_count);
     printf("blocks              %u\n", program.block_count);
     printf("functions           %u\n", program.function_count);

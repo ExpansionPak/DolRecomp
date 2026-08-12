@@ -737,6 +737,46 @@ from these runs.
 
 ---
 
+## 5k. Where Phase 4 should aim: blr, not bctr
+
+Terminator mix for Mario Kart, weighted by the multiscene profile. A site that
+never executes costs nothing, so the weighted column is the one that matters --
+three separate nulls in this project came from optimising a statically large
+quantity that was dynamically irrelevant.
+
+| Terminator | sites | % sites | **% weighted execution** |
+|---|---:|---:|---:|
+| cond-branch | 49,176 | 32.5% | 44.21% |
+| branch | 20,465 | 13.5% | 22.01% |
+| fallthrough | 20,245 | 13.4% | 14.86% |
+| **return (blr)** | 14,988 | 9.9% | **10.95%** |
+| call | 41,264 | 27.3% | 7.79% |
+| **indirect (bctr)** | 5,146 | 3.4% | **0.17%** |
+| tail-call / system / unknown | 73 | 0.0% | 0.00% |
+
+The first three resolve inside a region as native branches and cost nothing at
+the dispatcher. What can leave through the runtime is `blr` and `bctr`.
+
+**`bctr` is 0.17% of weighted execution.** Jump-table recovery, static
+target-set analysis and per-site indirect target caches -- the bulk of Phase 4
+as specified -- all aim at that path. On this title they would optimise
+something that essentially never runs. `blr` is 64x more significant.
+
+This does not mean the brief is wrong in general: a title built around switch
+dispatch or heavy virtual calls would invert this. It means the work should be
+ordered by what the profile says, and for Mario Kart that order is:
+
+1. **BLR return handling** (10.95%) -- shadow return stack, native continuation
+   on match, indirect fallback on mismatch.
+2. Everything else in Phase 4, which is rounding error here.
+
+Worth noting `call` is 27.3% of sites but only 7.79% of weighted execution,
+while `cond-branch` is the reverse -- calls are spread thinly across cold code
+and the hot paths are loops. That is the same shape that made uniform region
+merging useless.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
