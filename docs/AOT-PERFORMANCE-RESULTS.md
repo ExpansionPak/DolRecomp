@@ -825,6 +825,58 @@ other.**
 
 ---
 
+## 5m. The liveness-narrowed reload was wrong, and how it was caught
+
+Narrowing the post-call reload to state live at the continuation **hung Mario
+Kart**. The module loaded, reported `state=running`, reached `present_count=1`
+and never advanced a frame in 180 seconds. The same region configuration built
+without the change ran normally.
+
+### Why it was unsound
+
+The backward liveness followed `terminator.targets[]` only. The emitter also
+reaches blocks through the `continuations_` switch that `DOLIR_TERM_INDIRECT`
+lowers to: an indirect transfer whose target matches a known continuation
+branches straight to that block. Those edges do not appear in `targets[]`, so
+liveness never propagated backward through them and reported slots dead that a
+continuation-entered block goes on to read. The reload skipped them and the
+block ran on stale guest state.
+
+### Why the differential suite missed it
+
+It could not have caught this. Its sequences are single functions with no calls,
+and `reloadLiveState` only runs on a cross-function call return. The path had
+zero coverage.
+
+This is the important part. The suite passed 23/23 with the broken change in it,
+and that green result was cited as validation for both optimisations before the
+real check ran. **A passing suite is evidence only about what it exercises**, and
+the gap between "straight-line sequences ending in blr" and "a title making
+cross-region calls" was exactly where the bug lived.
+
+### What was kept and what was reverted
+
+| Change | Status |
+|---|---|
+| reload narrowed to live-at-continuation | **reverted** -- unsound, hung the title |
+| materialize narrowed to reaching-writes | kept -- different analysis, forward, and its claim is only that a slot no path has written need not be stored |
+
+The store-side narrowing survives because its soundness argument does not depend
+on the successor model being complete: it never claims a slot is clean where a
+write may have happened, and an unreached block is treated as fully dirty.
+
+`computeLiveness()` stays in the tree, unused for reload, because the fix is to
+add the indirect-continuation edges to the successor model rather than to
+rewrite the analysis.
+
+### The measurement debt this exposes
+
+The differential generator needs call-shaped sequences -- one generated function
+calling another -- before anything touching the call/return path can be trusted.
+That is the next thing to build, ahead of any further optimisation there.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile

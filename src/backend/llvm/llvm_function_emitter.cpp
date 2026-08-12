@@ -386,11 +386,29 @@ void FunctionEmitter::computeReachingWrites() {
   }
 }
 
+// REVERTED to the conservative form. Narrowing this by liveness hung Mario Kart
+// at boot: the module loaded, reported running, and never advanced a frame.
+//
+// computeLiveness() below is unsound for this purpose as written, because the
+// successor model is incomplete. It follows terminator.targets[] only, but the
+// emitter also reaches blocks through the `continuations_` switch that
+// DOLIR_TERM_INDIRECT lowers to -- an indirect transfer whose target matches a
+// known continuation branches straight to that block. Those edges do not appear
+// in targets[], so liveness never propagates backward through them and reports
+// slots dead that a continuation-entered block goes on to read. The reload then
+// skips them and the block runs on stale guest state.
+//
+// The differential suite did not catch it and could not have: its sequences are
+// single functions with no calls, and this path only runs on a cross-function
+// call return. That coverage gap is the actual lesson here.
+//
+// Fixing this needs the indirect-continuation edges in the successor model.
+// Until then the reload restores everything the function uses, which is what it
+// did before and is always correct.
 void FunctionEmitter::reloadLiveState(u32 block) {
+  (void)block;
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (!used_[slot])
-      continue;
-    if (!liveAt(block, static_cast<DolIRStateSlot>(slot)))
       continue;
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
     builder_.CreateStore(loadContext(stateSlot), state_[slot]);
