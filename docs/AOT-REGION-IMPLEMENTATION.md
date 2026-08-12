@@ -239,37 +239,66 @@ Memory work does not block on a perfect signal-handler design.
 
 ---
 
-## 5. Phase checklist
+## 5. Status — what the measurements changed
 
-- [x] **Phase 0a** — counter subsystem, `--perf-report` JSON + console summary,
-      generated `dolrecomp_perf.h`, `test_perf` (6 cases). 20/20 ctest green.
-- [ ] **Phase 0b** — benchmark harness + synthetic benchmarks
-- [ ] **Phase 0c** — untouched baseline numbers recorded
-- [x] **Phase 1a** — whole-title CFG/call-graph model, entry inference by
-      elimination, `cfg_stats`. 100% block coverage, 0 unowned blocks on MKDD
-      and Luigi's Mansion.
-- [x] **Phase 1b** — deterministic region planner (`fixed`/`function`/`cfg`/
-      `pgo`), size limits, `--emit-region-report`. CFG accretion removes 33% of
-      region crossings on both titles.
-- [x] **Phase 1c** — `--backend llvm-aot` with `--region-mode`,
-      `--region-max-instructions`, `--region-max-ir`, `--emit-region-report`;
-      LLVM jobs carry multiple contiguous runs; `rangeFor()` made a binary
-      search. Address-adjacency accretion cut units 4.4x.
-- [x] **Phase 0b** — `benchmarks/run_title_benchmark.py`, runtime baseline
-      captured for Luigi's Mansion
-- [ ] **Phase 0b'** — synthetic microbenchmarks (integer/FP/paired-single loops,
-      call shapes, MEM1/MEM2/MMIO, branch-heavy code)
-- [ ] **Phase 2** — region SSA state, live-in/out, barrier framework, internal ABI
-- [ ] **Phase 3** — direct cross-region calls, tail transfers, mod policies
-- [ ] **Phase 4** — indirect target sets, jump tables, per-site caches, BLR
-      shadow returns, O(1) fallback dispatch
-- [ ] **Phase 5** — memory access classification, const RAM/MMIO, guarded
-      fastmem, journaling modes
-- [ ] **Phase 6** — bitcode, ThinLTO, PGO-driven regions, wider cache keys,
-      AArch64 Linux, Apple Silicon
-- [ ] **Final** — performance gates, engineering report
+The plan in §4 assumed region formation was the lever. It is not, and the
+evidence for that is in AOT-PERFORMANCE-RESULTS.md §5i-§5k. This section records
+where things actually stand.
 
----
+### Landed and measured
+
+- [x] **Phase 0** — counters, `--perf-report`, benchmark harness, comparison
+      tooling with a comparability guard, differential suite.
+- [x] **Phase 1** — whole-title CFG, four-mode region planner, region report,
+      `--backend llvm-aot`, profile loading. All working and deterministic.
+- [x] **Adaptive dispatch lookup** — the one confirmed performance fix. Region
+      layouts are irregular, the linear chain emitted 8,284 address comparisons,
+      and the page index was gated behind an env var. Worth 8x, but it recovers
+      ground the region backend lost rather than beating the baseline.
+- [x] **Materialize narrowing** — store side of every barrier skips slots no
+      path has written. Sound argument, differential-tested on straight-line
+      sequences, **not** validated on a real title.
+
+### Reverted
+
+- **Liveness-narrowed reload.** Unsound: the successor model misses the
+  indirect-continuation edges that `DOLIR_TERM_INDIRECT` lowers to, so it
+  reported slots dead that a continuation-entered block reads. Passed 23/23 and
+  hung Mario Kart at boot.
+
+### Measured dead ends — do not redo these
+
+| Approach | Result |
+|---|---|
+| Larger regions (256/512/1024) | dispatcher rate flat within 1%, 33 runs |
+| PGO region formation | plans a different program, moves nothing |
+| Static crossing count as a proxy | falls 21% while runtime rate moves 0.8% |
+| `bctr`/jump-table specialisation | 0.17% of weighted execution on MKDD |
+| Address-adjacency merging | 2.2x build time, +6.3% size, +1.1% crossings |
+
+### Live leads, in priority order
+
+1. **Call-path differential coverage.** Blocking everything below it. Dispatch
+   helpers alone do not fix it -- tried, still hangs, see the note in
+   `gen_differential.cpp`. Start from two functions and one call.
+2. **Per-call state round trip.** `materialize` -> call -> returned-PC check ->
+   reload, paid per executed call. Calls are 7.79% and returns 10.95% of
+   weighted execution. The private `fastcc` ABI (D3) is the real fix; the
+   store-side narrowing already landed is a fraction of it.
+3. **`blr` handling** at 10.95%. Note that a `blr` already returns natively to
+   its LLVM caller, so shadow return stacks address a cost the direct-call
+   lowering removed. What it pays is the materialize.
+4. Phase 5 memory lowering and Phase 6 ThinLTO/AArch64, untouched.
+
+### Correctness debt
+
+- Call/return path has no differential coverage (see 1 above).
+- `stfs` diverges between backends on overflow and denormal input; excluded from
+  the default differential pool, reproduces with `--stfs`. One backend is wrong
+  about Gekko and it is not yet known which.
+- The object cache key does not hash the emitter source. Every codegen change
+  must bump `DOLLLVM_CACHE_VERSION` by hand or measurements silently compare
+  identical binaries. Bitten three times.
 
 ## 6. Rejected approaches
 
