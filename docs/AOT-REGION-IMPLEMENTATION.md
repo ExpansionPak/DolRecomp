@@ -172,6 +172,27 @@ otherwise, so a shipping module carries no counter store on a memory fast path.
 Counters are plain `u64` assuming the single generated guest CPU thread;
 `DOLRECOMP_PERF_ATOMIC` is available for multi-threaded hosts.
 
+### D4b — `bursts` leads, fps corroborates
+
+The obvious metric does not survive contact. `status.txt`'s `fps` is 0 in a
+headless run because nothing presents, and a windowed run is throttled to real
+time so `speed` pins at 1.00.
+
+Measured on Luigi's Mansion, unthrottling (`EmulationSpeed = 0`) changed
+throughput by -3.6% -- i.e. not at all, and within noise. The cap was never the
+limit: the title runs at roughly 1.0x real time on a 9950X3D. So fps *is*
+meaningful here, derived from `frame_count` over wall time rather than from the
+`fps` field.
+
+But run-to-run spread is ~3.5%, which cannot resolve the brief's 15% target from
+a single pair, let alone its 5% regression bound. So the primary comparison is
+ModernGekko's `bursts` counter -- dispatcher re-entries, deterministic across
+runs, and the exact quantity of the first performance gate. fps corroborates.
+Baseline is 1,267 bursts/frame on the fixed-chunk backend.
+
+Scenes are pinned with `--load-state` (the LM project ships `states/foyer.sav`)
+rather than measured over a boot sequence.
+
 ### D5 — One X-macro is the source of truth for counters
 `DOLRECOMP_PERF_COUNTERS` in `src/common/perf.h` generates the struct, the JSON
 object, the console table, the reset path and the generated header together, so
@@ -197,8 +218,14 @@ Memory work does not block on a perfect signal-handler design.
 - [x] **Phase 1b** — deterministic region planner (`fixed`/`function`/`cfg`/
       `pgo`), size limits, `--emit-region-report`. CFG accretion removes 33% of
       region crossings on both titles.
-- [ ] **Phase 1c** — wire `--region-mode` into the dolrecomp CLI and drive the
-      LLVM backend from the plan instead of fixed chunks
+- [x] **Phase 1c** — `--backend llvm-aot` with `--region-mode`,
+      `--region-max-instructions`, `--region-max-ir`, `--emit-region-report`;
+      LLVM jobs carry multiple contiguous runs; `rangeFor()` made a binary
+      search. Address-adjacency accretion cut units 4.4x.
+- [x] **Phase 0b** — `benchmarks/run_title_benchmark.py`, runtime baseline
+      captured for Luigi's Mansion
+- [ ] **Phase 0b'** — synthetic microbenchmarks (integer/FP/paired-single loops,
+      call shapes, MEM1/MEM2/MMIO, branch-heavy code)
 - [ ] **Phase 2** — region SSA state, live-in/out, barrier framework, internal ABI
 - [ ] **Phase 3** — direct cross-region calls, tail transfers, mod policies
 - [ ] **Phase 4** — indirect target sets, jump tables, per-site caches, BLR
