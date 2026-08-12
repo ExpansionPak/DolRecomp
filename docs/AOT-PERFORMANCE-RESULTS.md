@@ -278,6 +278,61 @@ therefore resolved to the callee's region and counted separately.
 
 ---
 
+## 5c. Runtime baseline — Luigi's Mansion through ModernGekko
+
+`benchmarks/run_title_benchmark.py`, headless, Null graphics, no audio, 15 s
+warmup then a 45 s window. Module: the existing fixed-chunk LLVM build in the
+LM project's `llvmcur/`.
+
+| Arm | fps | speed | bursts | cycles | native | fallback |
+|---|---:|---:|---:|---:|---:|---:|
+| unthrottled (`EmulationSpeed = 0`) | 40.18 | 0.96 | 2,293,379 | 28,555,556,317 | 108,653,909 | 0 |
+| throttled (`EmulationSpeed = 1`) | 41.67 | 1.00 | 2,344,430 | 29,157,296,752 | 110,993,626 | 0 |
+
+### FPS is a usable metric after all — because the title is CPU-bound
+
+The throttled and unthrottled arms are within 3.6% of each other, and the
+unthrottled one is marginally *slower*. Removing the real-time cap changes
+nothing, which means the cap was never what limited the run: **Luigi's Mansion
+under this recompiler sits at roughly 1.0x real time on a 9950X3D**. There is no
+headroom being thrown away, so frames-per-second moves when the CPU work moves.
+
+That also sets the noise floor. Run-to-run spread is ~3.5%, so a single pair of
+runs cannot resolve the brief's 15% target with confidence, let alone a 5%
+regression. Comparisons need repeats and a savestate-pinned scene rather than
+the boot sequence these numbers came from.
+
+`fps` in `status.txt` stays 0 headless regardless; the figure above is derived
+from `frame_count` over measured wall time, which is populated either way.
+
+### Dispatcher entries per frame
+
+`bursts` is dispatcher re-entries. At 1,810 frames that is **1,267 bursts per
+frame** on the fixed-chunk backend -- the number the brief's first performance
+gate asks to halve, and the one the region work targets directly. It is
+deterministic across runs in a way frame timing is not, so it is the primary
+comparison and fps is the corroborating one.
+
+`fallback=0` and `smc_failed=0` on both arms: no instruction fell back to the
+interpreter and no self-modifying-code path failed, which is the free
+correctness signal from the same run.
+
+---
+
+## 5d. Build cost — Luigi's Mansion
+
+| Backend | Units | Instr/unit | Clean build | Object bytes |
+|---|---:|---:|---:|---:|
+| fixed-chunk LLVM | 4,164 | 128.0 | 859 s | 235,179,859 |
+| llvm-aot, pre-adjacency | 7,520 | 70.4 | 524 s | 247,014,853 |
+| llvm-aot, adjacency | 1,724 | 307.3 | _in flight_ | _in flight_ |
+
+The pre-adjacency AOT build was already faster than the fixed arm despite
+emitting 80% more objects, because each one is smaller. The adjacency planner
+cuts unit count 4.4x again.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
