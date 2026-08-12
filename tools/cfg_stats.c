@@ -9,6 +9,7 @@
  */
 
 #include "analysis/cfg.h"
+#include "analysis/regions.h"
 #include "analysis/embedded_data.h"
 #include "analysis/symbol_map.h"
 #include "frontend/container/dol.h"
@@ -24,9 +25,29 @@ int main(int argc, char** argv) {
     }
 
     const char* map_path = NULL;
+    const char* report_path = NULL;
+    int compare_modes = 0;
+    DolRegionMode mode = DOLREGION_MODE_CFG;
+    DolRegionLimits limits;
+    dolregion_default_limits(&limits);
+
     for (int i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--map") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "--map") == 0 && i + 1 < argc) {
             map_path = argv[++i];
+        } else if (strcmp(argv[i], "--emit-region-report") == 0 && i + 1 < argc) {
+            report_path = argv[++i];
+        } else if (strcmp(argv[i], "--region-mode") == 0 && i + 1 < argc) {
+            if (!dolregion_parse_mode(argv[++i], &mode)) {
+                fprintf(stderr, "error: unknown region mode '%s'\n", argv[i]);
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--region-max-instructions") == 0 && i + 1 < argc) {
+            limits.max_instructions = (u32)strtoul(argv[++i], NULL, 0);
+        } else if (strcmp(argv[i], "--region-max-ir") == 0 && i + 1 < argc) {
+            limits.max_ir_instructions = (u32)strtoul(argv[++i], NULL, 0);
+        } else if (strcmp(argv[i], "--compare-modes") == 0) {
+            compare_modes = 1;
+        }
     }
 
     DOLFile dol;
@@ -167,6 +188,47 @@ int main(int argc, char** argv) {
         if (term_counts[i])
             printf("  %-14s %u\n", dolcfg_terminator_name((DolCfgTerminator)i),
                    term_counts[i]);
+    }
+
+    /* Region planning. The comparison is the point: the same title through
+       every mode, so the cost of an arbitrary boundary is visible next to the
+       cost of a chosen one. */
+    const DolRegionMode all_modes[] = {
+        DOLREGION_MODE_FIXED, DOLREGION_MODE_FUNCTION, DOLREGION_MODE_CFG,
+    };
+    u32 mode_count = compare_modes ? 3u : 1u;
+
+    printf("\nregion plans (max %u instructions)\n", limits.max_instructions);
+    printf("  %-10s %9s %9s %11s %11s %9s\n", "mode", "regions", "instr/rgn",
+           "crossings", "internal", "split fns");
+
+    for (u32 m = 0; m < mode_count; m++) {
+        DolRegionMode selected = compare_modes ? all_modes[m] : mode;
+
+        DolRegionPlan plan;
+        dolregion_plan_init(&plan);
+        if (!dolregion_plan_build(&plan, &program, selected, &limits, stderr)) {
+            dolregion_plan_free(&plan);
+            continue;
+        }
+
+        u64 internal = 0;
+        for (u32 r = 0; r < plan.region_count; r++)
+            internal += plan.regions[r].internal_edges;
+
+        printf("  %-10s %9u %9.1f %11u %11llu %9u\n",
+               dolregion_mode_name(selected), plan.region_count,
+               plan.region_count
+                   ? (double)plan.total_instructions / (double)plan.region_count
+                   : 0.0,
+               plan.cross_region_edges, (unsigned long long)internal,
+               plan.split_functions);
+
+        if (report_path && (!compare_modes || selected == mode)) {
+            if (dolregion_write_report(&plan, &program, report_path, stderr))
+                printf("  region report: %s\n", report_path);
+        }
+        dolregion_plan_free(&plan);
     }
 
     dolcfg_free(&program);

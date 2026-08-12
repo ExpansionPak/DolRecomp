@@ -127,6 +127,7 @@ endif()
 
 add_library(dr_analysis STATIC
     src/analysis/cfg.c
+    src/analysis/regions.c
     src/analysis/embedded_data.c
     src/analysis/smc.c
     src/analysis/symbol_map.c
@@ -271,6 +272,10 @@ add_test(NAME dolir COMMAND test_dolir)
 add_executable(test_cfg tests/test_cfg.c)
 target_link_libraries(test_cfg PRIVATE dr_analysis)
 add_test(NAME cfg COMMAND test_cfg)
+
+add_executable(test_regions tests/test_regions.c)
+target_link_libraries(test_regions PRIVATE dr_analysis)
+add_test(NAME regions COMMAND test_regions ${CMAKE_CURRENT_BINARY_DIR}/regions_test)
 
 add_executable(test_perf tests/test_perf.c)
 target_link_libraries(test_perf PRIVATE dr_common)

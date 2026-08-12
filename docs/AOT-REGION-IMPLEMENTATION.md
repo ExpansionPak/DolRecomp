@@ -191,8 +191,14 @@ Memory work does not block on a perfect signal-handler design.
       generated `dolrecomp_perf.h`, `test_perf` (6 cases). 20/20 ctest green.
 - [ ] **Phase 0b** — benchmark harness + synthetic benchmarks
 - [ ] **Phase 0c** — untouched baseline numbers recorded
-- [ ] **Phase 1** — whole-title CFG/call-graph model; region planner
-      (`fixed`/`function`/`cfg`/`pgo`); `--emit-region-report`
+- [x] **Phase 1a** — whole-title CFG/call-graph model, entry inference by
+      elimination, `cfg_stats`. 100% block coverage, 0 unowned blocks on MKDD
+      and Luigi's Mansion.
+- [x] **Phase 1b** — deterministic region planner (`fixed`/`function`/`cfg`/
+      `pgo`), size limits, `--emit-region-report`. CFG accretion removes 33% of
+      region crossings on both titles.
+- [ ] **Phase 1c** — wire `--region-mode` into the dolrecomp CLI and drive the
+      LLVM backend from the plan instead of fixed chunks
 - [ ] **Phase 2** — region SSA state, live-in/out, barrier framework, internal ABI
 - [ ] **Phase 3** — direct cross-region calls, tail transfers, mod policies
 - [ ] **Phase 4** — indirect target sets, jump tables, per-site caches, BLR

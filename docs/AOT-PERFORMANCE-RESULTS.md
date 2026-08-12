@@ -180,6 +180,59 @@ sees the whole title rather than the directly-called 40% of it.
 
 ---
 
+## 5b. Region planning
+
+`build/cfg_stats <main.dol> --compare-modes --region-max-instructions N`
+
+Region crossings are the metric: each one is a boundary control flow has to
+traverse, which under the current backend means a state materialization and a
+dispatcher round trip. Internal edges are the mirror — control flow that stays
+inside one compiled unit and can be a native branch.
+
+### Mario Kart: Double Dash!!, limit 1024
+
+| Mode | Regions | Instr/region | **Crossings** | Internal edges | Split functions |
+|---|---:|---:|---:|---:|---:|
+| fixed | 13,281 | 54.7 | 52,249 | 170,970 | 0 |
+| function | 29,025 | 25.0 | 50,814 | 172,405 | 4 |
+| cfg | 19,563 | 37.2 | **35,035** | 188,184 | 4 |
+
+### Luigi's Mansion, limit 1024
+
+| Mode | Regions | Instr/region | **Crossings** | Internal edges | Split functions |
+|---|---:|---:|---:|---:|---:|
+| fixed | 11,254 | 46.1 | 40,603 | 110,321 | 0 |
+| function | 24,418 | 21.2 | 39,794 | 111,130 | 0 |
+| cfg | 16,495 | 31.4 | **26,965** | 123,959 | 0 |
+
+**CFG accretion removes 33.0% of crossings on MKDD and 33.6% on Luigi's
+Mansion** against the CFG-blind arm — two unrelated titles landing within 0.6
+points of each other. `function` mode barely helps on its own (2.7% / 2.0%),
+which is the useful negative result: the win is co-locating callers with
+callees, not respecting function boundaries.
+
+At limit 128 the same comparison gives 58,989 → 47,613 crossings on MKDD
+(19.3%), so the benefit grows with the size budget, as expected.
+
+> **Comparison caveat.** The `fixed` arm here is CFG-blind cutting every N guest
+> instructions, additionally broken at address discontinuities where embedded
+> data interrupts code. The shipped LLVM backend chunks raw instruction indices
+> *including* data and produces 5,803 regions of exactly 128. So `fixed` here is
+> not a byte-for-byte reproduction of the shipped chunker — it is a controlled
+> arm measured through the identical edge model as the other two modes. The
+> shipped backend's real crossing count is not measurable until the region
+> backend emits code and the runtime counters populate.
+
+### Call edges are counted explicitly
+
+A `CALL` block's successor is its *return point*, not its callee, so walking
+successors alone never sees the call. On MKDD that would have hidden 40,316 of
+the transfers the plan exists to remove, and co-locating a caller with its
+callee would have scored as no improvement at all. Call and tail-call edges are
+therefore resolved to the callee's region and counted separately.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
