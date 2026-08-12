@@ -514,11 +514,15 @@ and scene length.
 
 **−22.1% dispatcher entries per unit of guest work.**
 
-That lands almost exactly on what the region planner predicted statically:
-−21.4% crossings on Mario Kart and −23.8% on Luigi's Mansion. The static
-crossing count is therefore a usable proxy for the runtime dispatcher rate,
-which is worth knowing because crossings cost seconds to compute and this costs
-a module build plus a benchmark.
+That appeared to land on what the region planner predicted statically -- −21.4%
+crossings on Mario Kart, −23.8% on Luigi's Mansion -- and an earlier revision of
+this document concluded the static crossing count was a usable proxy for the
+runtime dispatcher rate.
+
+**That conclusion was wrong.** The two arms here ran different Luigi's Mansion
+scenes, and a same-scene sweep on Mario Kart (§5i) shows the runtime rate is
+flat while static crossings fall 21%. The agreement was coincidence between two
+scenes, not a mechanism.
 
 Caveat, stated rather than buried: the two arms ran different scenes, and
 different code mixes can have different intrinsic dispatcher rates. This is
@@ -618,6 +622,60 @@ so gave up the entire reason for the region backend.
 The lesson is narrow and worth stating: region size is not a free parameter that
 trades build time against nothing. Crossings and compile time pull in opposite
 directions, and a cap picked for one is a cap picked against the other.
+
+---
+
+## 5i. Region size sweep: static crossings do not predict the runtime rate
+
+Four arms, same pipeline, same Mario Kart 1P scene, 1,200 frames, 3 measured
+repeats each after discarding a shader-cache warmup run.
+
+| Arm | Static crossings | vs fixed | **bursts/Mcycle** | vs fixed | fps | fps sd% |
+|---|---:|---:|---:|---:|---:|---:|
+| fixed (128) | 40,754 | — | 180.4 | — | 29.45 | 1.8 |
+| aot cfg @256 | 40,316 | −1.1% | 178.9 | −0.8% | 31.58 | 5.9 |
+| aot cfg @512 | 35,417 | −13.1% | 178.7 | −0.9% | 31.97 | 1.1 |
+| aot cfg @1024 | 32,027 | −21.4% | 179.0 | −0.8% | 30.16 | 1.8 |
+
+**Static crossings fall 21.4%. The runtime dispatcher rate does not move at
+all** -- every arm sits within 1% of the fixed baseline, and the variation is
+not even monotonic in region size.
+
+The measurement is trustworthy: fps spread is 1.1-1.8% on three of four arms
+after the shader-cache fix, against 23-28% before it, and `fallback=0`
+throughout. This is a null result, not a noisy one.
+
+### Why the metric failed
+
+A static crossing is a CFG edge that leaves a region. It counts every edge once,
+whether it executes a billion times or never. Runtime dispatcher entries are
+dominated by whatever the hot path does, and this profile is extraordinarily
+concentrated: one guest function is 22% of all execution
+(`func_800EB5C0`, 83.2 G of 380 G counts).
+
+Merging regions removes boundaries roughly uniformly across the address space,
+so it removes overwhelmingly **cold** boundaries. Removing a boundary that never
+executes reduces the static count and changes nothing at runtime. Meanwhile the
+hot loop was already inside a single 128-instruction chunk in the fixed layout,
+so it never crossed a boundary to begin with.
+
+### What this redirects
+
+Two consequences, both already in the brief and now with evidence behind them:
+
+1. **Region formation must be profile-weighted, not uniform.** The planner's
+   `pgo` mode exists for this and is now wired to real weights. Merging on hot
+   edges is a different operation from merging on all edges, and only the first
+   can move the runtime rate.
+
+2. **Fewer crossings is the weaker lever; cheaper crossings is the stronger
+   one.** Phase 3's direct cross-region linking makes a remaining boundary cost
+   a native call rather than a dispatcher round trip. That helps every boundary
+   that actually executes, regardless of how the regions were drawn.
+
+Uniform region enlargement is therefore not worth its cost: at cap 1024 it buys
+nothing measurable for +29% module size (444 MB against 343 MB) and 874 s of
+build time against roughly 500 s.
 
 ---
 
