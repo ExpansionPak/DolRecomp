@@ -877,6 +877,52 @@ That is the next thing to build, ahead of any further optimisation there.
 
 ---
 
+## 5n. Barrier store narrowing: two wrong versions, then a measured win
+
+The store side of every materialisation barrier used a whole-function dirty
+flag -- a slot written anywhere was stored at every barrier, including barriers
+on paths that never touched it.
+
+Two attempts failed before one worked, and both failures were the same mistake
+in different clothing: **an incomplete model of how guest state moves**.
+
+| Attempt | What it did | How it failed |
+|---|---|---|
+| liveness-narrowed *reload* | restore only slots live at the continuation | hung Mario Kart at boot; the successor model missed the indirect-continuation edges `DOLIR_TERM_INDIRECT` lowers to |
+| reaching-writes *store*, v1 | skip slots no path has written | diverged on 3 of 64 differential pairs, all floating point; counted `DOLIR_OP_STATE_WRITE` only, missing helpers that write slots inside the runtime |
+| reaching-writes *store*, v2 | as above, but any helper call dirties every used slot | **works** |
+
+The working version is deliberately blunt. Enumerating which helper writes which
+slot would duplicate `scanState()` and create a second place to forget one --
+and forgetting one is exactly how v1 broke. Narrowing is surrendered inside
+blocks containing a helper and kept everywhere else, which is most blocks and
+all the integer ones.
+
+### Measured, Mario Kart, region cap 1024
+
+| | Module size | Build time |
+|---|---:|---:|
+| no narrowing (v7) | 444,321,280 | 874 s |
+| **store narrowing (v12)** | **391,159,808** | **669 s** |
+| | **-12.0%** | **-23.4%** |
+
+Correctness: 240 differential pairs across 5 seeds, call-shaped sequences of 32
+instructions with LR save/restore, comparing every GPR, FPR and paired-single
+lane as bit patterns plus CR, XER, LR, CTR, FPSCR, exception and reservation
+state and written memory. The v1 version failed that same suite on its first
+seed.
+
+### What this cost to get right
+
+Both failures passed the test suite as it existed at the time. The reload
+narrowing passed 23/23 and hung a real title; the store narrowing v1 passed
+every straight-line sequence and corrupted floating-point state only under
+calls. Neither would have been caught without extending the differential suite
+to cover the call/return path, which is the work that made this measurable at
+all.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
