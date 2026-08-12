@@ -131,9 +131,52 @@ cuts land.
 | Scenario | Wall time |
 |---|---:|
 | C backend, `-j8` | 0.50 s |
-| LLVM, partial cache (1,202 hits / 4,601 misses) | 213 s |
-| LLVM, clean (cache empty) | _pending — measurement in flight_ |
-| LLVM, full cache hit (5,803 hits) | _pending — measurement in flight_ |
+| LLVM, clean — 5,803 misses | 512 s |
+| LLVM, partial cache — 1,202 hits / 4,601 misses | 213 s |
+| LLVM, full cache hit — 5,803 hits | _measurement in flight_ |
+
+The clean LLVM build is ~1000× the C backend's wall time for the same 742,616
+guest instructions. That is the budget any ThinLTO stage in Phase 6 has to fit
+inside without making the development loop unusable, which is why the non-LTO
+path is retained and why cache-hit time is tracked separately.
+
+---
+
+## 5a. Whole-title CFG model
+
+`build/cfg_stats <main.dol>`. Both titles supplied locally, neither committed.
+
+| | Mario Kart: Double Dash!! | Luigi's Mansion |
+|---|---:|---:|
+| Sections | 2 | 2 |
+| Code instructions (non-data) | 727,020 | 518,717 |
+| Covered by blocks | 727,020 (100.00%) | 518,717 (100.00%) |
+| Basic blocks | 161,404 | 111,912 |
+| Functions | 29,021 | 24,418 |
+| SCCs | 146,182 | 103,294 |
+| Loop headers | 4,307 | 2,517 |
+| Indirect sites | 20,134 | 14,003 |
+| Blocks owned by no function | 0 | 0 |
+
+MKDD terminator mix: 49,176 conditional branches, 40,316 calls, 20,464
+branches, 19,906 fallthroughs, 14,988 returns, 5,146 indirect, 11,349 unknown
+(section end or data boundary), 38 system, 21 tail calls.
+
+### Function entries cannot come from `bl` targets alone
+
+Seeding function entries only from direct call targets left **59.47% of Mario
+Kart's code owned by no function**. The roots of that were 22,010 blocks with no
+in-edge anywhere in the program — reached only through a vtable slot, a
+function-pointer table, or a jump table, which is what a C++ title looks like.
+
+Treating a block that no direct edge reaches as an entry point by elimination
+brought unowned code to 0.11%, and seeding the residual — cycles where every
+member has an in-edge from inside the cycle — closed it to **0.00%** on both
+titles. Function count rises from 6,997 to 29,021 on MKDD accordingly.
+
+This infers *entries*, never edges. Nothing here claims to know which indirect
+site reaches which entry; that is Phase 4's job. But it means region formation
+sees the whole title rather than the directly-called 40% of it.
 
 ---
 

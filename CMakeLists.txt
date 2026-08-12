@@ -173,6 +173,9 @@ endif()
 add_executable(dolir_stats tools/dolir_stats.c)
 target_link_libraries(dolir_stats PRIVATE dr_ir dr_frontend dr_analysis)
 
+add_executable(cfg_stats tools/cfg_stats.c)
+target_link_libraries(cfg_stats PRIVATE dr_analysis dr_frontend)
+
 enable_testing()
 
 add_executable(test_opcodes tests/test_opcodes.c)

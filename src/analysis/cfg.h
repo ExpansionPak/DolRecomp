@@ -103,6 +103,10 @@ enum {
     DOLCFG_FUNC_FROM_SYMBOL   = 1u << 0,  /* named by a MAP */
     DOLCFG_FUNC_FROM_CALL     = 1u << 1,  /* inferred from a bl target */
     DOLCFG_FUNC_FROM_ENTRY    = 1u << 2,  /* section/module entry point */
+    /* No direct edge in the whole program reaches this block, so control can
+       only arrive indirectly -- a vtable slot, a function-pointer table, a
+       jump-table entry. It is an entry point by elimination. */
+    DOLCFG_FUNC_FROM_INDIRECT = 1u << 6,
     DOLCFG_FUNC_HAS_INDIRECT  = 1u << 3,
     DOLCFG_FUNC_HAS_SMC       = 1u << 4,
     /* Externally visible: a mod or replacement may intercept it, so it keeps a

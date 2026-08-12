@@ -539,15 +539,18 @@ static bool build_functions(DolCfgProgram* program) {
        map, the section entry point, and inferred bl targets. A map improves
        naming and boundaries but is never required. */
     AddrSet entries = {0};
+    AddrSet indirect_entries = {0};
 
     for (u32 i = 0; i < program->known_count; i++) {
         if (!addr_set_push(&entries, program->known[i].address)) {
             addr_set_free(&entries);
+            addr_set_free(&indirect_entries);
             return false;
         }
     }
     if (program->entry_point && !addr_set_push(&entries, program->entry_point)) {
         addr_set_free(&entries);
+        addr_set_free(&indirect_entries);
         return false;
     }
     for (u32 i = 0; i < program->block_count; i++) {
@@ -555,10 +558,53 @@ static bool build_functions(DolCfgProgram* program) {
         if (block->terminator == DOLCFG_TERM_CALL && block->call_target) {
             if (!addr_set_push(&entries, block->call_target)) {
                 addr_set_free(&entries);
+                addr_set_free(&indirect_entries);
                 return false;
             }
         }
     }
+
+    /* Entries by elimination.
+     *
+     * A block that no direct edge in the whole program reaches is still
+     * executed -- control gets there indirectly, through a vtable slot, a
+     * function-pointer table or a jump table. On Mario Kart, seeding only from
+     * bl targets left 59% of the code owned by no function, and the roots of
+     * that were 22,010 blocks with no in-edge at all. Treating those as entry
+     * points is what makes the model describe the whole title rather than the
+     * directly-called part of it.
+     *
+     * This infers *entries*, never edges: nothing here claims to know which
+     * indirect site reaches which entry. Phase 4 does that. */
+    {
+        u32* in_degree = (u32*)calloc(
+            program->block_count ? program->block_count : 1u, sizeof(u32));
+        if (!in_degree) {
+            addr_set_free(&entries);
+            return false;
+        }
+        for (u32 i = 0; i < program->block_count; i++) {
+            const DolCfgBlock* block = &program->blocks[i];
+            for (u32 s = 0; s < block->successor_count; s++) {
+                if (block->successors[s] != DOLCFG_NO_BLOCK)
+                    in_degree[block->successors[s]]++;
+            }
+        }
+        for (u32 i = 0; i < program->block_count; i++) {
+            if (in_degree[i] != 0)
+                continue;
+            if (!addr_set_push(&entries, program->blocks[i].start) ||
+                !addr_set_push(&indirect_entries, program->blocks[i].start)) {
+                free(in_degree);
+                addr_set_free(&entries);
+                addr_set_free(&indirect_entries);
+                return false;
+            }
+        }
+        free(in_degree);
+        addr_set_sort_unique(&indirect_entries);
+    }
+
     addr_set_sort_unique(&entries);
 
     for (u32 i = 0; i < entries.count; i++) {
@@ -572,7 +618,9 @@ static bool build_functions(DolCfgProgram* program) {
         fn.entry_address = address;
         fn.entry_block = block_index;
         fn.first_block = block_index;
-        fn.flags = DOLCFG_FUNC_FROM_CALL;
+        fn.flags = addr_set_contains(&indirect_entries, address)
+                       ? DOLCFG_FUNC_FROM_INDIRECT
+                       : DOLCFG_FUNC_FROM_CALL;
         if (program->entry_point == address)
             fn.flags |= DOLCFG_FUNC_FROM_ENTRY;
 
@@ -589,10 +637,12 @@ static bool build_functions(DolCfgProgram* program) {
         program->blocks[block_index].flags |= DOLCFG_BLOCK_FUNCTION_ENTRY;
         if (!push_function(program, &fn)) {
             addr_set_free(&entries);
+            addr_set_free(&indirect_entries);
             return false;
         }
     }
     addr_set_free(&entries);
+    addr_set_free(&indirect_entries);
 
     /* Ownership by forward reachability from each entry, in address order, so
        the assignment is deterministic. A block already owned is left alone:
@@ -605,20 +655,22 @@ static bool build_functions(DolCfgProgram* program) {
 
     for (u32 f = 0; f < program->function_count; f++) {
         DolCfgFunction* fn = &program->functions[f];
+        if (program->blocks[fn->entry_block].function != DOLCFG_NO_BLOCK)
+            continue; /* Two entries on one block: the first one owns it. */
+
+        /* Ownership is claimed at push time, not pop time. Claiming on pop
+           lets a block with several predecessors sit on the stack more than
+           once, and the stack is only block_count deep -- on a real title that
+           overflows. Claiming on push makes each block enter the stack at most
+           once, which bounds it by construction. */
         u32 top = 0;
+        program->blocks[fn->entry_block].function = f;
         stack[top++] = fn->entry_block;
 
         while (top > 0) {
             u32 index = stack[--top];
             DolCfgBlock* block = &program->blocks[index];
-            if (block->function != DOLCFG_NO_BLOCK)
-                continue;
-            /* Another function's entry is not part of this one. */
-            if (index != fn->entry_block &&
-                (block->flags & DOLCFG_BLOCK_FUNCTION_ENTRY))
-                continue;
 
-            block->function = f;
             fn->block_count++;
             fn->instruction_count += block->instruction_count;
             if (block->start < program->blocks[fn->first_block].start)
@@ -630,13 +682,81 @@ static bool build_functions(DolCfgProgram* program) {
 
             for (u32 s = 0; s < block->successor_count; s++) {
                 u32 next = block->successors[s];
-                if (next != DOLCFG_NO_BLOCK &&
-                    program->blocks[next].function == DOLCFG_NO_BLOCK) {
-                    stack[top++] = next;
-                }
+                if (next == DOLCFG_NO_BLOCK)
+                    continue;
+                if (program->blocks[next].function != DOLCFG_NO_BLOCK)
+                    continue;
+                /* Another function's entry is not part of this one. */
+                if (program->blocks[next].flags & DOLCFG_BLOCK_FUNCTION_ENTRY)
+                    continue;
+                program->blocks[next].function = f;
+                stack[top++] = next;
             }
         }
     }
+    /* Anything still unowned is a cycle every one of whose blocks has an
+       in-edge from inside the cycle, so no zero-in-degree root pointed at it.
+       It is still executed -- reached indirectly -- and region formation cannot
+       place a block that belongs to no function, so the lowest-addressed
+       survivor becomes an entry and the pass repeats until none are left.
+       Each round claims at least one block, so this terminates. */
+    u32 cursor = 0;
+    for (;;) {
+        /* The cursor only moves forward: a block passed over is already owned
+           and cannot become unowned, so rescanning from zero each round would
+           make this quadratic for no benefit. */
+        while (cursor < program->block_count &&
+               program->blocks[cursor].function != DOLCFG_NO_BLOCK) {
+            cursor++;
+        }
+        if (cursor >= program->block_count)
+            break;
+        u32 seed = cursor;
+
+        DolCfgFunction fn;
+        memset(&fn, 0, sizeof(fn));
+        fn.entry_address = program->blocks[seed].start;
+        fn.entry_block = seed;
+        fn.first_block = seed;
+        fn.flags = DOLCFG_FUNC_FROM_INDIRECT;
+        program->blocks[seed].flags |= DOLCFG_BLOCK_FUNCTION_ENTRY;
+        if (!push_function(program, &fn)) {
+            free(stack);
+            return false;
+        }
+
+        u32 f = program->function_count - 1u;
+        u32 top = 0;
+        program->blocks[seed].function = f;
+        stack[top++] = seed;
+
+        while (top > 0) {
+            u32 index = stack[--top];
+            DolCfgBlock* block = &program->blocks[index];
+
+            program->functions[f].block_count++;
+            program->functions[f].instruction_count += block->instruction_count;
+            if (block->start < program->blocks[program->functions[f].first_block].start)
+                program->functions[f].first_block = index;
+            if (block->terminator == DOLCFG_TERM_INDIRECT)
+                program->functions[f].flags |= DOLCFG_FUNC_HAS_INDIRECT;
+            if (block->flags & DOLCFG_BLOCK_SMC_SUSPECT)
+                program->functions[f].flags |= DOLCFG_FUNC_HAS_SMC;
+
+            for (u32 s = 0; s < block->successor_count; s++) {
+                u32 next = block->successors[s];
+                if (next == DOLCFG_NO_BLOCK)
+                    continue;
+                if (program->blocks[next].function != DOLCFG_NO_BLOCK)
+                    continue;
+                if (program->blocks[next].flags & DOLCFG_BLOCK_FUNCTION_ENTRY)
+                    continue;
+                program->blocks[next].function = f;
+                stack[top++] = next;
+            }
+        }
+    }
+
     free(stack);
 
     /* A plain b whose target is another function's entry is a tail call. This
