@@ -73,6 +73,37 @@ build/dolrecomp --gamecube --backend llvm -j12 \
 
 ---
 
+### Building a module through moderngekko-port
+
+`moderngekko-port` drives a **sibling** `dolrecomp` and forwards only
+`--backend=c|llvm`, which it validates. To build an AOT module, replace that
+sibling with this tree's `dolrecomp` and use the override variable:
+
+```sh
+cp build/dolrecomp.exe <ModernGekko>/build/dolrecomp.exe    # keep a .orig copy
+export RC="C:/Program Files/LLVM/bin/llvm-rc.exe"
+export DOLRECOMP_FORCE_BACKEND=llvm-aot
+export DOLRECOMP_REGION_MODE=cfg
+moderngekko-port build <extracted-root> --backend llvm --toolchain clang   --output <module-dir>
+```
+
+Two things bite here, both recorded because neither error names its cause:
+
+* **`RC` must be set.** The module template configures clang in GNU-driver mode
+  on Windows and CMake 4.3 cannot find a resource compiler by itself. The
+  configure fails at `project()` talking about `CMAKE_RC_COMPILER`.
+* **The manifest line format is load-bearing.** The template parses
+  `// object: chunks/<name>` and takes the remainder of the line as the path.
+  An earlier revision appended `(16 runs)` for readability and the configure
+  then failed looking for a file literally named
+  `region_000000_80003100.o (16 runs)`. Run counts live in the region report.
+
+Both arms of a comparison are built through this same path -- same port tool,
+same toolchain, differing only in `DOLRECOMP_FORCE_BACKEND` -- rather than
+against a module built earlier under unknown settings.
+
+---
+
 ## 3. Correctness baseline
 
 `ctest` at `fa0cf61`, LLVM enabled: **19/19 passed** (3.43 s).

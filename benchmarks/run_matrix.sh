@@ -26,10 +26,18 @@ RUNNER="${RUNNER:-$LM_ROOT/lib/ModernGekko/build/moderngekko-run.exe}"
 mkdir -p "$OUT"
 
 # label | game root | module | savestate
+# Modules are overridable so the same scenes can be run against a different
+# backend's output. ARM names the arm in the labels, so two runs into the same
+# output directory summarise side by side.
+LM_MODULE="${LM_MODULE:-$LM_ROOT/llvmcur/gGLME01_recomp.dll}"
+MK_MODULE="${MK_MODULE:-$MK_ROOT/build/release/MKDD-best/gGM4E01_recomp.dll}"
+ARM="${ARM:-}"
+SUFFIX="${ARM:+-$ARM}"
+
 SCENES=$(cat <<ENTRIES
-lm-foyer|$LM_ROOT/extracted/Luigis-Mansion-USA|$LM_ROOT/llvmcur/gGLME01_recomp.dll|$LM_ROOT/states/foyer.sav
-mkdd-1p-race|$MK_ROOT/extracted/GM4E01|$MK_ROOT/build/release/MKDD-best/gGM4E01_recomp.dll|$MK_ROOT/states/race.sav
-mkdd-4p-race|$MK_ROOT/extracted/GM4E01|$MK_ROOT/build/release/MKDD-best/gGM4E01_recomp.dll|$MK_ROOT/states/race-4p.sav
+lm-foyer$SUFFIX|$LM_ROOT/extracted/Luigis-Mansion-USA|$LM_MODULE|$LM_ROOT/states/foyer.sav
+mkdd-1p-race$SUFFIX|$MK_ROOT/extracted/GM4E01|$MK_MODULE|$MK_ROOT/states/race.sav
+mkdd-4p-race$SUFFIX|$MK_ROOT/extracted/GM4E01|$MK_MODULE|$MK_ROOT/states/race-4p.sav
 ENTRIES
 )
 

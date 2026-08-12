@@ -893,8 +893,12 @@ static int emit_llvm_regions(const LoadedCodeSection* sections, u32 section_coun
                                    job->runs[i].address + job->runs[i].count * 4u))
                 goto done;
         }
-        fprintf(manifest, "// object: chunks/%s (%u run%s)\n", job->name,
-                job->run_count, job->run_count == 1u ? "" : "s");
+        /* Exactly the fixed path's format. The module template parses this
+           manifest and takes everything after "// object: " as the object
+           path, so an appended "(N runs)" became part of the filename and the
+           configure failed looking for "region_000000_80003100.o (16 runs)".
+           Run counts belong in the region report, which already carries them. */
+        fprintf(manifest, "// object: chunks/%s\n", job->name);
         file_count++;
     }
 
