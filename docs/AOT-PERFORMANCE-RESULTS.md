@@ -531,6 +531,47 @@ guest work does not match exactly.
 
 ---
 
+## 5g. Scene selection: Luigi's Mansion is not a usable benchmark title
+
+A freshly captured Luigi's Mansion savestate behaved no better than the foyer
+one:
+
+| Run | cycles/frame | fps | bursts/Mcycle |
+|---|---:|---:|---:|
+| bench.sav r1 | 14.58M | 62.97 | 126.5 |
+| bench.sav r2 | 20.20M | 26.50 | 156.4 |
+| bench.sav r3 | 15.35M | 42.30 | 136.2 |
+
+18.2% spread in guest work from an identical starting state.
+
+The obvious suspicion was that `--load-state` silently failed and the run fell
+back to booting: 20.197M is the exact figure all three earlier `foyer.sav` runs
+produced, which looks like a shared fallback. **It is not.** A control run with
+no savestate at all gives 27.06M cycles/frame, distinct from both. The state
+loads; the game diverges after it.
+
+So Luigi's Mansion is nondeterministic run to run at this granularity -- ghost
+behaviour and timing varying from identical initial state. That is a property of
+the title, not of the savestate or the harness, and capturing another state will
+not change it.
+
+Mario Kart through the identical harness and procedure:
+
+| Run | cycles/frame | bursts/Mcycle |
+|---|---:|---:|
+| mkdd 1p fixed r1 | 10.17M | 172.3 |
+| mkdd 1p fixed r2 | 10.26M | 170.3 |
+
+**0.9% and 1.1% apart.** Same rig, same method: 0.9% on Mario Kart against 18.2%
+on Luigi's Mansion.
+
+**Mario Kart is therefore the primary benchmark**, with its 1P and 4P race
+states, and the 13 `course-*.sav` states available for breadth. Luigi's Mansion
+is secondary, run with a much longer window so its transients average out, and
+always reported with its spread rather than as a point estimate.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
