@@ -98,12 +98,10 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   if (!local || continuationBlock >= blocks_.size()) {
     builder_.CreateRetVoid();
   } else {
-    for (u32 state = 0; state < DOLIR_STATE_COUNT; state++) {
-      if (!used_[state])
-        continue;
-      auto stateSlot = static_cast<DolIRStateSlot>(state);
-      builder_.CreateStore(loadContext(stateSlot), state_[state]);
-    }
+    // Only what the continuation actually needs. This used to restore every
+    // slot the function touches anywhere, which on a merged region meant tens
+    // of loads per call for a continuation that reads a handful.
+    reloadLiveState(continuationBlock);
     builder_.CreateStore(builder_.getInt64(0), cycles_);
     builder_.CreateBr(blocks_[continuationBlock]);
   }

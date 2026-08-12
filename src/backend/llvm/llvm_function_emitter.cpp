@@ -51,6 +51,9 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   for (u32 i = 0; i < source_.block_count; i++)
     blocks_.push_back(BasicBlock::Create(context_, blockName(i), function_));
   scanState();
+  // After scanState: liveness treats an escaping block as keeping everything in
+  // `used_` live, so that set has to exist first.
+  computeLiveness();
   scanContinuations();
   scanLoopHeaders();
   emitEntry();
@@ -195,6 +198,115 @@ void FunctionEmitter::storeContext(DolIRStateSlot slot, Value *value) {
 
 Value *FunctionEmitter::loadOffset(Type *valueType, size_t offset) {
   return builder_.CreateLoad(valueType, bytePtr(offset));
+}
+
+bool FunctionEmitter::liveAt(u32 block, DolIRStateSlot slot) const {
+  if (live_in_.empty())
+    return used_[slot];  // No liveness computed: fall back to the safe superset.
+  std::size_t index = (std::size_t)block * DOLIR_STATE_COUNT + (std::size_t)slot;
+  return index < live_in_.size() && live_in_[index] != 0;
+}
+
+// Which guest state slots are live on entry to each block.
+//
+// This exists to shrink the reload after a cross-region call. That reload
+// previously restored every slot the function touches anywhere, because
+// `used_` is a whole-function set -- so a call in a region that touches sixty
+// slots paid sixty loads even when the continuation reads three.
+//
+// Only the reload side can use it. Materialisation before the call must still
+// store every dirty slot: the callee reads guest state through CPUState and
+// nothing here knows which slots it looks at. Narrowing that needs
+// interprocedural information the emitter does not have.
+//
+// Conservative in three places, each of which would be a correctness bug the
+// other way:
+//   - a slot live out of any successor is live here;
+//   - an unresolved successor (an exit, an indirect transfer, a call that may
+//     not come back) makes everything the function uses live, because the
+//     value may be observed through CPUState after we leave;
+//   - a block whose terminator can raise makes everything live, since the
+//     exception path materialises.
+void FunctionEmitter::computeLiveness() {
+  const u32 blocks = source_.block_count;
+  if (blocks == 0)
+    return;
+
+  live_in_.assign((std::size_t)blocks * DOLIR_STATE_COUNT, 0);
+
+  std::vector<unsigned char> gen((std::size_t)blocks * DOLIR_STATE_COUNT, 0);
+  std::vector<unsigned char> kill((std::size_t)blocks * DOLIR_STATE_COUNT, 0);
+  std::vector<unsigned char> escapes(blocks, 0);
+
+  for (u32 b = 0; b < blocks; b++) {
+    const DolIRBlock &block = source_.blocks[b];
+    std::size_t base = (std::size_t)b * DOLIR_STATE_COUNT;
+    for (u32 i = 0; i < block.instruction_count; i++) {
+      const DolIRInstruction &inst = block.instructions[i];
+      if (inst.op == DOLIR_OP_STATE_READ) {
+        // Read before any write in this block: live coming in.
+        if (!kill[base + inst.aux])
+          gen[base + inst.aux] = 1;
+      } else if (inst.op == DOLIR_OP_STATE_WRITE) {
+        kill[base + inst.aux] = 1;
+      } else if (inst.effects & (DOLIR_EFFECT_MAY_RAISE | DOLIR_EFFECT_BARRIER)) {
+        // A helper that can raise or acts as a barrier observes CPUState.
+        escapes[b] = 1;
+      }
+    }
+
+    switch (block.terminator.kind) {
+    case DOLIR_TERM_BRANCH:
+    case DOLIR_TERM_COND_BRANCH:
+      break;  // Successors are inside the region.
+    default:
+      escapes[b] = 1;  // Return, indirect, side exit, fallback, sc, rfi.
+      break;
+    }
+  }
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (u32 i = blocks; i-- > 0;) {
+      const DolIRBlock &block = source_.blocks[i];
+      std::size_t base = (std::size_t)i * DOLIR_STATE_COUNT;
+
+      unsigned char out[DOLIR_STATE_COUNT] = {0};
+      if (escapes[i]) {
+        for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++)
+          out[slot] = used_[slot] ? 1 : 0;
+      }
+      for (u32 s = 0; s < 2; s++) {
+        u32 target = block.terminator.targets[s];
+        if (target == DOLIR_NO_BLOCK || target >= blocks)
+          continue;
+        std::size_t tbase = (std::size_t)target * DOLIR_STATE_COUNT;
+        for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++)
+          out[slot] |= live_in_[tbase + slot];
+      }
+
+      for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
+        unsigned char live = gen[base + slot] ||
+                             (out[slot] && !kill[base + slot]);
+        if (live && !live_in_[base + slot]) {
+          live_in_[base + slot] = 1;
+          changed = true;
+        }
+      }
+    }
+  }
+}
+
+void FunctionEmitter::reloadLiveState(u32 block) {
+  for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
+    if (!used_[slot])
+      continue;
+    if (!liveAt(block, static_cast<DolIRStateSlot>(slot)))
+      continue;
+    auto stateSlot = static_cast<DolIRStateSlot>(slot);
+    builder_.CreateStore(loadContext(stateSlot), state_[slot]);
+  }
 }
 
 void FunctionEmitter::scanState() {

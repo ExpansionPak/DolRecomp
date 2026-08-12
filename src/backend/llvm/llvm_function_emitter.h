@@ -43,6 +43,13 @@ private:
   llvm::Value *loadOffset(llvm::Type *value_type, std::size_t offset);
 
   void scanState();
+  // Backward dataflow over the region's blocks: which guest state slots are
+  // live on entry to each one. Used to reload only what the continuation
+  // actually needs after a call, instead of everything the function touches
+  // anywhere.
+  void computeLiveness();
+  bool liveAt(u32 block, DolIRStateSlot slot) const;
+  void reloadLiveState(u32 block);
   void scanExactFloat(u64 descriptor);
   void scanExactPaired(u64 descriptor);
   void scanContinuations();
@@ -119,6 +126,9 @@ private:
   std::array<llvm::AllocaInst *, DOLIR_STATE_COUNT> state_{};
   std::array<bool, DOLIR_STATE_COUNT> used_{};
   std::array<bool, DOLIR_STATE_COUNT> dirty_{};
+  // live_in_[block * DOLIR_STATE_COUNT + slot]. Flat rather than nested so the
+  // fixpoint loop touches one contiguous buffer.
+  std::vector<unsigned char> live_in_;
   std::vector<llvm::BasicBlock *> blocks_;
   std::vector<bool> loop_headers_;
   std::vector<llvm::Value *> values_;
