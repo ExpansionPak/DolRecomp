@@ -64,6 +64,7 @@ while IFS='|' read -r label game module state; do
       --warmup 10 \
       --frames "$FRAMES" \
       --work-dir "$OUT/work-$label" \
+      --user-dir "${USER_DIR_ROOT:-$OUT/../bench-user}/$label" \
       --out "$OUT/$label-r$i.json" || echo "  run $label-r$i FAILED"
   done
 done <<< "$SCENES"
