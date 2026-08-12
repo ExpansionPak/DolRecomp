@@ -572,6 +572,55 @@ always reported with its spread rather than as a point estimate.
 
 ---
 
+## 5h. Same-scene head-to-head, Mario Kart
+
+Both arms built through the same pipeline, differing only in backend. 1P race
+state, 1,200 frames, 3 repeats.
+
+### The linear dispatch chain, and its removal
+
+The first attempt measured the region arm at **5.98 fps against the fixed arm's
+47.81** -- eight times slower -- at an *identical* dispatcher rate
+(bursts/Mcycle +2.0%). Same number of dispatches, vastly more time in each.
+
+The generated header explained it. The fixed build emits **zero** address
+comparisons: uniform 128-instruction chunks collapse into four equal-stride
+tables, so a lookup is two range tests and an index. The region build emitted
+**8,284** address comparisons, because variable-sized regions do not collapse
+and the linear chain walks them.
+
+A page-indexed lookup was already implemented and already handled this, but was
+gated behind `DOLRECOMP_DISPATCH_LOOKUP=indexed` and defaulted to linear. The
+default is now chosen from the plan's shape. With it, the region arm emits zero
+comparisons and a 5,977-run / 726-page index, and measures **30.15 fps**.
+
+This is the brief's "do not fall back to long linear comparison chains for
+irregular region layouts", and it was silently costing 8x.
+
+### Result at cap 256
+
+| Arm | fps | fps sd% | bursts/frame | **bursts/Mcycle** | cycles/frame |
+|---|---:|---:|---:|---:|---:|
+| fixed | 38.70 | 27.8 | 1,817.2 | 175.8 | 10.34M |
+| llvm-aot cfg @256 | 30.15 | 23.2 | 1,825.9 | 178.0 | 10.26M |
+
+Guest work agrees to 0.8%, so the scenes are comparable.
+
+**bursts/Mcycle: +1.2% -- no improvement.** fps is inside the noise floor and
+supports no claim in either direction.
+
+This is what the planner predicted and the cap was chosen against it. At cap 256
+Mario Kart plans 40,316 crossings against the fixed arm's 40,754: statically
+identical. The -22.1% dispatcher rate measured earlier came from cap **1024**.
+Cap 256 was chosen to collapse the compile-time tail, which it did, and in doing
+so gave up the entire reason for the region backend.
+
+The lesson is narrow and worth stating: region size is not a free parameter that
+trades build time against nothing. Crossings and compile time pull in opposite
+directions, and a cap picked for one is a cap picked against the other.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
