@@ -133,6 +133,7 @@ int parse_u32_arg(const char* text, const char* name, u32* value_out) {
 int parse_cli(int argc, char** argv, CliOptions* opts) {
     const char* positional[3];
     int positional_count = 0;
+    int backend_from_cli = 0;
 
     memset(opts, 0, sizeof(*opts));
     opts->cpu = DOLRECOMP_CPU_GEKKO;
@@ -175,6 +176,7 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
                 fprintf(stderr, "error: unknown backend '%s'\n", arg);
                 return 0;
             }
+            backend_from_cli = 1;
             continue;
         }
 
@@ -191,6 +193,7 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
                 fprintf(stderr, "error: unknown backend '%s'\n", name);
                 return 0;
             }
+            backend_from_cli = 1;
             continue;
         }
 
@@ -363,6 +366,61 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             return 0;
         }
         positional[positional_count++] = arg;
+    }
+
+    /* Environment fallbacks.
+     *
+     * Applied only where the command line said nothing, so an explicit flag
+     * always wins -- that is the documented precedence.
+     *
+     * These exist because moderngekko-port drives a sibling dolrecomp and only
+     * forwards --backend=c|llvm, which it validates. Without an out-of-band
+     * channel there is no way to build an AOT module through the existing port
+     * tool, and patching ModernGekko to pass a flag through would couple the two
+     * repositories for what is a benchmarking concern. */
+    if (!backend_from_cli) {
+        const char* env_backend = getenv("DOLRECOMP_BACKEND");
+        if (env_backend && *env_backend) {
+            if (ascii_case_equal(env_backend, "c")) {
+                opts->backend = DOLRECOMP_BACKEND_C;
+            } else if (ascii_case_equal(env_backend, "llvm")) {
+                opts->backend = DOLRECOMP_BACKEND_LLVM;
+            } else if (ascii_case_equal(env_backend, "llvm-aot") ||
+                       ascii_case_equal(env_backend, "llvm-regions")) {
+                opts->backend = DOLRECOMP_BACKEND_LLVM_AOT;
+            } else {
+                fprintf(stderr, "error: unknown DOLRECOMP_BACKEND '%s'\n", env_backend);
+                return 0;
+            }
+        }
+    }
+    if (!opts->region_mode_arg) {
+        const char* value = getenv("DOLRECOMP_REGION_MODE");
+        if (value && *value)
+            opts->region_mode_arg = value;
+    }
+    if (!opts->region_max_instructions) {
+        const char* value = getenv("DOLRECOMP_REGION_MAX_INSTRUCTIONS");
+        if (value && *value &&
+            !parse_u32_arg(value, "DOLRECOMP_REGION_MAX_INSTRUCTIONS",
+                           &opts->region_max_instructions))
+            return 0;
+    }
+    if (!opts->region_max_ir) {
+        const char* value = getenv("DOLRECOMP_REGION_MAX_IR");
+        if (value && *value &&
+            !parse_u32_arg(value, "DOLRECOMP_REGION_MAX_IR", &opts->region_max_ir))
+            return 0;
+    }
+    if (!opts->region_report_path) {
+        const char* value = getenv("DOLRECOMP_REGION_REPORT");
+        if (value && *value)
+            opts->region_report_path = value;
+    }
+    if (!opts->perf_report_path) {
+        const char* value = getenv("DOLRECOMP_PERF_REPORT");
+        if (value && *value)
+            opts->perf_report_path = value;
     }
 
     if (positional_count == 0) {

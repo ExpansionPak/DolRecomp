@@ -193,6 +193,31 @@ Baseline is 1,267 bursts/frame on the fixed-chunk backend.
 Scenes are pinned with `--load-state` (the LM project ships `states/foyer.sav`)
 rather than measured over a boot sequence.
 
+### D6 — Environment fallbacks, command line wins
+
+`moderngekko-port` drives a *sibling* `dolrecomp` executable and forwards only
+`--backend=c|llvm`, which it validates against that exact list. There is
+therefore no way to build an AOT module through the existing port tool from the
+command line alone, and teaching ModernGekko to pass a new flag through would
+couple the two repositories over what is a benchmarking concern.
+
+So the region settings also read from the environment:
+
+| Variable | Equivalent flag |
+|---|---|
+| `DOLRECOMP_BACKEND` | `--backend` |
+| `DOLRECOMP_REGION_MODE` | `--region-mode` |
+| `DOLRECOMP_REGION_MAX_INSTRUCTIONS` | `--region-max-instructions` |
+| `DOLRECOMP_REGION_MAX_IR` | `--region-max-ir` |
+| `DOLRECOMP_REGION_REPORT` | `--emit-region-report` |
+| `DOLRECOMP_PERF_REPORT` | `--perf-report` |
+
+**Precedence: an explicit flag always wins.** The environment is consulted only
+where the command line said nothing, so a script that sets `DOLRECOMP_BACKEND`
+cannot silently override a build that asked for something specific. This matches
+how the existing `DOLRECOMP_LLVM_PGO` and `DOLRECOMP_LLVM_CACHE` variables
+already work.
+
 ### D5 — One X-macro is the source of truth for counters
 `DOLRECOMP_PERF_COUNTERS` in `src/common/perf.h` generates the struct, the JSON
 object, the console table, the reset path and the generated header together, so

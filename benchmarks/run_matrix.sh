@@ -14,7 +14,7 @@ set -u
 
 OUT="${1:?usage: run_matrix.sh <out-dir> [repeats] [seconds]}"
 REPEATS="${2:-3}"
-SECONDS_PER_RUN="${3:-45}"
+FRAMES="${3:-1200}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH="$HERE/run_title_benchmark.py"
@@ -33,7 +33,7 @@ mkdd-4p-race|$MK_ROOT/extracted/GM4E01|$MK_ROOT/build/release/MKDD-best/gGM4E01_
 ENTRIES
 )
 
-echo "repeats=$REPEATS window=${SECONDS_PER_RUN}s -> $OUT"
+echo "repeats=$REPEATS frames=$FRAMES -> $OUT"
 echo
 
 while IFS='|' read -r label game module state; do
@@ -53,8 +53,8 @@ while IFS='|' read -r label game module state; do
       --module "$module" \
       --load-state "$state" \
       --label "$label-r$i" \
-      --warmup 12 \
-      --seconds "$SECONDS_PER_RUN" \
+      --warmup 10 \
+      --frames "$FRAMES" \
       --work-dir "$OUT/work-$label" \
       --out "$OUT/$label-r$i.json" || echo "  run $label-r$i FAILED"
   done
@@ -87,7 +87,7 @@ if not groups:
     sys.exit(0)
 
 print(f"{'scene':<16}{'runs':>5}{'fps':>10}{'sd%':>7}"
-      f"{'bursts/frame':>14}{'fallback':>10}")
+      f"{'bursts/frame':>14}{'cyc/frame':>12}{'fallback':>9}")
 for scene, runs in sorted(groups.items()):
     fps = [r["fps"] for r in runs if r.get("fps")]
     bpf = [r["bursts_per_frame"] for r in runs if r.get("bursts_per_frame")]
@@ -96,8 +96,10 @@ for scene, runs in sorted(groups.items()):
         continue
     mean = statistics.mean(fps)
     sd = (statistics.stdev(fps) / mean * 100.0) if len(fps) > 1 else 0.0
+    cpf = [r["cycles_per_frame"] for r in runs if r.get("cycles_per_frame")]
     print(f"{scene:<16}{len(runs):>5}{mean:>10.2f}{sd:>7.1f}"
-          f"{(statistics.mean(bpf) if bpf else 0):>14.1f}{int(fb):>10}")
+          f"{(statistics.mean(bpf) if bpf else 0):>14.1f}"
+          f"{(statistics.mean(cpf) / 1e6 if cpf else 0):>11.2f}M{int(fb):>9}")
 
 for scene, reasons in sorted(invalid.items()):
     print(f"  ! {scene}: {len(reasons)} invalid run(s) -- {reasons[0]}")

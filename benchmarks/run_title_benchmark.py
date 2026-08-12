@@ -91,7 +91,13 @@ def main():
     parser.add_argument("--game", required=True, help="extracted game root")
     parser.add_argument("--module", required=True, help="recompiled module (.dll/.so)")
     parser.add_argument("--label", required=True, help="name for this arm, e.g. llvm-fixed")
-    parser.add_argument("--seconds", type=float, default=60.0, help="measurement window")
+    parser.add_argument("--frames", type=int, default=1200,
+                        help="measure the wall time for exactly this many guest "
+                             "frames (0 selects the time-boxed mode instead)")
+    parser.add_argument("--frame-timeout", type=float, default=600.0,
+                        help="give up if the frame target is not reached")
+    parser.add_argument("--seconds", type=float, default=60.0,
+                        help="measurement window when --frames 0")
     parser.add_argument("--warmup", type=float, default=15.0,
                         help="seconds to discard before measuring, so boot and "
                              "shader compilation do not land in the sample")
@@ -188,11 +194,32 @@ def main():
         start_frames = to_number(start_status.get("frame_count"))
         start_time = time.monotonic()
 
+        # Fixed-frame is the default because time-boxing measures different
+        # guest work in every run: a faster arm covers more of the game in the
+        # same wall clock, so the thing being compared changes with the result.
+        # Mario Kart showed this as a stable ~10.2M cycles/frame with fps
+        # swinging 52-84; Luigi's Mansion showed 21M cycles/frame in two runs
+        # and 9.3M in a third, which is a different scene, not a faster one.
+        #
+        # Running a fixed frame count means every arm executes the same guest
+        # instructions and only host time varies.
         samples = []
-        while time.monotonic() - start_time < args.seconds:
+        target_frames = args.frames
+        deadline = start_time + (args.seconds if target_frames <= 0
+                                 else args.frame_timeout)
+        while True:
             if process.poll() is not None:
                 break
-            time.sleep(1.0)
+            now = time.monotonic()
+            if target_frames > 0:
+                current = to_number((read_status(status_path) or {}).get("frame_count"))
+                if current - start_frames >= target_frames:
+                    break
+            elif now - start_time >= args.seconds:
+                break
+            if now >= deadline:
+                break
+            time.sleep(0.5 if target_frames > 0 else 1.0)
             sample = read_status(status_path)
             if sample:
                 samples.append({
@@ -259,8 +286,10 @@ def main():
     }
     # Dispatcher re-entries per frame is the comparison that survives a host
     # that ran hot or cold on the day.
-    if frames > 0 and "bursts" in shutdown:
-        result["bursts_per_frame"] = round(shutdown["bursts"] / frames, 2)
+    if frames > 0:
+        for key in ("bursts", "cycles", "native", "native_exc", "hook_fb"):
+            if key in shutdown:
+                result[f"{key}_per_frame"] = round(shutdown[key] / frames, 2)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
