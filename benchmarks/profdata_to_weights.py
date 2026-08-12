@@ -24,7 +24,20 @@ from pathlib import Path
 
 # `func_800EB5C0` and the variants the emitter appends, e.g. `func_..._budget`.
 FUNC_NAME = re.compile(r"^func_([0-9A-Fa-f]{8})(?:_.*)?$")
-COUNT_LINE = re.compile(r"^\s*(?:Maximum function count|Function count|Total count):\s*(\d+)")
+# `llvm-profdata show --all-functions --counts` emits, per record:
+#
+#     func_801933C0_budget:
+#       Hash: 0x017450324961b307
+#       Counters: 384
+#       Block counts: [87756, 87756, 0, ...]
+#
+# There is no per-function count line -- an earlier version of this script
+# looked for one and matched only the trailing summary, extracting a single
+# "function" whose weight was the profile's grand total. The weight is the
+# largest block count: the hottest point in the function is what says whether
+# the function is hot, and the entry counter alone misses a function entered
+# once that then loops a billion times.
+BLOCK_COUNTS = re.compile(r"^\s*Block counts:\s*\[([^\]]*)\]")
 
 
 def find_profdata_tool(explicit):
@@ -81,11 +94,15 @@ def main():
             continue
         if current is None:
             continue
-        counts = COUNT_LINE.match(line)
+        counts = BLOCK_COUNTS.match(line)
         if counts:
-            # Several records can map to one guest address (the emitter splits
-            # some functions), so take the largest rather than the first.
-            value = int(counts.group(1))
+            body = counts.group(1).strip()
+            if not body:
+                continue
+            value = max(int(x) for x in body.split(",") if x.strip())
+            # Several records map to one guest address -- the emitter splits
+            # some functions, e.g. func_X and func_X_budget -- so keep the
+            # largest rather than the first or the last.
             weights[current] = max(weights.get(current, 0), value)
 
     if not weights:

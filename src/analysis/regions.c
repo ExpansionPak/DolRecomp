@@ -503,7 +503,47 @@ static bool plan_accretive(DolRegionPlan* plan, const DolCfgProgram* program,
     qsort(order, program->function_count, sizeof(*order),
           compare_function_by_address);
 
-    for (u32 seed = 0; seed < program->function_count; seed++) {
+    /* Seed order.
+     *
+     * Address order is right for cfg mode: it is deterministic and no function
+     * deserves priority. With a profile it is actively wrong. Accretion is
+     * greedy, so whichever region forms first takes the shared neighbours, and
+     * in address order that is decided by link layout rather than by what
+     * executes.
+     *
+     * The measured sweep is the argument: merging on all edges equally cut
+     * static crossings 21% and moved the runtime dispatcher rate 0.8%, because
+     * uniform merging removes overwhelmingly cold boundaries. Hot code has to
+     * choose first for merging to reach the boundaries that actually execute.
+     *
+     * Ties break on function index, so the plan stays reproducible. */
+    u32* seed_order = (u32*)malloc(
+        (program->function_count ? program->function_count : 1u) * sizeof(u32));
+    if (!seed_order) {
+        free(candidate_weight); free(is_candidate); free(touched); free(order);
+        return false;
+    }
+    for (u32 i = 0; i < program->function_count; i++)
+        seed_order[i] = i;
+    if (use_weights) {
+        /* Insertion sort by descending weight: the array is already in address
+           order and a profile makes only a small fraction non-zero, so this
+           stays close to linear in practice. */
+        for (u32 i = 1; i < program->function_count; i++) {
+            u32 key = seed_order[i];
+            u64 key_weight = program->functions[key].weight;
+            u32 j = i;
+            while (j > 0 &&
+                   program->functions[seed_order[j - 1u]].weight < key_weight) {
+                seed_order[j] = seed_order[j - 1u];
+                j--;
+            }
+            seed_order[j] = key;
+        }
+    }
+
+    for (u32 s = 0; s < program->function_count; s++) {
+        u32 seed = seed_order[s];
         if (plan->function_region[seed] != DOLCFG_NO_BLOCK)
             continue;
         if (program->functions[seed].block_count == 0)
@@ -512,7 +552,7 @@ static bool plan_accretive(DolRegionPlan* plan, const DolCfgProgram* program,
         if (program->functions[seed].instruction_count > limits->max_instructions) {
             if (!split_large_function(plan, program, fb, seed, limits)) {
                 free(candidate_weight); free(is_candidate); free(touched);
-                free(order);
+                free(order); free(seed_order);
                 return false;
             }
             continue;
@@ -627,7 +667,7 @@ static bool plan_accretive(DolRegionPlan* plan, const DolCfgProgram* program,
 
             if (!region_push_function(region, program, plan, fb, best)) {
                 free(candidate_weight); free(is_candidate); free(touched);
-                free(order);
+                free(order); free(seed_order);
                 return false;
             }
             is_candidate[best] = 0;
@@ -655,6 +695,7 @@ static bool plan_accretive(DolRegionPlan* plan, const DolCfgProgram* program,
     free(is_candidate);
     free(touched);
     free(order);
+    free(seed_order);
     return true;
 }
 
