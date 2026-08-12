@@ -627,11 +627,21 @@ void FunctionEmitter::materialize(u32 pc) {
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (!dirty_[slot])
       continue;
-    // Skip slots no path to here has written: CPUState already holds the value
-    // that would be stored. Correctness does not depend on this analysis being
-    // tight, only on it never claiming clean where a write may have happened.
-    if (!mayBeDirty(current_block_, static_cast<DolIRStateSlot>(slot)))
-      continue;
+    // REVERTED. Narrowing this by reaching-writes diverged from the C backend
+    // on 3 of 64 differential pairs, all in floating-point registers, and the
+    // divergent values were the original randomised inputs -- the signature of
+    // a store that should have happened and did not.
+    //
+    // computeReachingWrites() counts DOLIR_OP_STATE_WRITE only. Helper calls
+    // write guest state without one: the exact-float and paired-single helpers
+    // take a slot index and write it inside the runtime, and scanState() knows
+    // this (it marks used_ for them) while the reaching-writes pass did not. A
+    // slot written only by such a helper looked never-written, the store was
+    // skipped, and CPUState kept the stale entry value.
+    //
+    // Same class of error as the liveness reload: an incomplete model of how
+    // state moves. Fixing it means teaching computeReachingWrites() the helper
+    // effects, which is the same work scanState() already does.
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
     storeContext(
         stateSlot,

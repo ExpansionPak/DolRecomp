@@ -21,6 +21,7 @@
 // C++ caller of the C emitter.
 extern "C" {
 #include "backend/emitter.h"
+#include "backend/dispatch.h"
 }
 #include "backend/llvm/llvm_backend.h"
 #include "ir/dolir_builder.h"
@@ -158,46 +159,54 @@ int main(int argc, char** argv) {
 
     g_state = seed;
 
-    // Sequences do not call each other, and making them do so needs more than
-    // an offset.
+    // Upper half are leaves; lower half call into them. One level only: a
+    // guest bl overwrites LR, so a callee that called something would return to
+    // the wrong place -- a property of the generated program, not a backend
+    // difference.
     //
-    // This is the coverage gap that let a wrong reload narrowing pass 23/23 and
-    // then hang Mario Kart: reloadLiveState only runs on a cross-function call
-    // return, and nothing here reaches it.
-    //
-    // Adding `bl` between generated functions does not work as-is. The C
-    // backend emits a switch(pc)->goto preamble per function and hands anything
-    // outside its own address range to the runtime dispatcher; with no
-    // dispatcher linked, a cross-function call has nowhere to go and the test
-    // hangs. The LLVM backend resolves the same call internally through its
-    // function ranges, so the two arms are not even attempting the same thing.
-    //
-    // Emitting dispatch helpers for the C arm was tried and is NOT sufficient
-    // on its own. With emit_chunk_prototype() for every function followed by
-    // emit_dispatch_helpers() before the bodies -- so dolrecomp_call() is
-    // declared before the code that calls it -- the C arm compiles and links,
-    // and the test still hangs. Something in the call/return round trip does not
-    // terminate, and it was not diagnosed.
-    //
-    // So the remaining work is a debugging task, not a plumbing one. Whoever
-    // picks it up should start by generating two functions with one call
-    // between them and stepping the C arm, rather than at 64x24 where the
-    // failing pair is not obvious.
-    //
-    // Until then the call/return path -- externalDestination, reloadLiveState,
-    // the returned-PC validation -- has NO differential coverage, and the
-    // reverted liveness narrowing is the demonstration of what that costs:
-    // 23/23 green, then a hang at boot on a real title.
+    // The call at i == 1 is forced so a minimal repro (2 functions) always
+    // contains one; the rest are random.
+    const u32 leaves = functions / 2u;
+    const u32 callers = functions - leaves;
     std::vector<std::vector<u32>> bodies;
     for (u32 f = 0; f < functions; f++) {
         std::vector<u32> words;
-        // Every fourth sequence is float-heavy; the rest are mixed.
         const bool floaty = (f % 4u) == 3u;
+        const bool may_call = f < callers && leaves > 0u;
         for (u32 i = 0; i < length; i++) {
+            const bool forced = may_call && i == 1u && length > 5u;
+            const bool random_call = may_call && i > 1u && i + 4u < length &&
+                                     pick(length / 2u) == 0;
+            if (forced || random_call) {
+                // A call has to save and restore LR around itself, exactly as
+                // compiler-generated code does. Without it the caller's own blr
+                // returns to the continuation the bl just wrote into LR, and the
+                // sequence loops forever -- a bug in the generated program, not
+                // a backend difference, and it is what made an earlier attempt
+                // at this hang.
+                //
+                // r30 carries it and a fixed scratch slot holds it across the
+                // call. Both are safe: gpr() only ever picks r1..r29, so a
+                // callee cannot clobber r30 or the r31 addressing base.
+                const u32 kLrSlot = 0x400u;   // clear of the random slots (0..252)
+                const u32 callee = callers + pick(leaves);
+                // The bl sits 2 instructions after `here` because of the save.
+                const s32 here = (s32)(f * kStride + (i + 2u) * 4u);
+                const s32 there = (s32)(callee * kStride);
+                const s32 delta = there - here;
+
+                words.push_back(0x7FC802A6u);                    // mflr r30
+                words.push_back(form_d(36, 30, 31, (u16)kLrSlot)); // stw r30,slot(r31)
+                words.push_back(0x48000001u | ((u32)delta & 0x03FFFFFCu)); // bl
+                words.push_back(form_d(32, 30, 31, (u16)kLrSlot)); // lwz r30,slot(r31)
+                words.push_back(0x7FC803A6u);                    // mtlr r30
+                i += 4u;  // the loop's own increment accounts for the fifth
+                continue;
+            }
             words.push_back(floaty && (pick(2u) == 0) ? random_float_instruction()
                                                       : random_instruction());
         }
-        words.push_back(0x4E800020u);  // blr: the materialisation barrier
+        words.push_back(0x4E800020u);
         bodies.push_back(words);
     }
 
@@ -205,6 +214,21 @@ int main(int argc, char** argv) {
     FILE* out = std::fopen(c_path, "w");
     CHECK(out != nullptr);
     emit_header_for_cpu(out, DOLRECOMP_CPU_GEKKO);
+
+    // Prototypes, then the dispatcher, then the bodies: a body calls
+    // dolrecomp_call() for anything outside its own range and the dispatcher
+    // defines it.
+    FunctionList funcs;
+    std::memset(&funcs, 0, sizeof(funcs));
+    for (u32 f = 0; f < functions; f++) {
+        const u32 address = kBaseC + f * kStride;
+        emit_chunk_prototype(out, address);
+        CHECK(function_list_add(&funcs, address,
+                                address + (u32)bodies[f].size() * 4u));
+    }
+    emit_dispatch_helpers(out, &funcs, kBaseC);
+    function_list_free(&funcs);
+
     for (u32 f = 0; f < functions; f++) {
         const u32 address = kBaseC + f * kStride;
         std::vector<PPCInst> decoded(bodies[f].size());

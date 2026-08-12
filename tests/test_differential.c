@@ -30,6 +30,25 @@ typedef struct {
 
 #include "differential_manifest.h"
 
+/* Guest code is executed the way the runtime executes it: a dispatch loop that
+ * calls whichever generated function contains the current PC, until control
+ * returns past a sentinel LR.
+ *
+ * This is not a detail. The C backend lowers `bl` to
+ *     ctx->lr = continuation; ctx->pc = target; return;
+ * -- it hands the call back to the runtime rather than calling the callee. The
+ * LLVM backend calls the callee directly through its function ranges. Invoking
+ * each arm once would therefore execute two different programs: the C arm would
+ * stop at the first call having run two instructions, while the LLVM arm ran
+ * the whole thing. Both arms under the same loop is what makes a call-shaped
+ * sequence comparable at all.
+ *
+ * The step limit is a backstop against a generated sequence that loops forever;
+ * it is a test bug if it fires, not a backend result, so it is reported as one.
+ */
+#define DIFF_SENTINEL_LR 0x8FFFFFFCu
+#define DIFF_STEP_LIMIT  100000u
+
 /* Where generated loads and stores address through r31. Sits well inside RAM
    and clear of anything else the test touches. */
 #define SCRATCH_ADDRESS 0x80010000u
@@ -86,6 +105,24 @@ static void randomise(CPUState* cpu) {
 
     for (u32 i = 0; i < SCRATCH_BYTES; i += 4)
         mem_write32(cpu, SCRATCH_ADDRESS + i, awkward_word());
+}
+
+/* Returns 0 if the step limit was hit. */
+static int run_arm(CPUState* cpu, u32 base, int use_llvm) {
+    for (u32 step = 0; step < DIFF_STEP_LIMIT; step++) {
+        if (cpu->pc == DIFF_SENTINEL_LR)
+            return 1;
+        if (cpu->exception)
+            return 1;  /* Left through the runtime; both arms must agree on it. */
+        u32 index = (cpu->pc - base) / DIFF_STRIDE;
+        if (index >= DIFF_COUNT)
+            return 1;  /* Outside the generated set: nothing more to run. */
+        if (use_llvm)
+            diff_pairs[index].llvm_backend(cpu);
+        else
+            diff_pairs[index].c_backend(cpu);
+    }
+    return 0;
 }
 
 static int report(const char* what, u32 index, u64 expected, u64 actual) {
@@ -174,9 +211,18 @@ int main(void) {
 
         a.pc = diff_pairs[i].c_address;
         b.pc = diff_pairs[i].llvm_address;
+        a.lr = DIFF_SENTINEL_LR;
+        b.lr = DIFF_SENTINEL_LR;
 
-        diff_pairs[i].c_backend(&a);
-        diff_pairs[i].llvm_backend(&b);
+        if (!run_arm(&a, DIFF_BASE_C, 0) || !run_arm(&b, DIFF_BASE_L, 1)) {
+            fprintf(stderr, "  pair %u exceeded the step limit; that is a test "
+                            "bug, not a backend divergence\n", i);
+            failures++;
+            continue;
+        }
+
+        /* PC ends at the sentinel in both arms, so it carries no information
+           and comparing it would only compare the two base addresses. */
 
         if (compare(&a, &b, i)) {
             fprintf(stderr, "  reproduce with seed %llu, pair %u\n",

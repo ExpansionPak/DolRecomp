@@ -313,10 +313,17 @@ if(DOLRECOMP_ENABLE_LLVM)
     if(NOT DEFINED DOLRECOMP_DIFF_SEED)
         set(DOLRECOMP_DIFF_SEED 20260812)
     endif()
+    # Overridable so a failure can be shrunk to a minimal repro without editing.
+    if(NOT DEFINED DOLRECOMP_DIFF_FUNCTIONS)
+        set(DOLRECOMP_DIFF_FUNCTIONS 64)
+    endif()
+    if(NOT DEFINED DOLRECOMP_DIFF_LENGTH)
+        set(DOLRECOMP_DIFF_LENGTH 24)
+    endif()
     add_custom_command(
         OUTPUT ${DIFF_C} ${DIFF_O} ${DIFF_H}
         COMMAND gen_differential ${DIFF_C} ${DIFF_O} ${DIFF_H}
-                ${DOLRECOMP_DIFF_SEED} 64 24
+                ${DOLRECOMP_DIFF_SEED} ${DOLRECOMP_DIFF_FUNCTIONS} ${DOLRECOMP_DIFF_LENGTH}
         DEPENDS gen_differential
         VERBATIM
     )

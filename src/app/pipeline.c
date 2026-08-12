@@ -106,9 +106,12 @@ static u32 c_chunk_instructions(void) {
 // v9: materialize() skips slots no path to the barrier has written, so the
 // store side of every barrier shrinks too.
 // v10: the liveness-narrowed reload is reverted -- it hung Mario Kart because
-// the successor model misses indirect-continuation edges. Store-side narrowing
-// stays; the reload restores everything the function uses again.
-#define DOLLLVM_CACHE_VERSION "dolllvm-v10"
+// the successor model misses indirect-continuation edges.
+// v11: the reaching-writes store narrowing is reverted too -- it diverged from
+// the C backend on floating-point state, because helper calls write slots
+// without emitting DOLIR_OP_STATE_WRITE. Both barrier sides are conservative
+// again.
+#define DOLLLVM_CACHE_VERSION "dolllvm-v11"
 // The LLVM optimisation level used for generated objects. Named so it can be
 // folded into the cache key; changing it must not reuse cached objects.
 #define DOLLLVM_OPT_LEVEL 2
