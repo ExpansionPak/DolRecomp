@@ -99,7 +99,11 @@ static u32 c_chunk_instructions(void) {
 // v7: ps1 preservation fix in dolir_builder (lfd and fmr/fneg/fabs/fnabs/fsel
 // no longer splat into the high paired-single slot). Default codegen changed,
 // so every cached object from v6 is stale.
-#define DOLLLVM_CACHE_VERSION "dolllvm-v7"
+// v8: the call-return path reloads only guest state live at the continuation
+// instead of everything the function touches. Generated code changed, so every
+// cached object from v7 is stale -- and because the cache key does not hash the
+// emitter's source, nothing else would have noticed.
+#define DOLLLVM_CACHE_VERSION "dolllvm-v8"
 // The LLVM optimisation level used for generated objects. Named so it can be
 // folded into the cache key; changing it must not reuse cached objects.
 #define DOLLLVM_OPT_LEVEL 2
