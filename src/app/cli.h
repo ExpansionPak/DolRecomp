@@ -15,6 +15,9 @@ typedef struct {
     const char* title_id_arg;
     const char* output_arg;
     const char* map_path;
+    /* NULL disables reporting entirely; instrumentation stays collected but
+       unwritten, which is what keeps --perf-report free when unused. */
+    const char* perf_report_path;
     DolRecompCPU cpu;
     DolRecompBackend backend;
     u32 jobs;

@@ -53,6 +53,9 @@ endif()
 
 set(DOLRECOMP_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+add_library(dr_common STATIC src/common/perf.c)
+target_include_directories(dr_common PUBLIC ${DOLRECOMP_SRC})
+
 add_library(dr_cpu STATIC src/cpu/cpu.c)
 target_include_directories(dr_cpu PUBLIC ${DOLRECOMP_SRC})
 if(NOT WIN32)
@@ -151,7 +154,7 @@ add_library(dr_app STATIC
     src/app/pipeline.c
 )
 target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
-target_link_libraries(dr_app PUBLIC dr_backend dr_analysis dr_frontend dr_platform dr_ir)
+target_link_libraries(dr_app PUBLIC dr_backend dr_analysis dr_frontend dr_platform dr_ir dr_common)
 if(DOLRECOMP_ENABLE_LLVM)
     target_link_libraries(dr_app PUBLIC dr_llvm)
 endif()
@@ -260,6 +263,10 @@ add_test(NAME float_semantics COMMAND test_float_semantics)
 add_executable(test_dolir tests/test_dolir.c)
 target_link_libraries(test_dolir PRIVATE dr_ir)
 add_test(NAME dolir COMMAND test_dolir)
+
+add_executable(test_perf tests/test_perf.c)
+target_link_libraries(test_perf PRIVATE dr_common)
+add_test(NAME perf COMMAND test_perf ${CMAKE_CURRENT_BINARY_DIR}/perf_test)
 
 if(DOLRECOMP_ENABLE_LLVM)
     add_executable(test_llvm_backend tests/test_llvm_backend.cpp)

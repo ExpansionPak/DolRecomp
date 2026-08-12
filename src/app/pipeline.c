@@ -14,6 +14,7 @@
 #include "analysis/code_section.h"
 #include "analysis/embedded_data.h"
 #include "analysis/smc.h"
+#include "common/perf.h"
 #ifdef DOLRECOMP_ENABLE_LLVM
 #include "ir/dolir_builder.h"
 #include "backend/llvm/llvm_backend.h"
@@ -24,6 +25,23 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+
+/* Emitted code size per region. Reported, never load-bearing: a size that
+   cannot be read is recorded as zero rather than failing the build. */
+static u32 perf_file_size(const char* path) {
+    FILE* in = fopen(path, "rb");
+    if (!in)
+        return 0;
+    u32 size = 0;
+    if (fseek(in, 0, SEEK_END) == 0) {
+        long value = ftell(in);
+        if (value > 0)
+            size = (u32)value;
+    }
+    fclose(in);
+    return size;
+}
+
 #ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
@@ -784,11 +802,45 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
         u32 active_jobs = effective_chunk_jobs(chunk_total, requested_jobs);
         printf("  writing %u LLVM objects with %u job%s\n",
                chunk_total, active_jobs, active_jobs == 1 ? "" : "s");
+
+        /* Cache state has to be sampled before the run: afterwards every object
+           is present and a hit is indistinguishable from a fresh emit. */
+        unsigned char* cached_before_run =
+            (unsigned char*)calloc(chunk_total ? chunk_total : 1u, 1u);
+        if (cached_before_run) {
+            for (u32 i = 0; i < chunk_total; i++)
+                cached_before_run[i] = reuse_llvm_object(&chunk_jobs[i]) ? 1u : 0u;
+        }
+
         if (!run_llvm_chunk_jobs(chunk_jobs, chunk_total, requested_jobs)) {
+            free(cached_before_run);
             free(chunk_jobs);
             free(insts);
             goto fail;
         }
+
+        /* Recorded in the parent, after the workers are done.
+         *
+         * Per-region optimize/codegen timings deliberately stay zero here: the
+         * POSIX path forks a worker per batch, so a counter raised inside
+         * emit_llvm_chunk_job() dies with the child. Reporting a partial number
+         * that is whole on Windows and empty on Linux would be worse than
+         * reporting none. The Phase 1 region backend emits in-process and fills
+         * these in for real. */
+        for (u32 i = 0; i < chunk_total; i++) {
+            const LLVMChunkJob* job = &chunk_jobs[i];
+            DolPerfRegion region;
+            memset(&region, 0, sizeof(region));
+            region.region_id = i;
+            region.guest_start = job->function_address;
+            region.guest_end = job->function_address + job->count * 4u;
+            region.guest_instructions = job->count;
+            region.blocks = 1;
+            region.code_bytes = perf_file_size(job->path);
+            region.cache_hit = cached_before_run ? cached_before_run[i] : 0;
+            dolperf_add_region(dolperf_report(), &region);
+        }
+        free(cached_before_run);
         free(chunk_jobs);
         free(insts);
     }
@@ -1114,6 +1166,22 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
         }
         emit_set_chunk_table(NULL, 0);
         free(chunk_starts);
+
+        /* Fixed-chunk mode records one region per chunk, so `fixed` and the
+           Phase 1 planner modes report through the same structure and stay
+           directly comparable. */
+        for (u32 i = 0; i < section_job_count; i++) {
+            const ChunkJob* job = &chunk_jobs[i];
+            DolPerfRegion region;
+            memset(&region, 0, sizeof(region));
+            region.region_id = i;
+            region.guest_start = job->func_addr;
+            region.guest_end = job->func_addr + job->count * 4u;
+            region.guest_instructions = job->count;
+            region.blocks = 1;
+            region.code_bytes = perf_file_size(job->path);
+            dolperf_add_region(dolperf_report(), &region);
+        }
 
         free(chunk_jobs);
         free(insts);

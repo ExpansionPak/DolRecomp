@@ -11,17 +11,19 @@
 #include "frontend/container/disc_extract.h"
 #include "backend/emitter.h"
 #include "analysis/symbol_map.h"
+#include "common/perf.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-int main(int argc, char** argv) {
-    if (argc > 1 && strcmp(argv[1], "extract") == 0)
-        return disc_extract_main(argc - 1, argv + 1);
-
+/* The recompile body keeps its many early returns; main() wraps it so the perf
+   report is written exactly once, on every path, without threading a cleanup
+   through each of them. */
+static int run_recompile(int argc, char** argv, CliOptions* opts_out) {
     CliOptions opts;
     if (!parse_cli(argc, argv, &opts))
         return 1;
+    *opts_out = opts;
     if (opts.show_help)
         return 0;
     if (opts.setup_mode)
@@ -246,4 +248,34 @@ int main(int argc, char** argv) {
     symbol_map_free(&symbols);
     dol_free(&dol);
     return 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && strcmp(argv[1], "extract") == 0)
+        return disc_extract_main(argc - 1, argv + 1);
+
+    DolPerfReport* report = dolperf_report();
+    dolperf_reset(report);
+    u64 started_ns = dolperf_now_ns();
+
+    CliOptions opts;
+    memset(&opts, 0, sizeof(opts));
+    int status = run_recompile(argc, argv, &opts);
+
+    report->wall_ns = dolperf_now_ns() - started_ns;
+    snprintf(report->backend, sizeof(report->backend), "%s",
+             opts.backend == DOLRECOMP_BACKEND_LLVM ? "llvm" : "c");
+    if (report->region_mode[0] == '\0')
+        snprintf(report->region_mode, sizeof(report->region_mode), "fixed");
+
+    if (opts.perf_report_path) {
+        if (!dolperf_write_json(report, opts.perf_report_path, stderr))
+            status = status ? status : 1;
+        else
+            printf("perf report: %s\n", opts.perf_report_path);
+        dolperf_print_summary(report, stdout);
+    }
+
+    dolperf_free(report);
+    return status;
 }
