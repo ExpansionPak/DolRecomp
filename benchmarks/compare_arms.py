@@ -69,6 +69,9 @@ def main():
     parser.add_argument("directory")
     parser.add_argument("--baseline", default="fixed", help="arm to compare against")
     parser.add_argument("--json-out", help="write the summary as JSON too")
+    parser.add_argument("--max-cycle-skew", type=float, default=5.0,
+                        help="percent disagreement in guest cycles/frame above "
+                             "which two arms are not comparable at all")
     args = parser.parse_args()
 
     runs = load(args.directory)
@@ -102,6 +105,42 @@ def main():
             print(f"| {scene} | {arm} | {row['runs']} | {row['fps'] or 0:.2f} | "
                   f"{row['fps_sd_pct']:.1f} | {row['bursts_per_frame'] or 0:.1f} | "
                   f"{(row['cycles_per_frame'] or 0) / 1e6:.2f}M | {fb} |")
+
+    # Guest cycles per frame is a property of the guest program, not of the
+    # backend compiling it. If two arms disagree on it for the same scene they
+    # were in different game states, and no speed comparison between them means
+    # anything.
+    #
+    # This is not hypothetical: Luigi's Mansion's foyer savestate is bimodal --
+    # the same module produced 20.2M cycles/frame in three runs and 10.2M in
+    # others. Comparing across that gap showed a fake +41% for the faster arm,
+    # which was simply the arm that landed in the lighter state.
+    print()
+    comparable = True
+    for scene in scenes:
+        base = runs.get((scene, args.baseline))
+        if not base:
+            continue
+        base_cycles = mean_of(base, "cycles_per_frame")
+        for arm in arms:
+            if arm == args.baseline:
+                continue
+            group = runs.get((scene, arm))
+            if not group:
+                continue
+            arm_cycles = mean_of(group, "cycles_per_frame")
+            if not base_cycles or not arm_cycles:
+                continue
+            skew = abs(arm_cycles - base_cycles) / base_cycles * 100.0
+            if skew > args.max_cycle_skew:
+                comparable = False
+                print(f"**NOT COMPARABLE** {scene}: `{args.baseline}` ran "
+                      f"{base_cycles/1e6:.2f}M cycles/frame, `{arm}` ran "
+                      f"{arm_cycles/1e6:.2f}M ({skew:.0f}% apart). Guest work is "
+                      f"backend-invariant, so these arms were in different game "
+                      f"states. Speed deltas below are meaningless for this scene.")
+    if comparable:
+        print("Guest cycles/frame agree across arms: the scenes are comparable.")
 
     print()
     print(f"Deltas vs `{args.baseline}` (blank = inside the noise floor):")
