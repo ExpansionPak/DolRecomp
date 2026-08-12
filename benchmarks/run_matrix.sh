@@ -68,12 +68,18 @@ from pathlib import Path
 
 out = Path(sys.argv[1])
 groups = defaultdict(list)
+invalid = defaultdict(list)
 for path in sorted(out.glob("*.json")):
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         continue
     label = data.get("label", path.stem)
+    # Runs that never advanced a frame are failures, not slow results; folding
+    # them into a mean would quietly drag every comparison toward zero.
+    if not data.get("valid", True):
+        invalid[label.rsplit("-r", 1)[0]].append(data.get("invalid_reason", "?"))
+        continue
     groups[label.rsplit("-r", 1)[0]].append(data)
 
 if not groups:
@@ -92,4 +98,7 @@ for scene, runs in sorted(groups.items()):
     sd = (statistics.stdev(fps) / mean * 100.0) if len(fps) > 1 else 0.0
     print(f"{scene:<16}{len(runs):>5}{mean:>10.2f}{sd:>7.1f}"
           f"{(statistics.mean(bpf) if bpf else 0):>14.1f}{int(fb):>10}")
+
+for scene, reasons in sorted(invalid.items()):
+    print(f"  ! {scene}: {len(reasons)} invalid run(s) -- {reasons[0]}")
 SUMMARY

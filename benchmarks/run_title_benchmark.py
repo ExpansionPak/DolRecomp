@@ -96,6 +96,9 @@ def main():
                         help="seconds to discard before measuring, so boot and "
                              "shader compilation do not land in the sample")
     parser.add_argument("--load-state", help="savestate to pin the scene")
+    parser.add_argument("--progress-timeout", type=float, default=180.0,
+                        help="how long to wait after boot for the first frame to "
+                             "advance; restoring a large savestate can take a while")
     parser.add_argument("--throttled", action="store_true",
                         help="keep Dolphin's real-time throttle (measures nothing "
                              "useful for CPU work; here for comparison only)")
@@ -153,6 +156,32 @@ def main():
                   file=sys.stderr)
             return 1
 
+        # `booted=1, state=running` is not the same as "executing guest code".
+        # With --load-state the runtime reports running while a 30-45 MB state
+        # is still being restored, and a fixed warmup can expire before a single
+        # frame has advanced -- which produced 0-frame runs that looked like
+        # 0.00 fps results rather than the failures they were.
+        #
+        # So wait for frame_count to actually move before starting the clock.
+        progress_deadline = time.monotonic() + args.progress_timeout
+        baseline = to_number((read_status(status_path) or {}).get("frame_count"))
+        advanced = False
+        while time.monotonic() < progress_deadline:
+            if process.poll() is not None:
+                break
+            time.sleep(0.5)
+            now = to_number((read_status(status_path) or {}).get("frame_count"))
+            if now > baseline:
+                advanced = True
+                break
+
+        if not advanced:
+            process.kill()
+            process.wait(timeout=30)
+            print(f"error: {args.label} booted but never advanced a frame in "
+                  f"{args.progress_timeout:.0f}s; see {log_path}", file=sys.stderr)
+            return 1
+
         time.sleep(args.warmup)
 
         start_status = read_status(status_path) or {}
@@ -196,7 +225,22 @@ def main():
                 shutdown[key] = to_number(value)
 
     frames = end_frames - start_frames
+
+    # A run where frame_count never advances is a failed run, not a slow one.
+    # Reporting it as 0.00 fps puts a number in the table that looks like a
+    # measurement and is not -- it happened with a stale savestate that left the
+    # emulator stalled, and a mean over that row would be silently wrong.
+    unique_frames = {s["frame_count"] for s in samples}
+    stalled = frames <= 0 or len(unique_frames) <= 1
+    # A speed value that never changes across a 45 s window is the status file
+    # going stale rather than a perfectly steady emulator.
+    frozen_speed = len({s["speed"] for s in samples}) <= 1 and len(samples) > 3
+
     result = {
+        "valid": not (stalled or frozen_speed),
+        "invalid_reason": ("no frame progress" if stalled
+                           else "frozen speed reading" if frozen_speed
+                           else None),
         "label": args.label,
         "module": str(Path(args.module).resolve()),
         "module_bytes": Path(args.module).stat().st_size if Path(args.module).exists() else 0,
@@ -221,8 +265,13 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
-    print(f"{args.label}: {result['fps']:.2f} fps over {elapsed:.1f}s "
-          f"({int(frames)} frames), speed={result['speed_mean']:.2f}")
+    if not result["valid"]:
+        print(f"{args.label}: INVALID ({result['invalid_reason']}) -- "
+              f"{int(frames)} frames over {elapsed:.1f}s; see {log_path}",
+              file=sys.stderr)
+    else:
+        print(f"{args.label}: {result['fps']:.2f} fps over {elapsed:.1f}s "
+              f"({int(frames)} frames), speed={result['speed_mean']:.2f}")
     if shutdown:
         print("  " + "  ".join(
             f"{k}={int(v)}" for k, v in sorted(shutdown.items())))

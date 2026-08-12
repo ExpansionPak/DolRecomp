@@ -47,6 +47,10 @@ int main(int argc, char** argv) {
             limits.max_ir_instructions = (u32)strtoul(argv[++i], NULL, 0);
         } else if (strcmp(argv[i], "--compare-modes") == 0) {
             compare_modes = 1;
+        } else if (strcmp(argv[i], "--no-adjacency") == 0) {
+            limits.merge_address_adjacent = 0;
+        } else if (strcmp(argv[i], "--adjacency-gap") == 0 && i + 1 < argc) {
+            limits.max_adjacency_gap = (u32)strtoul(argv[++i], NULL, 0);
         }
     }
 
