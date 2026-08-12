@@ -291,6 +291,22 @@ def main():
             if key in shutdown:
                 result[f"{key}_per_frame"] = round(shutdown[key] / frames, 2)
 
+    # Rates per million guest cycles.
+    #
+    # Guest cycles measure guest work, so dividing by them normalises away both
+    # host speed AND scene length. That makes these the only figures that stay
+    # meaningful when two runs did not execute identical work -- which happens
+    # more than one would like, because a savestate can drop into a scene that
+    # behaves differently depending on timing.
+    #
+    # bursts per Mcycle is the headline: dispatcher re-entries per unit of guest
+    # work is exactly what region formation is trying to reduce.
+    guest_mcycles = shutdown.get("cycles", 0) / 1e6
+    if guest_mcycles > 0:
+        for key in ("bursts", "native", "native_exc", "hook_fb"):
+            if key in shutdown:
+                result[f"{key}_per_mcycle"] = round(shutdown[key] / guest_mcycles, 3)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
@@ -300,7 +316,8 @@ def main():
               file=sys.stderr)
     else:
         print(f"{args.label}: {result['fps']:.2f} fps over {elapsed:.1f}s "
-              f"({int(frames)} frames), speed={result['speed_mean']:.2f}")
+              f"({int(frames)} frames), speed={result['speed_mean']:.2f}, "
+              f"bursts/Mcycle={result.get('bursts_per_mcycle', 0):.1f}")
     if shutdown:
         print("  " + "  ".join(
             f"{k}={int(v)}" for k, v in sorted(shutdown.items())))

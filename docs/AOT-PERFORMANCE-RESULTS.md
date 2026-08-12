@@ -490,6 +490,37 @@ There is no 2-player savestate in the MKDD project; only `race.sav` and
 
 ---
 
+## 5f. First runtime signal: dispatcher rate per unit of guest work
+
+The Luigi's Mansion head-to-head could not be read as a speed comparison -- the
+arms executed different guest work (§5e). But one figure survives that, because
+it is a *rate*: counters divided by guest cycles normalise away both host speed
+and scene length.
+
+| Arm | runs | bursts / guest Mcycle | native / guest Mcycle |
+|---|---:|---:|---:|
+| fixed-chunk (128) | 3 | 156.41 | 8,380.6 |
+| **llvm-aot cfg (1024)** | 3 | **121.85** | 4,925.0 |
+
+**−22.1% dispatcher entries per unit of guest work.**
+
+That lands almost exactly on what the region planner predicted statically:
+−21.4% crossings on Mario Kart and −23.8% on Luigi's Mansion. The static
+crossing count is therefore a usable proxy for the runtime dispatcher rate,
+which is worth knowing because crossings cost seconds to compute and this costs
+a module build plus a benchmark.
+
+Caveat, stated rather than buried: the two arms ran different scenes, and
+different code mixes can have different intrinsic dispatcher rates. This is
+corroboration, not proof. A same-scene comparison is what settles it, and that
+is what the Mario Kart race states and the newly captured `bench.sav` are for.
+
+`bursts_per_mcycle` is now emitted by the harness and leads the comparison
+table, because it is the only speed-related figure that stays meaningful when
+guest work does not match exactly.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile

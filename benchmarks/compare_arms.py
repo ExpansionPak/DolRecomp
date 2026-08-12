@@ -83,8 +83,8 @@ def main():
     arms = sorted({arm for _, arm in runs})
     summary = []
 
-    print(f"| scene | arm | runs | fps | fps sd% | bursts/frame | cycles/frame | fallback |")
-    print(f"|---|---|---:|---:|---:|---:|---:|---:|")
+    print(f"| scene | arm | runs | fps | fps sd% | bursts/frame | **bursts/Mcycle** | cycles/frame | fallback |")
+    print(f"|---|---|---:|---:|---:|---:|---:|---:|---:|")
     for scene in scenes:
         for arm in arms:
             group = runs.get((scene, arm))
@@ -99,11 +99,13 @@ def main():
                 "fps_sd_pct": spread(group, "fps"),
                 "bursts_per_frame": mean_of(group, "bursts_per_frame"),
                 "cycles_per_frame": mean_of(group, "cycles_per_frame"),
+                "bursts_per_mcycle": mean_of(group, "bursts_per_mcycle"),
                 "fallback": fb,
             }
             summary.append(row)
             print(f"| {scene} | {arm} | {row['runs']} | {row['fps'] or 0:.2f} | "
                   f"{row['fps_sd_pct']:.1f} | {row['bursts_per_frame'] or 0:.1f} | "
+                  f"{row['bursts_per_mcycle'] or 0:.1f} | "
                   f"{(row['cycles_per_frame'] or 0) / 1e6:.2f}M | {fb} |")
 
     # Guest cycles per frame is a property of the guest program, not of the
@@ -145,8 +147,8 @@ def main():
     print()
     print(f"Deltas vs `{args.baseline}` (blank = inside the noise floor):")
     print()
-    print("| scene | arm | fps | bursts/frame | cycles/frame |")
-    print("|---|---|---:|---:|---:|")
+    print("| scene | arm | fps | bursts/frame | **bursts/Mcycle** | cycles/frame |")
+    print("|---|---|---:|---:|---:|---:|")
     for scene in scenes:
         base = runs.get((scene, args.baseline))
         if not base:
@@ -164,7 +166,8 @@ def main():
                 return "~" if d is None else f"{d:+.1f}%"
 
             print(f"| {scene} | {arm} | {fmt('fps', noise)} | "
-                  f"{fmt('bursts_per_frame', 1.0)} | {fmt('cycles_per_frame', 1.0)} |")
+                  f"{fmt('bursts_per_frame', 1.0)} | {fmt('bursts_per_mcycle', 1.0)} | "
+                  f"{fmt('cycles_per_frame', 1.0)} |")
 
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(summary, indent=2), encoding="utf-8")
