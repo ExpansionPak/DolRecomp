@@ -172,12 +172,22 @@ int main(int argc, char** argv) {
     // hangs. The LLVM backend resolves the same call internally through its
     // function ranges, so the two arms are not even attempting the same thing.
     //
-    // Closing this properly means emitting dispatch helpers for the C arm --
-    // emit_dispatch_helpers() over a FunctionList of the C copies -- so both
-    // arms can resolve a call, one through the dispatcher and one directly, and
-    // still be required to agree on the guest-visible result. That is the next
-    // piece of work here and it is a prerequisite for trusting anything that
-    // touches the call/return path.
+    // Emitting dispatch helpers for the C arm was tried and is NOT sufficient
+    // on its own. With emit_chunk_prototype() for every function followed by
+    // emit_dispatch_helpers() before the bodies -- so dolrecomp_call() is
+    // declared before the code that calls it -- the C arm compiles and links,
+    // and the test still hangs. Something in the call/return round trip does not
+    // terminate, and it was not diagnosed.
+    //
+    // So the remaining work is a debugging task, not a plumbing one. Whoever
+    // picks it up should start by generating two functions with one call
+    // between them and stepping the C arm, rather than at 64x24 where the
+    // failing pair is not obvious.
+    //
+    // Until then the call/return path -- externalDestination, reloadLiveState,
+    // the returned-PC validation -- has NO differential coverage, and the
+    // reverted liveness narrowing is the demonstration of what that costs:
+    // 23/23 green, then a hang at boot on a real title.
     std::vector<std::vector<u32>> bodies;
     for (u32 f = 0; f < functions; f++) {
         std::vector<u32> words;
