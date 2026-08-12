@@ -23,8 +23,24 @@
 // must stay byte-identical; this selects an experiment, not a new default.
 typedef enum {
     DISPATCH_LOOKUP_LINEAR = 0,
-    DISPATCH_LOOKUP_INDEXED = 1
+    DISPATCH_LOOKUP_INDEXED = 1,
+    /* Decide from the plan's shape. See dispatch_lookup_mode(). */
+    DISPATCH_LOOKUP_AUTO = 2
 } DispatchLookupMode;
+
+/* Above this many runs, the linear chain stops being a chain worth walking.
+ *
+ * A uniform plan collapses to a handful of runs -- fixed 128-instruction chunks
+ * produce four -- and the linear form is then a couple of range tests plus a
+ * table index, which nothing beats. An irregular plan does not collapse: Mario
+ * Kart's 4,017 planned regions emitted 8,284 address comparisons, and walking
+ * those on every dispatch made the region build ~8x slower than the fixed one
+ * at an identical dispatcher rate. The page index costs one u32 per 4 KiB page
+ * and a short bounded walk.
+ *
+ * 64 is far above what any uniform plan produces and far below the thousands an
+ * irregular one does, so the choice is never close. */
+#define DISPATCH_LINEAR_RUN_LIMIT 64u
 
 // A 4 KiB page is small enough that a page holds only a handful of runs even
 // under the most irregular plan measured here (E008a's mean chunk was 87
@@ -40,15 +56,29 @@ typedef enum {
 static DispatchLookupMode dispatch_lookup_mode(void) {
     const char* configured = getenv("DOLRECOMP_DISPATCH_LOOKUP");
     if (!configured || !configured[0])
-        return DISPATCH_LOOKUP_LINEAR;
+        return DISPATCH_LOOKUP_AUTO;
+    if (!strcmp(configured, "auto"))
+        return DISPATCH_LOOKUP_AUTO;
     if (!strcmp(configured, "indexed"))
         return DISPATCH_LOOKUP_INDEXED;
     if (!strcmp(configured, "linear"))
         return DISPATCH_LOOKUP_LINEAR;
     fprintf(stderr,
-            "warning: DOLRECOMP_DISPATCH_LOOKUP must be linear|indexed; using "
-            "linear\n");
-    return DISPATCH_LOOKUP_LINEAR;
+            "warning: DOLRECOMP_DISPATCH_LOOKUP must be linear|indexed|auto; "
+            "using auto\n");
+    return DISPATCH_LOOKUP_AUTO;
+}
+
+static u32 uniform_run_end(const FunctionList* funcs, u32 first);
+
+/* How many runs the linear chain would emit. Runs, not ranges: consecutive
+   equal-width ranges collapse into one table, which is why a uniform plan stays
+   cheap however many chunks it has. */
+static u32 linear_run_count(const FunctionList* funcs) {
+    u32 runs = 0;
+    for (u32 first = 0; first < funcs->count; runs++)
+        first = uniform_run_end(funcs, first);
+    return runs;
 }
 
 void emit_chunk_prototype(FILE* out, u32 func_addr) {
@@ -381,9 +411,21 @@ void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point
     fprintf(out, "    return 0;\n");
     fprintf(out, "}\n");
     fprintf(out, "#endif\n");
-    if (dispatch_lookup_mode() != DISPATCH_LOOKUP_INDEXED ||
-        !emit_lookup_indexed(out, funcs))
-        emit_lookup_linear(out, funcs);
+    {
+        DispatchLookupMode mode = dispatch_lookup_mode();
+        int want_indexed = mode == DISPATCH_LOOKUP_INDEXED;
+        if (mode == DISPATCH_LOOKUP_AUTO) {
+            u32 runs = linear_run_count(funcs);
+            want_indexed = runs > DISPATCH_LINEAR_RUN_LIMIT;
+            if (want_indexed) {
+                printf("  dispatch: %u lookup runs, using page index\n", runs);
+            }
+        }
+        /* Correctness never depends on which one is emitted: the index refuses
+           plans it cannot represent and falls back here. */
+        if (!want_indexed || !emit_lookup_indexed(out, funcs))
+            emit_lookup_linear(out, funcs);
+    }
     fprintf(out, "\nstatic inline int dolrecomp_call_original(CPUState* ctx, u32 address) {\n");
     fprintf(out, "    DolRecompFunction fn = dolrecomp_find_original(address);\n");
     fprintf(out, "    if (!fn) return 0;\n");

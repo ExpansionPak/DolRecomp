@@ -735,6 +735,15 @@ static int emit_llvm_regions(const LoadedCodeSection* sections, u32 section_coun
     if (!dolcfg_build(&cfg, stderr))
         goto done;
 
+    if (options->profile_path) {
+        u32 matched = 0, unmatched = 0;
+        if (!dolcfg_load_profile(&cfg, options->profile_path, &matched,
+                                 &unmatched, stderr))
+            goto done;
+        printf("region profile: %u entries matched, %u unmatched (%s)\n",
+               matched, unmatched, options->profile_path);
+    }
+
     DolRegionMode mode = DOLREGION_MODE_CFG;
     if (options->mode_name && !dolregion_parse_mode(options->mode_name, &mode)) {
         fprintf(stderr, "error: unknown region mode '%s'\n", options->mode_name);

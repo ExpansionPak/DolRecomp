@@ -24,6 +24,7 @@ typedef struct {
     const char* perf_report_path;
     const char* region_report_path;
     const char* region_mode_arg;
+    const char* region_profile_path;
     u32 region_max_instructions;
     u32 region_max_ir;
     DolRecompCPU cpu;

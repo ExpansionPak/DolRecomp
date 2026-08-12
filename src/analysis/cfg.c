@@ -980,6 +980,100 @@ bool dolcfg_build(DolCfgProgram* program, FILE* diagnostics) {
     return true;
 }
 
+bool dolcfg_load_profile(DolCfgProgram* program, const char* path,
+                         u32* matched_out, u32* unmatched_out,
+                         FILE* diagnostics) {
+    if (!program || !path)
+        return false;
+
+    FILE* in = fopen(path, "rb");
+    if (!in) {
+        if (diagnostics)
+            fprintf(diagnostics, "error: cannot read region profile '%s'\n", path);
+        return false;
+    }
+
+    char line[512];
+    u32 matched = 0;
+    u32 unmatched = 0;
+
+    while (fgets(line, sizeof(line), in)) {
+        char* cursor = line;
+        while (*cursor == ' ' || *cursor == '\t')
+            cursor++;
+        if (*cursor == '#' || *cursor == '\n' || *cursor == '\r' || *cursor == '\0')
+            continue;
+
+        char* end = NULL;
+        unsigned long address = strtoul(cursor, &end, 0);
+        if (end == cursor)
+            continue;
+
+        /* An address on its own means "hot" without saying how hot. */
+        u64 count = 1;
+        while (*end == ' ' || *end == '\t')
+            end++;
+        if (*end && *end != '#' && *end != '\n' && *end != '\r') {
+            char* count_end = NULL;
+            unsigned long long parsed = strtoull(end, &count_end, 0);
+            if (count_end != end)
+                count = (u64)parsed;
+        }
+
+        /* The profile names function entries, so weight the whole function.
+           Per-block resolution would need the profile's own CFG, which is the
+           generated module's, not the guest's. */
+        u32 block = dolcfg_block_starting_at(program, (u32)address);
+        if (block == DOLCFG_NO_BLOCK)
+            block = dolcfg_block_at(program, (u32)address);
+        if (block == DOLCFG_NO_BLOCK) {
+            unmatched++;
+            continue;
+        }
+
+        u32 function = program->blocks[block].function;
+        if (function == DOLCFG_NO_BLOCK) {
+            program->blocks[block].weight += count;
+            matched++;
+            continue;
+        }
+
+        /* Accumulate onto the function only. Spreading to its blocks here would
+           be O(entries x blocks) -- tolerable for a 78-entry hot list, hours for
+           a full 23,311-function profile. One pass afterwards does it in O(n). */
+        program->functions[function].weight += count;
+        matched++;
+    }
+
+    fclose(in);
+
+    for (u32 i = 0; i < program->block_count; i++) {
+        u32 function = program->blocks[i].function;
+        if (function != DOLCFG_NO_BLOCK && program->functions[function].weight)
+            program->blocks[i].weight += program->functions[function].weight;
+    }
+
+    if (matched_out)
+        *matched_out = matched;
+    if (unmatched_out)
+        *unmatched_out = unmatched;
+
+    if (diagnostics && unmatched) {
+        fprintf(diagnostics,
+                "warning: region profile '%s': %u of %u entries matched no known "
+                "function; the profile may be from a different build\n",
+                path, unmatched, matched + unmatched);
+    }
+    if (!matched) {
+        if (diagnostics)
+            fprintf(diagnostics,
+                    "error: region profile '%s' matched nothing in this program\n",
+                    path);
+        return false;
+    }
+    return true;
+}
+
 const char* dolcfg_terminator_name(DolCfgTerminator kind) {
     switch (kind) {
     case DOLCFG_TERM_FALLTHROUGH: return "fallthrough";

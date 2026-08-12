@@ -21,6 +21,7 @@ typedef struct {
     u32 max_instructions;     /* 0 -> planner default */
     u32 max_ir_instructions;  /* 0 -> planner default */
     const char* report_path;  /* NULL -> no report */
+    const char* profile_path; /* NULL -> no weights; pgo mode degrades */
 } DolRecompRegionOptions;
 
 void pipeline_set_region_options(const DolRecompRegionOptions* options);

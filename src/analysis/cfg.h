@@ -197,6 +197,29 @@ bool dolcfg_add_smc_range(DolCfgProgram* program, u32 start, u32 end);
    sections and known-function set always produce the same numbering. */
 bool dolcfg_build(DolCfgProgram* program, FILE* diagnostics);
 
+/* Loads execution weights and attaches them to functions and their blocks.
+ *
+ * The file is one entry per line, `<address> <count>`, with `#` comments and
+ * blank lines ignored -- the shape ModernGekko's hot-entry lists already use:
+ *
+ *     0x800EB5C0  # 83,166,563,414
+ *     0x800E6FC0 197140421
+ *
+ * A count after the address is used when present; an address with no count is
+ * treated as hot with weight 1, so a bare hot-entry list still works.
+ *
+ * Deliberately not an LLVM .profdata reader. Keeping the analysis layer in C
+ * and free of an LLVM dependency matters more than avoiding one conversion
+ * step, and a text format is something a test can write by hand. Convert with
+ * benchmarks/profdata_to_weights.py.
+ *
+ * Call after dolcfg_build(), which is when functions and blocks exist.
+ * Addresses outside any known function are counted and reported, not fatal:
+ * a profile from a different build should degrade, loudly, rather than fail. */
+bool dolcfg_load_profile(DolCfgProgram* program, const char* path,
+                         u32* matched_out, u32* unmatched_out,
+                         FILE* diagnostics);
+
 /* Block index containing `address`, or DOLCFG_NO_BLOCK. */
 u32 dolcfg_block_at(const DolCfgProgram* program, u32 address);
 

@@ -19,6 +19,7 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  --region-mode MODE             fixed|function|cfg|pgo for llvm-aot (default: cfg)\n");
     fprintf(stderr, "  --region-max-instructions N    Guest instructions per region\n");
     fprintf(stderr, "  --region-max-ir N              Estimated DolIR instructions per region\n");
+    fprintf(stderr, "  --region-profile <path>        Execution weights for --region-mode pgo\n");
     fprintf(stderr, "  --emit-region-report <path>    Write the region plan as JSON\n");
     fprintf(stderr, "  --gamecube                     GameCube mode (no title ID required)\n");
     fprintf(stderr, "  --rel-base <addr>              Override first virtual load address for REL codegen\n");
@@ -317,6 +318,20 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             continue;
         }
 
+        if (strcmp(arg, "--region-profile") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --region-profile needs a path\n");
+                return 0;
+            }
+            opts->region_profile_path = argv[++i];
+            continue;
+        }
+
+        if (strncmp(arg, "--region-profile=", 17) == 0) {
+            opts->region_profile_path = arg + 17;
+            continue;
+        }
+
         if (strcmp(arg, "--region-max-ir") == 0) {
             if (i + 1 >= argc ||
                 !parse_u32_arg(argv[++i], "--region-max-ir", &opts->region_max_ir))
@@ -435,6 +450,11 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
         if (value && *value &&
             !parse_u32_arg(value, "DOLRECOMP_REGION_MAX_IR", &opts->region_max_ir))
             return 0;
+    }
+    if (!opts->region_profile_path) {
+        const char* value = getenv("DOLRECOMP_REGION_PROFILE");
+        if (value && *value)
+            opts->region_profile_path = value;
     }
     if (!opts->region_report_path) {
         const char* value = getenv("DOLRECOMP_REGION_REPORT");
