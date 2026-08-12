@@ -240,36 +240,39 @@ control flow.
 
 ---
 
-## 8. Open questions / needs manual confirmation
+## 8. Settled decisions and open questions
 
-1. **Base of record.** This branch sits on upstream `ExpansionPak/DolRecomp`
-   `main`. The MKDD project instead pins its submodules to
-   `dougchansan/recomp-bench` branches `mkdd/dolrecomp` and `mkdd/moderngekko`,
-   whose `.gitmodules` states they carry local work absent upstream (4-player
-   local multiplayer, savestate menu, live internal resolution, DSP savestate
-   stamping, ultrawide, LLVM instrumentation). The LLVM-instrumentation part is
-   already upstream at `fa0cf61`; the rest is not. **Confirm whether this work
-   should be rebased onto `mkdd/dolrecomp`.**
-2. **Upstream contribution policy.** `README.md` states: "No AI code is used in
-   DolRecomp. This is human hand-made project." This branch is
-   AI-assisted. That is a decision for the repository owner about
-   whether/how this lands upstream; it does not affect a private fork.
-3. Whether `--mod-policy sealed` should ever be selectable for a shipping title
+### Settled
+
+- **Base of record: upstream `ExpansionPak/DolRecomp` `main`.** Confirmed. The
+  `dougchansan/recomp-bench` `mkdd/*` branches are not the base for this work.
+- **Public repository is fine**; maintainer permission for this work is in hand.
+- **No AI attribution in commits or code.** Commit messages carry no
+  `Co-Authored-By` trailer and no generated-by notices. `README.md`'s notice
+  stands as written.
+
+### Open
+
+1. Whether `--mod-policy sealed` should ever be selectable for a shipping title
    build, or stay a benchmarking-only mode.
-4. Which MMIO ranges ModernGekko wants specialized at compile time versus kept
+2. Which MMIO ranges ModernGekko wants specialized at compile time versus kept
    behind the generic callback.
 
 ---
 
-## 9. Areas requiring platform access not available on the dev machine
+## 9. Platform access
 
-Recorded so they are not silently reported as done:
+| Target | Access | Notes |
+|---|---|---|
+| x86-64 Windows | yes (primary dev host) | building and tested |
+| x86-64 Linux | yes, via WSL2 Ubuntu | needs an LLVM 19/20 toolchain installed in the distro |
+| AArch64 Linux | cross-compile only | no native host; NEON paired-single lowering and fastmem address calculation need real execution before the deliverable can be called done |
+| arm64 macOS | **excluded** | a MacBook exists on the network but is carrying its own workloads and is not to be used |
+| x86-64 macOS | no | — |
 
-- **AArch64 Linux** — no Linux host available here; cross-compilation can be
-  configured but a real execution environment is required to validate NEON
-  paired-single lowering, fastmem address calculation and the runtime ABI.
-- **Apple Silicon arm64 / x86-64 macOS** — no macOS host available.
-- **ThreadSanitizer / Valgrind** — not available on the Windows dev host.
+ThreadSanitizer and Valgrind are unavailable on Windows but are reachable
+through the WSL2 distro, which is where the shared-runtime-cache race testing in
+Phase 4 should run.
 
-These need either CI runners or a second machine before their deliverables can
-be marked complete.
+AArch64 and Apple Silicon deliverables will be reported as **cross-compiled
+only** or **not validated** rather than complete, unless a runner appears.

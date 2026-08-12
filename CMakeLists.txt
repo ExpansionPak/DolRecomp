@@ -126,6 +126,7 @@ if(DOLRECOMP_ENABLE_LLVM)
 endif()
 
 add_library(dr_analysis STATIC
+    src/analysis/cfg.c
     src/analysis/embedded_data.c
     src/analysis/smc.c
     src/analysis/symbol_map.c
@@ -263,6 +264,10 @@ add_test(NAME float_semantics COMMAND test_float_semantics)
 add_executable(test_dolir tests/test_dolir.c)
 target_link_libraries(test_dolir PRIVATE dr_ir)
 add_test(NAME dolir COMMAND test_dolir)
+
+add_executable(test_cfg tests/test_cfg.c)
+target_link_libraries(test_cfg PRIVATE dr_analysis)
+add_test(NAME cfg COMMAND test_cfg)
 
 add_executable(test_perf tests/test_perf.c)
 target_link_libraries(test_perf PRIVATE dr_common)
