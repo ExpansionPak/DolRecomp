@@ -81,8 +81,10 @@ if [ -z "$MODULE" ] || [ -z "$MANIFEST" ]; then
   exit 1
 fi
 
-regions=$(grep -c 'chunks/region_' "$MANIFEST" 2>/dev/null || echo 0)
-chunks=$(grep -c 'chunks/chunk_' "$MANIFEST" 2>/dev/null || echo 0)
+# grep -c prints 0 AND exits non-zero when nothing matches, so a trailing
+# `|| echo 0` appends a second line and the arithmetic below chokes on it.
+regions=$(grep -c 'chunks/region_' "$MANIFEST" 2>/dev/null); regions=${regions:-0}
+chunks=$(grep -c 'chunks/chunk_' "$MANIFEST" 2>/dev/null); chunks=${chunks:-0}
 
 # The check that makes the cache hazard survivable: confirm the units in the
 # manifest are the kind this configuration asked for.

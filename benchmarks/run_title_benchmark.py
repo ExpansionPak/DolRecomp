@@ -109,12 +109,18 @@ def main():
                         help="keep Dolphin's real-time throttle (measures nothing "
                              "useful for CPU work; here for comparison only)")
     parser.add_argument("--work-dir", help="scratch root (default: alongside --out)")
+    parser.add_argument("--user-dir",
+                        help="Dolphin user directory. Keep this OUTSIDE any tree "
+                             "the caller wipes between sessions: it holds the "
+                             "shader cache, and Dolphin is configured to wait for "
+                             "shaders before starting, so a cold one costs the "
+                             "first run of a session tens of percent of its fps.")
     parser.add_argument("--out", required=True, help="JSON results path")
     args = parser.parse_args()
 
     out_path = Path(args.out)
     work = Path(args.work_dir) if args.work_dir else out_path.parent / f"bench-{args.label}"
-    user_dir = work / "user"
+    user_dir = Path(args.user_dir) if args.user_dir else work / "user"
     automation_dir = work / "automation"
     # The user directory is deliberately NOT wiped between runs. Dolphin is
     # configured to wait for shaders before starting, so a cold cache turns boot
