@@ -340,8 +340,32 @@ void FunctionEmitter::computeReachingWrites() {
     std::size_t base = (std::size_t)b * DOLIR_STATE_COUNT;
     for (u32 i = 0; i < block.instruction_count; i++) {
       const DolIRInstruction &inst = block.instructions[i];
-      if (inst.op == DOLIR_OP_STATE_WRITE)
+      if (inst.op == DOLIR_OP_STATE_WRITE) {
         writes_in_block_[base + inst.aux] = 1;
+        continue;
+      }
+      // Anything that writes guest state without saying which slot makes the
+      // whole block conservatively dirty.
+      //
+      // This is the fix for the first attempt, which counted STATE_WRITE only
+      // and diverged from the C backend on 3 of 64 differential pairs. The
+      // exact-float and paired-single helpers take a slot index and write it
+      // inside the runtime; DOLIR_HELPER_PSQ_LOAD writes an FPR and its ps1
+      // lane; SPR and FPSCR helpers write theirs. scanState() enumerates those
+      // cases to build `used_`, and duplicating that enumeration here would be
+      // a second place to forget one.
+      //
+      // Marking every used slot instead gives up narrowing inside blocks that
+      // contain a helper, and keeps it for blocks that do not -- which is most
+      // of them, and all of the integer ones. After being wrong twice about how
+      // state moves, the conservative direction is the one to be wrong in.
+      if (inst.op == DOLIR_OP_HELPER_CALL ||
+          (inst.effects & DOLIR_EFFECT_WRITE_STATE)) {
+        for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
+          if (used_[slot])
+            writes_in_block_[base + slot] = 1;
+        }
+      }
     }
   }
 
@@ -627,21 +651,16 @@ void FunctionEmitter::materialize(u32 pc) {
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (!dirty_[slot])
       continue;
-    // REVERTED. Narrowing this by reaching-writes diverged from the C backend
-    // on 3 of 64 differential pairs, all in floating-point registers, and the
-    // divergent values were the original randomised inputs -- the signature of
-    // a store that should have happened and did not.
+    // Skip slots no path to here has written: CPUState already holds the value
+    // that would be stored.
     //
-    // computeReachingWrites() counts DOLIR_OP_STATE_WRITE only. Helper calls
-    // write guest state without one: the exact-float and paired-single helpers
-    // take a slot index and write it inside the runtime, and scanState() knows
-    // this (it marks used_ for them) while the reaching-writes pass did not. A
-    // slot written only by such a helper looked never-written, the store was
-    // skipped, and CPUState kept the stale entry value.
-    //
-    // Same class of error as the liveness reload: an incomplete model of how
-    // state moves. Fixing it means teaching computeReachingWrites() the helper
-    // effects, which is the same work scanState() already does.
+    // The first version of this diverged on floating-point state because it
+    // counted DOLIR_OP_STATE_WRITE only and missed helpers that write slots
+    // inside the runtime. computeReachingWrites() now treats any helper call as
+    // dirtying every slot the function uses, so a helper-written slot can never
+    // look clean.
+    if (!mayBeDirty(current_block_, static_cast<DolIRStateSlot>(slot)))
+      continue;
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
     storeContext(
         stateSlot,
