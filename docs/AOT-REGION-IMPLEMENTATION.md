@@ -205,18 +205,26 @@ So the region settings also read from the environment:
 
 | Variable | Equivalent flag |
 |---|---|
-| `DOLRECOMP_BACKEND` | `--backend` |
+| `DOLRECOMP_BACKEND` | `--backend` (fallback only) |
+| `DOLRECOMP_FORCE_BACKEND` | `--backend`, **overriding an explicit flag** |
 | `DOLRECOMP_REGION_MODE` | `--region-mode` |
 | `DOLRECOMP_REGION_MAX_INSTRUCTIONS` | `--region-max-instructions` |
 | `DOLRECOMP_REGION_MAX_IR` | `--region-max-ir` |
 | `DOLRECOMP_REGION_REPORT` | `--emit-region-report` |
 | `DOLRECOMP_PERF_REPORT` | `--perf-report` |
 
-**Precedence: an explicit flag always wins.** The environment is consulted only
-where the command line said nothing, so a script that sets `DOLRECOMP_BACKEND`
-cannot silently override a build that asked for something specific. This matches
-how the existing `DOLRECOMP_LLVM_PGO` and `DOLRECOMP_LLVM_CACHE` variables
-already work.
+**Precedence: an explicit flag always wins**, with one deliberately-named
+exception. The environment is consulted only where the command line said
+nothing, so a script that sets `DOLRECOMP_BACKEND` cannot silently override a
+build that asked for something specific. This matches how the existing
+`DOLRECOMP_LLVM_PGO` and `DOLRECOMP_LLVM_CACHE` variables already work.
+
+`DOLRECOMP_FORCE_BACKEND` is the exception and overrides an explicit flag. It
+exists for one situation: `moderngekko-port` passes `--backend=llvm` and
+validates it against its own `c|llvm` list, so the polite fallback never fires
+for it. Weakening the general precedence to accommodate that would have made
+every `DOLRECOMP_BACKEND` in a shell profile a hazard; a separate variable that
+says what it does does not.
 
 ### D5 — One X-macro is the source of truth for counters
 `DOLRECOMP_PERF_COUNTERS` in `src/common/perf.h` generates the struct, the JSON
