@@ -67,6 +67,26 @@ typedef struct {
     /* Below this weight a function is cold and is not merged into a hot
        region. Only consulted in PGO mode. */
     u64 cold_weight_threshold;
+
+    /* When the call graph runs dry before the size budget does, keep growing
+       along addresses instead of closing the region.
+     *
+     * Without this, accretion is connectivity-bound rather than size-bound: a
+     * function reached only indirectly that itself calls nothing has no
+     * call-graph neighbours at all, so it becomes a region of one. Measured on
+     * Luigi's Mansion, regions averaged 70 instructions against a limit of
+     * 1024, and the plan emitted 7,520 compilation units where the fixed arm
+     * needed 909.
+     *
+     * Merging address-adjacent code is cheap and safe: it never adds a
+     * crossing, it keeps runs contiguous so a region stays one run instead of
+     * several, and functions laid out next to each other generally came from
+     * the same translation unit. */
+    int merge_address_adjacent;
+    /* How far past a region's end the next function may start and still be
+       treated as adjacent. Covers alignment padding and small data holes;
+       beyond it the code is unrelated and merging only costs size. */
+    u32 max_adjacency_gap;
 } DolRegionLimits;
 
 /* Rough DolIR instructions emitted per guest instruction. Used only to apply

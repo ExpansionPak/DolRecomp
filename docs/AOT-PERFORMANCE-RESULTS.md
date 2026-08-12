@@ -230,6 +230,44 @@ should be scoped accordingly.
 > pipeline's predicate verbatim and the table above is the corrected
 > measurement. The planner itself did not change.
 
+### Accretion also follows addresses when the call graph runs dry
+
+Call-graph-only accretion was connectivity-bound, not size-bound: a function
+reached only indirectly that itself calls nothing has no call-graph neighbours,
+so it became a region of one. Regions averaged 70-83 instructions against a
+limit of 1024, and the plan emitted 7,520 compilation units for Luigi's Mansion
+where the fixed arm needed 909.
+
+Extending a region to the next unassigned function within 256 bytes of its end
+costs no crossing, keeps the region a single contiguous run, and exploits the
+fact that adjacent functions usually came from the same translation unit:
+
+| Title | Regions before | Regions after | Instr/region | Crossings before | Crossings after |
+|---|---:|---:|---:|---:|---:|
+| MKDD | 8,928 | **2,033** | 83 → 364 | 31,506 | 32,027 |
+| Luigi's Mansion | 7,520 | **1,724** | 70 → 307 | 24,015 | 24,287 |
+
+**4.4x fewer compilation units for 1.1-1.7% more crossings.** The small
+regression is greedy loss -- an address merge occasionally consumes a function
+that later call-graph accretion wanted -- and is worth it, because unit count
+drives object size and compile time.
+
+### Size-limit sweep, Luigi's Mansion
+
+| Limit | fixed crossings | cfg regions | cfg instr/region | cfg crossings | vs fixed |
+|---:|---:|---:|---:|---:|---:|
+| 512 | 34,431 | 2,081 | 254.6 | 26,837 | −22.1% |
+| 1024 | 31,882 | 1,724 | 307.3 | 24,287 | −23.8% |
+| 2048 | 29,977 | 1,626 | 325.8 | 22,129 | −26.2% |
+| 4096 | 27,924 | 1,632 | 324.6 | 20,747 | −25.7% |
+
+Region count and mean size **plateau at ~1,630 regions of ~325 instructions**
+beyond limit 2048, while crossings keep falling. Neither `max_instructions`
+(1024+) nor `max_functions` (64) is binding at that point -- the 256-byte
+adjacency gap is, because regions stop growing at data holes. Widening the gap
+is the next tuning lever, and it is a size-versus-crossings trade that needs the
+runtime numbers to settle rather than more static analysis.
+
 ### Call edges are counted explicitly
 
 A `CALL` block's successor is its *return point*, not its callee, so walking

@@ -21,6 +21,8 @@ void dolregion_default_limits(DolRegionLimits* limits) {
     limits->max_ir_instructions = 1024u * DOLREGION_IR_PER_GUEST_INSN * 2u;
     limits->max_functions = 64u;
     limits->cold_weight_threshold = 1u;
+    limits->merge_address_adjacent = 1;
+    limits->max_adjacency_gap = 256u;
 }
 
 bool dolregion_parse_mode(const char* text, DolRegionMode* mode) {
@@ -438,6 +440,47 @@ static bool plan_function(DolRegionPlan* plan, const DolCfgProgram* program,
     return true;
 }
 
+typedef struct {
+    u32 address;
+    u32 function;
+} FunctionByAddress;
+
+static int compare_function_by_address(const void* a, const void* b) {
+    const FunctionByAddress* left = (const FunctionByAddress*)a;
+    const FunctionByAddress* right = (const FunctionByAddress*)b;
+    if (left->address != right->address)
+        return left->address < right->address ? -1 : 1;
+    return (left->function > right->function) - (left->function < right->function);
+}
+
+/* Lowest-addressed unassigned function starting at or after `address`, within
+   `gap` bytes of it. DOLCFG_NO_BLOCK when there is none. */
+static u32 next_adjacent_function(const DolCfgProgram* program,
+                                  const DolRegionPlan* plan,
+                                  const FunctionByAddress* order, u32 order_count,
+                                  u32 address, u32 gap) {
+    u32 low = 0;
+    u32 high = order_count;
+    while (low < high) {
+        u32 mid = low + (high - low) / 2u;
+        if (order[mid].address < address)
+            low = mid + 1u;
+        else
+            high = mid;
+    }
+    for (u32 i = low; i < order_count; i++) {
+        if (order[i].address > address + gap)
+            return DOLCFG_NO_BLOCK;
+        u32 function = order[i].function;
+        if (plan->function_region[function] != DOLCFG_NO_BLOCK)
+            continue;
+        if (program->functions[function].block_count == 0)
+            continue;
+        return function;
+    }
+    return DOLCFG_NO_BLOCK;
+}
+
 static bool plan_accretive(DolRegionPlan* plan, const DolCfgProgram* program,
                            const FunctionBlocks* fb, const CallGraph* graph,
                            const DolRegionLimits* limits, bool use_weights) {
@@ -447,10 +490,18 @@ static bool plan_accretive(DolRegionPlan* plan, const DolCfgProgram* program,
         program->function_count ? program->function_count : 1u, sizeof(u8));
     u32* touched = (u32*)malloc(
         (program->function_count ? program->function_count : 1u) * sizeof(u32));
-    if (!candidate_weight || !is_candidate || !touched) {
-        free(candidate_weight); free(is_candidate); free(touched);
+    FunctionByAddress* order = (FunctionByAddress*)malloc(
+        (program->function_count ? program->function_count : 1u) * sizeof(*order));
+    if (!candidate_weight || !is_candidate || !touched || !order) {
+        free(candidate_weight); free(is_candidate); free(touched); free(order);
         return false;
     }
+    for (u32 i = 0; i < program->function_count; i++) {
+        order[i].address = program->functions[i].entry_address;
+        order[i].function = i;
+    }
+    qsort(order, program->function_count, sizeof(*order),
+          compare_function_by_address);
 
     for (u32 seed = 0; seed < program->function_count; seed++) {
         if (plan->function_region[seed] != DOLCFG_NO_BLOCK)
@@ -461,6 +512,7 @@ static bool plan_accretive(DolRegionPlan* plan, const DolCfgProgram* program,
         if (program->functions[seed].instruction_count > limits->max_instructions) {
             if (!split_large_function(plan, program, fb, seed, limits)) {
                 free(candidate_weight); free(is_candidate); free(touched);
+                free(order);
                 return false;
             }
             continue;
@@ -542,6 +594,30 @@ static bool plan_accretive(DolRegionPlan* plan, const DolCfgProgram* program,
                 }
             }
 
+            /* The call graph ran dry but the budget did not. Keep growing
+               along addresses rather than closing a region at a tenth of its
+               limit -- merging adjacent code adds no crossing and keeps the
+               region a single contiguous run. */
+            if (best == DOLCFG_NO_BLOCK && limits->merge_address_adjacent) {
+                u32 next = next_adjacent_function(
+                    program, plan, order, program->function_count,
+                    region->guest_end, limits->max_adjacency_gap);
+                if (next != DOLCFG_NO_BLOCK) {
+                    const DolCfgFunction* fn = &program->functions[next];
+                    u32 grown = region->instruction_count + fn->instruction_count;
+                    if (grown > limits->max_instructions ||
+                        grown * DOLREGION_IR_PER_GUEST_INSN >
+                            limits->max_ir_instructions) {
+                        blocked_by_size = true;
+                    } else if (use_weights && region->weight > 0 &&
+                               fn->weight < limits->cold_weight_threshold) {
+                        blocked_by_cold = true;
+                    } else {
+                        best = next;
+                    }
+                }
+            }
+
             if (best == DOLCFG_NO_BLOCK) {
                 reason = blocked_by_size ? DOLREGION_END_SIZE_LIMIT
                        : blocked_by_cold ? DOLREGION_END_COLD
@@ -551,6 +627,7 @@ static bool plan_accretive(DolRegionPlan* plan, const DolCfgProgram* program,
 
             if (!region_push_function(region, program, plan, fb, best)) {
                 free(candidate_weight); free(is_candidate); free(touched);
+                free(order);
                 return false;
             }
             is_candidate[best] = 0;
@@ -577,6 +654,7 @@ static bool plan_accretive(DolRegionPlan* plan, const DolCfgProgram* program,
     free(candidate_weight);
     free(is_candidate);
     free(touched);
+    free(order);
     return true;
 }
 
