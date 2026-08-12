@@ -378,6 +378,30 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
      * channel there is no way to build an AOT module through the existing port
      * tool, and patching ModernGekko to pass a flag through would couple the two
      * repositories for what is a benchmarking concern. */
+    /* DOLRECOMP_FORCE_BACKEND overrides even an explicit flag.
+     *
+     * It exists for exactly one situation: a caller that hardcodes --backend
+     * and validates it against its own list. moderngekko-port does both, so
+     * the polite fallback below never fires for it. Naming the override
+     * separately keeps the ordinary variable honest -- a script that sets
+     * DOLRECOMP_BACKEND still cannot silently change what a build asked for. */
+    const char* forced_backend = getenv("DOLRECOMP_FORCE_BACKEND");
+    if (forced_backend && *forced_backend) {
+        if (ascii_case_equal(forced_backend, "c")) {
+            opts->backend = DOLRECOMP_BACKEND_C;
+        } else if (ascii_case_equal(forced_backend, "llvm")) {
+            opts->backend = DOLRECOMP_BACKEND_LLVM;
+        } else if (ascii_case_equal(forced_backend, "llvm-aot") ||
+                   ascii_case_equal(forced_backend, "llvm-regions")) {
+            opts->backend = DOLRECOMP_BACKEND_LLVM_AOT;
+        } else {
+            fprintf(stderr, "error: unknown DOLRECOMP_FORCE_BACKEND '%s'\n",
+                    forced_backend);
+            return 0;
+        }
+        backend_from_cli = 1;
+    }
+
     if (!backend_from_cli) {
         const char* env_backend = getenv("DOLRECOMP_BACKEND");
         if (env_backend && *env_backend) {
