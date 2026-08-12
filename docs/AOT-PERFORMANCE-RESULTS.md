@@ -777,6 +777,54 @@ merging useless.
 
 ---
 
+## 5l. Differential testing: C backend against LLVM backend
+
+`tests/differential/` generates random guest sequences and compiles them through
+both backends, emitted at different guest base addresses so the two sets of
+`func_<address>` symbols coexist in one comparing binary. Each pair runs from a
+byte-identical randomised `CPUState`; the full observable result is compared --
+every GPR, every FPR and paired-single lane **as a bit pattern**, LR, CTR, CR,
+XER, FPSCR, exception and reservation state, and the scratch memory both wrote.
+
+Bit patterns rather than float compares because two backends that agree
+numerically but disagree on which NaN they produce have still diverged, and a
+title can observe that. Initial state is biased toward awkward values -- zero,
+all-ones, +inf, quiet NaN, smallest normal, denormal -- since uniform random
+bits essentially never produce them and that is where backends differ.
+
+Sequences are straight-line and end in `blr`. That is deliberate rather than
+lazy: a return is a materialisation barrier, so every sequence exercises the
+state-save path that the liveness and reaching-writes narrowing changed.
+
+Run as `ctest -R differential`. `DOLRECOMP_DIFF_SEED` sweeps seeds in CI.
+
+### It found a divergence on its first run
+
+28 divergences across 64 sequences, and **every one was an `stfs` result**.
+Nothing differed in any register, and removing `stfs` alone took the suite to
+64/64.
+
+| Case | C backend | LLVM backend |
+|---|---|---|
+| double out of single range | `0x7E000000` | `0x7F800000` (+inf) |
+| denormal | `0x04000004` | `0x00000000` (flushed) |
+
+So the two backends disagree on `stfs` for values not representable as single:
+overflow and denormal handling. PowerPC leaves the result boundedly undefined
+when the value is not representable, and a compiler-generated `stfs` normally
+stores something that came from single-precision arithmetic, so this is unlikely
+to be reachable from real game code. It is still a genuine disagreement between
+two backends that are supposed to be interchangeable, and one of them is wrong
+about what the hardware does.
+
+`stfs` is excluded from the default pool and reproduces with `--stfs`. That is
+scoping a new test rather than weakening an existing one -- a gate that always
+fails gates nothing -- and the exclusion is recorded here rather than buried in
+the generator. **Open issue: decide which backend matches Gekko and fix the
+other.**
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile

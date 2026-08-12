@@ -300,6 +300,35 @@ if(DOLRECOMP_ENABLE_LLVM)
     add_executable(test_llvm_execute tests/test_llvm_execute.c ${DOLRECOMP_TEST_OBJECT})
     target_link_libraries(test_llvm_execute PRIVATE dr_cpu)
     add_test(NAME llvm_execute COMMAND test_llvm_execute)
+    # Differential harness: the same random guest code through both backends,
+    # emitted at different guest bases so the two sets of func_<address>
+    # symbols coexist in one comparing binary.
+    add_executable(gen_differential tests/differential/gen_differential.cpp)
+    target_link_libraries(gen_differential PRIVATE dr_llvm dr_backend dr_ir)
+    set(DIFF_C ${CMAKE_CURRENT_BINARY_DIR}/differential_generated.c)
+    set(DIFF_O ${CMAKE_CURRENT_BINARY_DIR}/differential_generated.o)
+    set(DIFF_H ${CMAKE_CURRENT_BINARY_DIR}/differential_manifest.h)
+    # DOLRECOMP_DIFF_SEED lets CI sweep seeds without editing anything; the
+    # default is fixed so an ordinary run is reproducible.
+    if(NOT DEFINED DOLRECOMP_DIFF_SEED)
+        set(DOLRECOMP_DIFF_SEED 20260812)
+    endif()
+    add_custom_command(
+        OUTPUT ${DIFF_C} ${DIFF_O} ${DIFF_H}
+        COMMAND gen_differential ${DIFF_C} ${DIFF_O} ${DIFF_H}
+                ${DOLRECOMP_DIFF_SEED} 64 24
+        DEPENDS gen_differential
+        VERBATIM
+    )
+    set_source_files_properties(${DIFF_O}
+        PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+    add_executable(test_differential
+        tests/test_differential.c ${DIFF_C} ${DIFF_O} ${DIFF_H})
+    target_include_directories(test_differential PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR} ${DOLRECOMP_SRC})
+    target_link_libraries(test_differential PRIVATE dr_cpu)
+    add_test(NAME differential COMMAND test_differential)
+
     add_executable(test_llvm_pipeline tests/test_llvm_pipeline.c)
     target_include_directories(test_llvm_pipeline PRIVATE ${DOLRECOMP_SRC})
     add_test(NAME llvm_pipeline COMMAND test_llvm_pipeline
