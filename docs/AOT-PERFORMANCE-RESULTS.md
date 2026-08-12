@@ -386,6 +386,35 @@ brief's requirement that a region end at "excessive IR or compile-time size" is
 not satisfiable from instruction count alone -- region 526 is 944 instructions
 and 95 blocks, unremarkable by size, and took 397 s.
 
+### Where the compile time actually goes
+
+Per-region compile times from the adjacency build, bucketed by region size
+(1,724 regions, 8,086 s of CPU time, 1,147 s wall at `-j12`):
+
+| Region size | Regions | Instructions | CPU seconds | % of compile time |
+|---|---:|---:|---:|---:|
+| 0-64 | 687 | 14,737 | 23 | 0.3% |
+| 64-128 | 247 | 22,490 | 62 | 0.8% |
+| 128-256 | 208 | 38,478 | 233 | 2.9% |
+| 256-512 | 167 | 61,020 | 785 | 9.7% |
+| 512-768 | 63 | 40,062 | 778 | 9.6% |
+| **768-1100** | **352** | **352,951** | **6,205** | **76.7%** |
+
+Regions of 512 instructions or more are **24% of regions and 74% of
+instructions, but 86.4% of compile time**. Cost per instruction runs 1.6 ms in
+the smallest bucket against 17.6 ms in the largest -- **11x** -- which is the
+superlinear curve stated plainly.
+
+So instruction count *is* a usable predictor after all, contrary to the first
+read of the 397 s outlier: regions that reach the size cap dominate. The two
+extreme outliers (668 s at 848 instructions / 97 blocks, 397 s at 944 / 95) sit
+on top of that trend rather than contradicting it. Averaged over the run,
+regions taking 30 s or more hold 946 instructions and 145 blocks; regions under
+2 s hold 86 and 18.
+
+Lowering the size cap collapses the tail directly, and that is the lever to pull
+before anything more elaborate.
+
 ### Consequence
 
 Smaller regions win on build cost while giving up almost nothing in crossings.
