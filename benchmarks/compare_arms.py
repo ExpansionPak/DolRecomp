@@ -53,12 +53,27 @@ def spread(runs, key):
     return statistics.stdev(values) / statistics.mean(values) * 100.0
 
 
+# A delta has to clear twice the baseline's own spread before it is reported.
+#
+# One times the spread is not enough. An inlining A/B reported -37.3% fps against
+# a baseline whose own runs varied by 32.3%, and printed it as a result because
+# 37.3 > 32.3 -- from two modules that differed by 0.017%, so the true effect was
+# nil. Requiring 2x turns that into a blank, which is the honest answer.
+NOISE_MULTIPLE = 2.0
+
+# Above this, the arm is not measuring anything and no delta against it means
+# much regardless of size. The rig has produced 1.1% spreads and 32.3% spreads on
+# the same host in one session, so this has to be checked per comparison rather
+# than assumed once.
+UNRELIABLE_SPREAD_PCT = 10.0
+
+
 def delta(new, old, noise):
     """Percent change, or None when it does not clear the noise floor."""
     if not old or not new:
         return None
     change = (new - old) / old * 100.0
-    if abs(change) <= max(noise, 1.0):
+    if abs(change) <= max(noise * NOISE_MULTIPLE, 1.0):
         return None
     return change
 
@@ -144,8 +159,23 @@ def main():
     if comparable:
         print("Guest cycles/frame agree across arms: the scenes are comparable.")
 
+    # Say plainly when an arm's own runs disagree enough that nothing can be
+    # concluded from it, rather than leaving the reader to notice the sd column.
     print()
-    print(f"Deltas vs `{args.baseline}` (blank = inside the noise floor):")
+    for scene in scenes:
+        for arm in arms:
+            group = runs.get((scene, arm))
+            if not group or len(group) < 2:
+                continue
+            sd = spread(group, "fps")
+            if sd > UNRELIABLE_SPREAD_PCT:
+                print(f"**fps UNRELIABLE** {scene}/{arm}: own runs vary {sd:.1f}%. "
+                      f"Re-run on a quiet host before reading any fps delta "
+                      f"against this arm; the per-Mcycle counters are unaffected.")
+
+    print()
+    print(f"Deltas vs `{args.baseline}` "
+          f"(blank = under {NOISE_MULTIPLE:g}x the baseline's own spread):")
     print()
     print("| scene | arm | fps | bursts/frame | **bursts/Mcycle** | cycles/frame |")
     print("|---|---|---:|---:|---:|---:|")
