@@ -13,6 +13,9 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Analysis/ModuleSummaryAnalysis.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
+#include <llvm/IR/ModuleSummaryIndex.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/IR/PassInstrumentation.h>
 #include <llvm/Passes/PassBuilder.h>
@@ -438,6 +441,23 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
     }
     module.print(irFile, nullptr);
   }
+
+  // Bitcode emission for ThinLTO is NOT implemented. A first attempt called
+  //     llvm::buildModuleSummaryIndex(module, nullptr, nullptr)
+  // and segfaulted. That signature takes a std::function returning
+  // BlockFrequencyInfo* as its second parameter and a ProfileSummaryInfo* as
+  // its third; an empty std::function crashes when invoked, and the PSI is
+  // dereferenced rather than checked.
+  //
+  // The correct shape is either a real ProfileSummaryInfo plus a BFI callback,
+  // or -- simpler and what clang actually does -- letting
+  // ThinLTOBitcodeWriterPass build the summary as part of the pass pipeline
+  // instead of constructing the index by hand.
+  //
+  // Left unimplemented rather than half-implemented: the emit path is on every
+  // region of every build, and a crash there is worse than the absence of a
+  // feature. options.emit_bitcode is accepted and ignored.
+  (void)0;
 
   std::error_code objectError;
   llvm::raw_fd_ostream objectFile(object_path, objectError,

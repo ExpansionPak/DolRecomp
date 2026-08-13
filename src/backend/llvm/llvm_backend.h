@@ -18,6 +18,14 @@ typedef struct {
     int verify;
     int emit_ir;
     const char* ir_path;
+    /* ThinLTO needs bitcode carrying a module summary index, not plain bitcode:
+       the summary is what lets the thin link decide which callees to import
+       without reading every module's body.
+
+       NOT YET IMPLEMENTED -- these fields are accepted and ignored. See the
+       note in dolllvm_emit_object() for what the first attempt got wrong. */
+    int emit_bitcode;
+    const char* bitcode_path;
     const DolLLVMFunctionRange* function_ranges;
     u32 function_range_count;
 } DolLLVMOptions;

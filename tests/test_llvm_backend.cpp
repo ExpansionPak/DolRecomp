@@ -32,7 +32,7 @@ static bool add_chunk(DolIRModule* module, const u32* words, u32 count,
 }
 
 int main(int argc, char** argv) {
-    CHECK(argc == 3);
+    CHECK(argc == 3 || argc == 4);
     DolIRModule module;
     dolir_module_init(&module);
 
@@ -120,6 +120,13 @@ int main(int argc, char** argv) {
     options.optimization_level = 2;
     options.verify = 1;
     options.emit_ir = 1;
+    if (argc == 4) {
+        // ThinLTO needs bitcode carrying a module summary index. Emitting it
+        // here keeps the path exercised by ctest rather than only by a real
+        // title build, which takes twenty minutes to discover a mistake.
+        options.emit_bitcode = 1;
+        options.bitcode_path = argv[3];
+    }
     options.ir_path = argv[2];
     const DolLLVMFunctionRange ranges[] = {
         {0x80002D00u, 0x80002D04u},
