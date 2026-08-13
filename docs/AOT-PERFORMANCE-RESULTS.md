@@ -40,11 +40,15 @@ extrapolated, and any measurement that could not be taken on this host is marked
 
 ### Workload identity
 
-| Title | Path | SHA-256 |
-|---|---|---|
-| Mario Kart: Double Dash!! (USA) | `extracted/GM4E01/sys/main.dol` | `E96B8578451B9157E2B68FE5E918EBB572940C3EA54D6C8C7D45C24382BF12AE` |
+| Title | Console | Path | SHA-256 |
+|---|---|---|---|
+| Mario Kart: Double Dash!! (USA) | GameCube | `extracted/GM4E01/sys/main.dol` | `E96B8578451B9157E2B68FE5E918EBB572940C3EA54D6C8C7D45C24382BF12AE` |
+| Luigi's Mansion (USA) | GameCube | `extracted/Luigis-Mansion-USA/sys/main.dol` | `5FA47C058D24204697D71B8CCBFA3FD246CF513FD0A34425983F182BA1465276` |
+| The Legend of Zelda: Skyward Sword (USA) | Wii | `extracted/Zelda-Skyward-Sword-USA/sys/main.dol` | `57A306B5E688EBE0F055FFEB026A614BC398BE9FF24E10E3F04737547B99E4E9` |
 
-Supplied locally. **Not committed**, and not required by CI.
+All supplied locally. **Not committed**, and not required by CI. Skyward Sword
+is the only Wii title here, and the only one where MEM2 is allocated and the
+MEM2 lowering path actually executes.
 
 ---
 
@@ -1151,23 +1155,34 @@ loads `ram_size` and does two. The MEM2 path keeps its dynamic form, because
 
 ### Results
 
-Both titles, `cfg` mode, 1024 instructions, same tree and object cache:
+Three titles across both console generations, `cfg` mode, 1024 instructions,
+same tree and object cache within each title:
 
-| | Luigi's Mansion | Mario Kart |
-|---|---|---|
-| module, safe | 251,288,064 B | 444,321,280 B |
-| module, fast | 235,978,240 B | 424,067,584 B |
-| **size delta** | **-6.1%** | **-4.6%** |
-| **fps** | **+6.7%** | **+6.7%** |
-| **guest cycles/sec** | **+9.4%** | **+10.0%** |
-| pairs favouring fast | 11/12 | 15/18 |
-| sign test | p = 0.0063 | p = 0.0075 |
+| | Luigi's Mansion | Mario Kart | Skyward Sword |
+|---|---|---|---|
+| console | GameCube | GameCube | **Wii** |
+| regions | 1,724 | 2,033 | 3,589 |
+| module, safe | 251,288,064 B | 444,321,280 B | 688,384,000 B |
+| module, fast | 235,978,240 B | 424,067,584 B | 654,508,032 B |
+| **size delta** | **-6.1%** | **-4.6%** | **-4.9%** |
+| **fps** | **+6.7%** | **+6.7%** | **+5.0%** |
+| **guest cycles/sec** | **+9.4%** | **+10.0%** | **+6.6%** |
+| pairs favouring fast | 11/12 | 15/18 | 17/19 |
+| sign test | p = 0.0063 | p = 0.0075 | p = 0.0007 |
 
-Combined: **26 of 30 pairs, p = 0.000059**. Both titles land on +6.7% fps
-independently, which is the agreement that makes the result credible.
+Combined: **43 of 49 pairs, p = 5.7e-08**. Each title clears significance on its
+own, and the three land between +5.0% and +6.7% fps -- that agreement across
+independent workloads is what makes the result credible, not the pooled p-value.
 
-The safe arm of each title reproduces that title's earlier module size exactly
-(251,288,064 and 444,321,280), so the default path is provably unchanged.
+Skyward Sword is the one that extends the claim rather than repeating it. It is
+a Wii title, so `exram` is actually allocated and the MEM2 path executes; on the
+two GameCube titles that path is dead code. Fast mode folds only the MEM1 bound
+and leaves MEM2 fully dynamic, because `exram_size` genuinely varies -- and
+`fallback` was 0 across all 49 Skyward Sword runs, so the guard confirms both
+assumptions hold on Wii too. It also uses RELs, so relocated code is covered.
+
+The safe arm of each title reproduces that title's earlier module size exactly,
+so the default path is provably unchanged.
 
 ### Why the analysis is paired
 
@@ -1287,8 +1302,8 @@ a conclusion.
 
 ### Recommendation
 
-* **`--memory-mode fast` is the default.** +6.7% on both titles independently
-  (§5q), one consistent story, assumptions verified at runtime.
+* **`--memory-mode fast` is the default.** +5.0% to +6.7% on three titles
+  independently (§5q), one consistent story, assumptions verified at runtime.
 * **Leave `--lto thin` off.** It has never shown a runtime benefit alone (§5p),
   and on top of the memory mode it helps one title and hurts the other. Its
   size win is real and reproducible; its speed effect is title-dependent and
@@ -1355,9 +1370,11 @@ Identified, not yet addressed:
 1. **128-instruction chunk boundaries** (§4) — the dominant architectural cost.
 2. ~~**`g_mem_write_journal` checked on every store**~~ — addressed by
    `--memory-mode fast` (§5q), together with folding the MEM1 bound. Measured
-   +6.7% fps on both titles, p = 0.000059 combined. Off by default because it
-   assumes no write journal; the generated code verifies that at runtime and
-   falls back to the interpreter rather than trusting it.
+   +5.0% to +6.7% fps on three titles, 43 of 49 pairs, p = 5.7e-08 combined.
+   **Now the default.** The generated code verifies its two assumptions at
+   runtime and falls back to the interpreter rather than trusting them; build
+   with `--memory-mode safe` for lockstep verification, which is the one
+   consumer that installs a journal.
 3. **No cross-chunk direct calls by default** — gated behind
    `DOLRECOMP_UNSAFE_DIRECT_CALLS` because it bypasses chassis dispatch
    validation. Phase 3 makes this safe and default.
