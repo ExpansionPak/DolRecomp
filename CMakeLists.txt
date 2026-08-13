@@ -53,7 +53,7 @@ endif()
 
 set(DOLRECOMP_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-add_library(dr_common STATIC src/common/perf.c)
+add_library(dr_common STATIC src/common/perf.c src/common/options.c)
 target_include_directories(dr_common PUBLIC ${DOLRECOMP_SRC})
 
 add_library(dr_cpu STATIC src/cpu/cpu.c)
@@ -102,7 +102,7 @@ if(DOLRECOMP_ENABLE_LLVM)
     target_include_directories(dr_llvm SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
     target_compile_definitions(dr_llvm PUBLIC DOLRECOMP_ENABLE_LLVM=1)
     target_compile_definitions(dr_llvm PRIVATE ${LLVM_DEFINITIONS})
-    target_link_libraries(dr_llvm PUBLIC dr_ir)
+    target_link_libraries(dr_llvm PUBLIC dr_ir dr_common)
     if(MINGW)
         find_library(DOLRECOMP_LLVM_SHARED_IMPORT
             NAMES LLVM-${LLVM_VERSION_MAJOR} LLVM
@@ -143,7 +143,7 @@ add_library(dr_backend STATIC
     src/backend/symbols.c
 )
 target_include_directories(dr_backend PUBLIC ${DOLRECOMP_SRC})
-target_link_libraries(dr_backend PUBLIC dr_frontend dr_analysis)
+target_link_libraries(dr_backend PUBLIC dr_frontend dr_analysis dr_common)
 if(NOT WIN32)
     target_link_libraries(dr_backend PUBLIC Threads::Threads)
 endif()

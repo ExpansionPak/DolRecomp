@@ -1,4 +1,5 @@
 #include "backend/llvm/llvm_backend.h"
+#include "common/options.h"
 #include "backend/llvm/llvm_function_emitter.h"
 
 #include <memory>
@@ -581,7 +582,10 @@ extern "C" bool dolllvm_codegen_fingerprint(char *out, size_t size) {
            ? "|narrow=1" : "") +
       (std::getenv("DOLRECOMP_INLINE_REGIONS") &&
                std::getenv("DOLRECOMP_INLINE_REGIONS")[0] == '1'
-           ? "|inline=1" : "");
+           ? "|inline=1" : "") +
+      // --memory-mode fast changes the body of every load and store, so a
+      // cached safe-mode object is not a valid answer for a fast-mode build.
+      (memory_mode_is_fast() ? "|mem=fast" : "");
   if (fingerprint.size() + 1 > size)
     return false;
   memcpy(out, fingerprint.c_str(), fingerprint.size() + 1);

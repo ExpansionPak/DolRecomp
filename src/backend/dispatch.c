@@ -1,4 +1,6 @@
 #include "backend/dispatch.h"
+#include "common/options.h"
+#include "cpu/cpu.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -418,6 +420,51 @@ static void emit_lookup_linear(FILE* out, const FunctionList* funcs) {
     fprintf(out, "}\n");
 }
 
+/* The fast memory mode bakes two runtime facts into every load and store (see
+   memoryModeFast() in llvm_memory_lowering.cpp). Baking in an assumption that
+   silently stops holding is how a recompiler corrupts guest memory, so the
+   generated code checks both once and refuses to run natively if either fails:
+   returning 0 from dolrecomp_call leaves the chassis interpreting, which is
+   slow but right.
+
+   Checked once rather than per access. The flag is written only after a
+   successful check, so the cost on the hot path is one predictable branch on a
+   value that never changes. */
+static void emit_memory_mode_guard(FILE* out) {
+    if (!memory_mode_is_fast()) {
+        fprintf(out, "\nstatic inline int dolrecomp_memory_mode_ok(CPUState* ctx) {\n");
+        fprintf(out, "    (void)ctx;\n");
+        fprintf(out, "    return 1;\n");
+        fprintf(out, "}\n");
+        return;
+    }
+    fprintf(out, "\n/* Built with --memory-mode fast. */\n");
+    /* Only in fast mode: the guard is the sole user of stdio in generated
+       output, and a default build's header must stay byte-identical to what it
+       emitted before this option existed. */
+    fprintf(out, "#include <stdio.h>\n");
+    fprintf(out, "static int dolrecomp_memory_mode_state = 0;\n");
+    fprintf(out, "static int dolrecomp_memory_mode_check(CPUState* ctx) {\n");
+    fprintf(out, "    if (ctx->ram_size != %uu) {\n", (unsigned)GC_MAIN_RAM_SIZE);
+    fprintf(out, "        fprintf(stderr, \"dolrecomp: --memory-mode fast expects ram_size %%u,\"\n");
+    fprintf(out, "                        \" runtime has %%u; falling back to the interpreter\\n\",\n");
+    fprintf(out, "                %uu, ctx->ram_size);\n", (unsigned)GC_MAIN_RAM_SIZE);
+    fprintf(out, "        return -1;\n");
+    fprintf(out, "    }\n");
+    fprintf(out, "    if (g_mem_write_journal) {\n");
+    fprintf(out, "        fprintf(stderr, \"dolrecomp: --memory-mode fast omits the write journal,\"\n");
+    fprintf(out, "                        \" but one is installed; falling back to the interpreter\\n\");\n");
+    fprintf(out, "        return -1;\n");
+    fprintf(out, "    }\n");
+    fprintf(out, "    return 1;\n");
+    fprintf(out, "}\n");
+    fprintf(out, "static inline int dolrecomp_memory_mode_ok(CPUState* ctx) {\n");
+    fprintf(out, "    if (dolrecomp_memory_mode_state == 0)\n");
+    fprintf(out, "        dolrecomp_memory_mode_state = dolrecomp_memory_mode_check(ctx);\n");
+    fprintf(out, "    return dolrecomp_memory_mode_state > 0;\n");
+    fprintf(out, "}\n");
+}
+
 void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point) {
     fprintf(out, "\n#define DOLRECOMP_ENTRY_POINT 0x%08Xu\n", entry_point);
     fprintf(out, "\ntypedef void (*DolRecompFunction)(CPUState* ctx);\n");
@@ -464,9 +511,13 @@ void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point
     fprintf(out, "    }\n");
     fprintf(out, "    return false;\n");
     fprintf(out, "}\n");
+    emit_memory_mode_guard(out);
     fprintf(out, "\nstatic inline int dolrecomp_call(CPUState* ctx, u32 address) {\n");
     fprintf(out, "    u32 alias;\n");
     fprintf(out, "    ctx->pc = address;\n");
+    /* Before any generated body runs, so a runtime that violates the fast
+       mode's assumptions never executes code built on them. */
+    fprintf(out, "    if (!dolrecomp_memory_mode_ok(ctx)) return 0;\n");
     fprintf(out, "    if (dolrecomp_dispatch_replacement(ctx, address)) return 1;\n");
     fprintf(out, "    if (ctx->host_call && ppc_host_call(ctx, address)) return 1;\n");
     fprintf(out, "    if (dolrecomp_call_original(ctx, address)) return 1;\n");

@@ -1,5 +1,8 @@
 #include "backend/llvm/llvm_function_emitter.h"
+#include "common/options.h"
 #include "cpu/cpu.h"
+
+#include <cstdlib>
 
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
@@ -9,6 +12,30 @@
 namespace dolllvm {
 
 using namespace llvm;
+
+// Guest memory lowering mode.
+//
+// safe (default) reads every bound out of CPUState on every access and checks
+// the write journal on every MEM1 store, assuming nothing about the runtime.
+//
+// fast trades two assumptions for a much shorter fast path, and both are
+// verified once at dispatch entry rather than assumed -- see
+// emit_memory_mode_guard() in src/backend/dispatch.c. If either fails the
+// module refuses to run natively and the chassis keeps interpreting, so a
+// violated assumption costs speed and not correctness:
+//
+//   1. ctx->ram_size == GC_MAIN_RAM_SIZE. True in both this tree and
+//      GXRuntime: assigned once in cpu_init, carried across cpu_reset, never
+//      given another value. Folding it removes a CPUState load per access and
+//      collapses the bounds check to a single compare against a constant --
+//      the "size >= width" half is constant-true for any width <= 24 MB.
+//   2. g_mem_write_journal == NULL. Lets the journal branch leave the MEM1
+//      store path entirely. A runtime that installs a journal (savestate
+//      diffing, netplay) must build with the safe mode.
+bool memoryModeFast() {
+  static const bool enabled = memory_mode_is_fast() != 0;
+  return enabled;
+}
 
 Value *FunctionEmitter::normalizeAddress(Value *address) {
   return builder_.CreateAnd(address, builder_.getInt32(~0x40000000u));
@@ -77,8 +104,10 @@ Value *FunctionEmitter::externalRead(Value *address, u32 width) {
 Value *FunctionEmitter::emitGuestLoad(Value *address, Type *resultType,
                                       u32 width, bool sign) {
   Value *normalized = normalizeAddress(address);
-  Value *ramSize =
-      loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, ram_size));
+  Value *ramSize = memoryModeFast()
+                       ? cast<Value>(builder_.getInt32(GC_MAIN_RAM_SIZE))
+                       : loadOffset(Type::getInt32Ty(context_),
+                                    offsetof(CPUState, ram_size));
   Value *exramSize =
       loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exram_size));
   Value *mem1 = rangeCheck(normalized, GC_RAM_BASE, ramSize, width);
@@ -149,6 +178,8 @@ void FunctionEmitter::clearReservation(Value *address) {
 }
 
 void FunctionEmitter::journal(Value *offset, u32 width) {
+  if (memoryModeFast())
+    return;
   Type *ptr = PointerType::getUnqual(context_);
   GlobalVariable *journal = cast<GlobalVariable>(
       module_.getOrInsertGlobal("g_mem_write_journal", ptr));
@@ -218,8 +249,10 @@ void FunctionEmitter::externalWrite(Value *address, Value *value, u32 width) {
 void FunctionEmitter::emitGuestStore(Value *address, Value *value, u32 width) {
   clearReservation(address);
   Value *normalized = normalizeAddress(address);
-  Value *ramSize =
-      loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, ram_size));
+  Value *ramSize = memoryModeFast()
+                       ? cast<Value>(builder_.getInt32(GC_MAIN_RAM_SIZE))
+                       : loadOffset(Type::getInt32Ty(context_),
+                                    offsetof(CPUState, ram_size));
   Value *exramSize =
       loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exram_size));
   BasicBlock *mem1Block = BasicBlock::Create(context_, "store_mem1", function_);

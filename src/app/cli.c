@@ -343,6 +343,27 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             continue;
         }
 
+        /* Unlike the region options this applies to every backend, so it is
+           deliberately not behind the --backend llvm-aot guard. */
+        if (strcmp(arg, "--memory-mode") == 0 ||
+            strncmp(arg, "--memory-mode=", 14) == 0) {
+            if (arg[13] == '=') {
+                opts->memory_mode_arg = arg + 14;
+            } else {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "error: --memory-mode needs safe or fast\n");
+                    return 0;
+                }
+                opts->memory_mode_arg = argv[++i];
+            }
+            if (strcmp(opts->memory_mode_arg, "safe") &&
+                strcmp(opts->memory_mode_arg, "fast")) {
+                fprintf(stderr, "error: --memory-mode must be safe or fast\n");
+                return 0;
+            }
+            continue;
+        }
+
         if (strcmp(arg, "--region-profile") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "error: --region-profile needs a path\n");
@@ -480,6 +501,11 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
         const char* value = getenv("DOLRECOMP_LTO");
         if (value && *value)
             opts->lto_mode_arg = value;
+    }
+    if (!opts->memory_mode_arg) {
+        const char* value = getenv("DOLRECOMP_MEMORY_MODE");
+        if (value && *value)
+            opts->memory_mode_arg = value;
     }
     if (!opts->region_profile_path) {
         const char* value = getenv("DOLRECOMP_REGION_PROFILE");

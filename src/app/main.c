@@ -36,6 +36,18 @@ static int run_recompile(int argc, char** argv, CliOptions* opts_out) {
     region_options.lto_mode = opts.lto_mode_arg;
     pipeline_set_region_options(&region_options);
 
+    /* The emitters read the mode through common/options.h, which reads the
+       environment, so an explicit flag is published there. CLI wins over an
+       inherited value: moderngekko-port sets its own environment and a stale
+       DOLRECOMP_MEMORY_MODE would otherwise outrank what was asked for. */
+    if (opts.memory_mode_arg) {
+#if defined(_WIN32)
+        _putenv_s("DOLRECOMP_MEMORY_MODE", opts.memory_mode_arg);
+#else
+        setenv("DOLRECOMP_MEMORY_MODE", opts.memory_mode_arg, 1);
+#endif
+    }
+
     if (!region_options.enabled &&
         (opts.region_mode_arg || opts.region_report_path || opts.region_profile_path ||
          opts.lto_mode_arg ||
