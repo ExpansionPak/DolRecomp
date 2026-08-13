@@ -592,7 +592,10 @@ extern "C" bool dolllvm_codegen_fingerprint(char *out, size_t size) {
       (memory_mode_is_fast() ? "|mem=fast" : "|mem=safe") +
       // Suppresses every direct call, so it changes far more emitted code than
       // any other flag here.
-      (replacements_enabled() ? "|repl=1" : "");
+      (replacements_enabled() ? "|repl=1" : "") +
+      // Changes the signature of every internal region body, so a cached object
+      // from the other setting is not merely slower, it is incompatible.
+      (reg_args_enabled() ? "|regargs=1" : "");
   if (fingerprint.size() + 1 > size)
     return false;
   memcpy(out, fingerprint.c_str(), fingerprint.size() + 1);

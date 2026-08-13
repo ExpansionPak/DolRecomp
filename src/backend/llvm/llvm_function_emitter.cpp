@@ -1,4 +1,5 @@
 #include "backend/llvm/llvm_function_emitter.h"
+#include "common/options.h"
 #include "cpu/cpu.h"
 
 #include <cstdio>
@@ -49,6 +50,29 @@ static bool inlineRegions() {
   return enabled;
 }
 
+// Pass guest state in registers across the private fastcc boundary (D3).
+//
+// ENTRY SIDE ONLY, and the asymmetry is deliberate. The caller materializes
+// before a direct call, so CPUState and the incoming parameters agree by
+// construction -- seeding the callee's slots from parameters is then provably
+// equivalent to loading them, and saves the loads.
+//
+// Returning them is NOT symmetric and is not done here. Every return site in
+// the body sits after a helper that may have written CPUState (fallback,
+// external read/write, FP-unavailable, system call, rfi), so alloca values at
+// those points can be stale; returning them would hand the caller stale state.
+// Making them current means either reloading from CPUState at each return site
+// -- there are more return sites than call sites, so that costs more than it
+// saves -- or a staleness analysis, which is the analysis this emitter has got
+// wrong twice (see materialize()). The return side stays on CPUState until the
+// successor model is derived from the emitter's own edges rather than
+// reconstructed alongside them.
+//   DOLRECOMP_REG_ARGS=1
+static bool regArgs() {
+  static const bool enabled = reg_args_enabled() != 0;
+  return enabled;
+}
+
 FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
                                  const DolIRFunction &source,
                                  const DolLLVMFunctionRange *ranges,
@@ -58,8 +82,10 @@ FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
 
 bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   auto *pointer = PointerType::getUnqual(context_);
-  auto *type = FunctionType::get(Type::getVoidTy(context_),
-                                 {pointer, pointer, pointer}, false);
+  SmallVector<Type *, 11> params{pointer, pointer, pointer};
+  if (regArgs())
+    params.append(kRegArgCount, Type::getInt32Ty(context_));
+  auto *type = FunctionType::get(Type::getVoidTy(context_), params, false);
   const std::string bodyName = std::string(source_.name) + "_budget";
   function_ = module_.getFunction(bodyName);
   if (!function_)
@@ -73,12 +99,9 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   // convention because that is the ModernGekko ABI and mods, hooks and the
   // dispatcher all call through it.
   //
-  // This is the first step of the private internal ABI (D3). On its own it only
-  // frees the register allocator to place the three pointer arguments, which is
-  // marginal. The substantive version passes live guest state in registers
-  // instead of through CPUState, and that needs correct cross-region live-in
-  // and live-out sets -- the analysis this emitter has now got wrong twice, so
-  // it is deliberately not attempted here.
+  // The private internal ABI (D3). With DOLRECOMP_REG_ARGS the signature also
+  // carries GPR3..GPR10, so a direct call hands them over in registers rather
+  // than through CPUState. See regArgs() above for why only the entry side.
   function_->setCallingConv(CallingConv::Fast);
   function_->setVisibility(GlobalValue::HiddenVisibility);
   function_->setDSOLocal(true);
@@ -135,8 +158,20 @@ bool FunctionEmitter::emitWrapper(raw_ostream &diagnostics) {
       builder.CreateAlloca(Type::getInt64Ty(context_), nullptr, "guard_steps");
   builder.CreateStore(builder.getInt64(0), guardCycles);
   builder.CreateStore(builder.getInt64(0), guardSteps);
-  CallInst *body =
-      builder.CreateCall(function_, {wrapper->getArg(0), guardCycles, guardSteps});
+  SmallVector<Value *, 11> arguments{wrapper->getArg(0), guardCycles,
+                                     guardSteps};
+  if (regArgs()) {
+    // The public entry point is reached from the dispatcher, so CPUState is the
+    // only source for these.
+    for (u32 i = 0; i < kRegArgCount; i++) {
+      auto stateSlot = static_cast<DolIRStateSlot>(kRegArgFirst + i);
+      Value *address = builder.CreateConstInBoundsGEP1_64(
+          Type::getInt8Ty(context_), wrapper->getArg(0), stateOffset(stateSlot));
+      arguments.push_back(
+          builder.CreateLoad(Type::getInt32Ty(context_), address));
+    }
+  }
+  CallInst *body = builder.CreateCall(function_, arguments);
   body->setCallingConv(CallingConv::Fast);
   builder.CreateRetVoid();
   return !verifyFunction(*wrapper, &diagnostics);
@@ -680,6 +715,16 @@ void FunctionEmitter::scanLoopHeaders() {
   }
 }
 
+// The caller's current value for a register-carried slot. Uses the local slot
+// when the function tracks it, and CPUState otherwise -- a function that never
+// touches GPR5 still has to forward whatever GPR5 held.
+Value *FunctionEmitter::regArgValue(u32 index) {
+  auto stateSlot = static_cast<DolIRStateSlot>(kRegArgFirst + index);
+  if (state_[kRegArgFirst + index])
+    return stateValue(stateSlot);
+  return loadContext(stateSlot);
+}
+
 void FunctionEmitter::emitEntry() {
   builder_.SetInsertPoint(entry_);
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
@@ -688,7 +733,14 @@ void FunctionEmitter::emitEntry() {
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
     state_[slot] = builder_.CreateAlloca(type(dolir_state_type(stateSlot)),
                                          nullptr, "state");
-    builder_.CreateStore(loadContext(stateSlot), state_[slot]);
+    // Equivalent to loadContext, because every caller materializes before the
+    // call and the public wrapper loads these from CPUState -- so the parameter
+    // and CPUState hold the same value here. It just avoids the load.
+    Value *initial = nullptr;
+    if (regArgs() && slot >= kRegArgFirst && slot < kRegArgFirst + kRegArgCount)
+      initial = function_->getArg(3u + (slot - kRegArgFirst));
+    builder_.CreateStore(initial ? initial : loadContext(stateSlot),
+                         state_[slot]);
   }
   cycles_ =
       builder_.CreateAlloca(Type::getInt64Ty(context_), nullptr, "cycles");

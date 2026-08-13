@@ -22,3 +22,8 @@ int replacements_enabled(void) {
     const char* value = getenv("DOLRECOMP_ENABLE_REPLACEMENTS");
     return value && value[0] && value[0] != '0';
 }
+
+int reg_args_enabled(void) {
+    const char* value = getenv("DOLRECOMP_REG_ARGS");
+    return value && value[0] == '1';
+}

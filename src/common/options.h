@@ -18,6 +18,13 @@ int memory_mode_is_fast(void);
    its chance; a direct call would bypass it silently. */
 int replacements_enabled(void);
 
+/* Pass GPR3..GPR10 in registers across the private fastcc boundary, from
+   DOLRECOMP_REG_ARGS. Caller and callee build the callee's signature
+   independently, in different translation units and different object files, so
+   this must have exactly one definition -- a disagreement is a wrong call
+   across an object boundary with no diagnostic. */
+int reg_args_enabled(void);
+
 #ifdef __cplusplus
 }
 #endif

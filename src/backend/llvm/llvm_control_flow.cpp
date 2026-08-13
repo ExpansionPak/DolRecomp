@@ -2,6 +2,8 @@
 #include "common/options.h"
 #include "cpu/cpu.h"
 
+#include <llvm/ADT/SmallVector.h>
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -14,6 +16,13 @@
 namespace dolllvm {
 
 using namespace llvm;
+
+// Both sides resolve through common/options.h, so caller and callee cannot
+// disagree about the signature.
+static bool regArgs() {
+  static const bool enabled = reg_args_enabled() != 0;
+  return enabled;
+}
 
 BasicBlock *FunctionEmitter::directDestination(const DolIRTerminator &term,
                                                u32 slot) {
@@ -87,11 +96,13 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   materialize(target);
   char name[64];
   snprintf(name, sizeof(name), "func_%08X_budget", range->start);
+  SmallVector<Type *, 11> calleeParams{PointerType::getUnqual(context_),
+                                       PointerType::getUnqual(context_),
+                                       PointerType::getUnqual(context_)};
+  if (regArgs())
+    calleeParams.append(kRegArgCount, Type::getInt32Ty(context_));
   auto callee = module_.getOrInsertFunction(
-      name, FunctionType::get(Type::getVoidTy(context_),
-                              {PointerType::getUnqual(context_),
-                               PointerType::getUnqual(context_),
-                               PointerType::getUnqual(context_)}, false));
+      name, FunctionType::get(Type::getVoidTy(context_), calleeParams, false));
   if (auto *calleeFunction = dyn_cast<Function>(callee.getCallee())) {
     calleeFunction->setVisibility(GlobalValue::HiddenVisibility);
     calleeFunction->setDSOLocal(true);
@@ -99,7 +110,14 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
     // merely slow.
     calleeFunction->setCallingConv(CallingConv::Fast);
   }
-  CallInst *direct = builder_.CreateCall(callee, {ctx_, guard_cycles_, guard_steps_});
+  // materialize() ran just above, so these are the values CPUState now holds.
+  // Handing them over in registers saves the callee the loads; it does not
+  // change what the callee sees.
+  SmallVector<Value *, 11> arguments{ctx_, guard_cycles_, guard_steps_};
+  if (regArgs())
+    for (u32 i = 0; i < kRegArgCount; i++)
+      arguments.push_back(regArgValue(i));
+  CallInst *direct = builder_.CreateCall(callee, arguments);
   direct->setCallingConv(CallingConv::Fast);
   if (!term.linked) {
     builder_.CreateRetVoid();

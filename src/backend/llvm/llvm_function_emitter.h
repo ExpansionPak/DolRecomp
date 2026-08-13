@@ -60,6 +60,17 @@ private:
   void scanContinuations();
   void scanLoopHeaders();
 
+  // Guest state carried in registers across the private fastcc boundary
+  // instead of through CPUState. GPR3..GPR10 are the PowerPC argument and
+  // return registers, so they are exactly the slots a guest call passes.
+  //
+  // The set is fixed and identical for every region because caller and callee
+  // are compiled into separate objects and must agree on the signature without
+  // whole-program knowledge.
+  static constexpr u32 kRegArgFirst = DOLIR_STATE_GPR0 + 3u;
+  static constexpr u32 kRegArgCount = 8u;
+  llvm::Value *regArgValue(u32 index);
+
   void emitEntry();
   bool emitWrapper(llvm::raw_ostream &diagnostics);
   void chargeCycles(u32 cycles);
