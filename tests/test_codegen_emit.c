@@ -193,7 +193,7 @@ int main(int argc, char** argv) {
         if (out != stdout) fclose(out);
         return 1;
     }
-    emit_dispatch_helpers(out, &funcs, BASE);
+    emit_dispatch_helpers(out, &funcs, BASE, 0);
     function_list_free(&funcs);
 
     emit_footer(out);

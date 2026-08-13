@@ -9,6 +9,7 @@
 #include "frontend/container/rpx.h"
 #include "backend/emitter.h"
 #include "backend/dispatch.h"
+#include "common/options.h"
 #include "backend/codegen.h"
 #include "backend/symbols.h"
 #include "analysis/code_section.h"
@@ -1041,7 +1042,7 @@ static int emit_llvm_regions(const LoadedCodeSection* sections, u32 section_coun
             printf("warning: executable memory writes detected; report: %s\n", report);
     }
 
-    emit_dispatch_helpers(header, &funcs, entry_point);
+    emit_dispatch_helpers(header, &funcs, entry_point, memory_mode_is_fast());
     emit_footer(header);
     fprintf(manifest, "\n// %u native objects\n", file_count);
     printf("done!\n  header: %s\n  objects: %s (%u files)\n", header_path,
@@ -1354,7 +1355,7 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
         if (smc.possible)
         printf("warning: executable memory writes detected; report: %s\n", report);
     }
-    emit_dispatch_helpers(header, &funcs, entry_point);
+    emit_dispatch_helpers(header, &funcs, entry_point, memory_mode_is_fast());
     emit_footer(header);
     fprintf(manifest, "\n// %u native objects\n", file_count);
     fclose(header);
@@ -1724,7 +1725,7 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
         }
     }
 
-    emit_dispatch_helpers(header, &funcs, entry_point);
+    emit_dispatch_helpers(header, &funcs, entry_point, 0);
     emit_footer(header);
     smc_analysis_free(&smc);
     function_list_free(&funcs);

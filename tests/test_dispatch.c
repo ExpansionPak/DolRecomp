@@ -57,7 +57,7 @@ static char* emit_dispatch_to_string(void) {
     emit_chunk_prototype(f, BASE + 0x40u);
     emit_chunk_prototype(f, BASE + 0x80u);
     emit_chunk_prototype(f, BASE + 0x1000u);
-    emit_dispatch_helpers(f, &funcs, BASE);
+    emit_dispatch_helpers(f, &funcs, BASE, 0);
     function_list_free(&funcs);
     fflush(f);
 

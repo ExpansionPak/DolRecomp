@@ -21,7 +21,7 @@ extrapolated, and any measurement that could not be taken on this host is marked
 | Target CPU / features | LLVM defaults; not yet overridable (Phase 6 adds `--target-cpu` / `--target-features`) |
 | PGO | off (`DOLRECOMP_LLVM_PGO` unset) |
 | LTO | off by default; `--lto thin` available (§5p) |
-| Memory mode | safe by default; `--memory-mode fast` available (§5q) |
+| Memory mode | **fast by default** (§5q); `--memory-mode safe` opts out |
 | Region mode | `fixed` (only mode that exists at this commit) |
 | Mod policy | compatible (only mode that exists) |
 | Memory mode | safe (only mode that exists) |
@@ -1187,6 +1187,21 @@ wall second is throughput of the work the backend actually performs.
 `benchmarks/paired_arms.py` implements this, including the `bursts/Mcycle`
 filter that drops pairs where either run executed a different scene.
 
+### Default, and the one thing that has to be built safe
+
+Fast is the default as of this commit; `--memory-mode safe` opts out.
+
+The only in-tree consumer that installs a write journal is ModernGekko's
+lockstep verifier, and only when `STATICRECOMP_LOCKSTEP` is set. Nothing in
+ordinary play does -- not savestates, not netplay. But lockstep is the harness
+that compares the module against Dolphin's interpreter, so a fast module makes
+it inert: the guard refuses native execution and says so on stderr. **Build with
+`--memory-mode safe` to run lockstep verification.**
+
+The guard is emitted only by the LLVM backends, which are the ones that lower
+memory this way. The C backend reads its bounds from `CPUState` whatever the
+mode, so it carries no guard and stays usable as the lockstep reference.
+
 ### Correctness
 
 This is the change in the project most capable of silently corrupting guest
@@ -1272,8 +1287,8 @@ a conclusion.
 
 ### Recommendation
 
-* **Ship `--memory-mode fast`.** +6.7% on both titles independently (§5q), one
-  consistent story, assumptions verified at runtime.
+* **`--memory-mode fast` is the default.** +6.7% on both titles independently
+  (§5q), one consistent story, assumptions verified at runtime.
 * **Leave `--lto thin` off.** It has never shown a runtime benefit alone (§5p),
   and on top of the memory mode it helps one title and hurts the other. Its
   size win is real and reproducible; its speed effect is title-dependent and

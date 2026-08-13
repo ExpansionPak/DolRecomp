@@ -22,6 +22,7 @@
 extern "C" {
 #include "backend/emitter.h"
 #include "backend/dispatch.h"
+#include "common/options.h"
 }
 #include "backend/llvm/llvm_backend.h"
 #include "ir/dolir_builder.h"
@@ -226,7 +227,10 @@ int main(int argc, char** argv) {
         CHECK(function_list_add(&funcs, address,
                                 address + (u32)bodies[f].size() * 4u));
     }
-    emit_dispatch_helpers(out, &funcs, kBaseC);
+    /* Matches the LLVM arm's lowering, so the harness exercises whatever the
+       default mode emits. The CPUState here is a real cpu_init with no journal
+       installed, so the guard passes and both arms run natively. */
+    emit_dispatch_helpers(out, &funcs, kBaseC, memory_mode_is_fast());
     function_list_free(&funcs);
 
     for (u32 f = 0; f < functions; f++) {

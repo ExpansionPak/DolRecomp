@@ -430,8 +430,8 @@ static void emit_lookup_linear(FILE* out, const FunctionList* funcs) {
    Checked once rather than per access. The flag is written only after a
    successful check, so the cost on the hot path is one predictable branch on a
    value that never changes. */
-static void emit_memory_mode_guard(FILE* out) {
-    if (!memory_mode_is_fast()) {
+static void emit_memory_mode_guard(FILE* out, int uses_fast_memory) {
+    if (!uses_fast_memory) {
         fprintf(out, "\nstatic inline int dolrecomp_memory_mode_ok(CPUState* ctx) {\n");
         fprintf(out, "    (void)ctx;\n");
         fprintf(out, "    return 1;\n");
@@ -465,7 +465,8 @@ static void emit_memory_mode_guard(FILE* out) {
     fprintf(out, "}\n");
 }
 
-void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point) {
+void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point,
+                           int uses_fast_memory) {
     fprintf(out, "\n#define DOLRECOMP_ENTRY_POINT 0x%08Xu\n", entry_point);
     fprintf(out, "\ntypedef void (*DolRecompFunction)(CPUState* ctx);\n");
     fprintf(out, "\n#if defined(__GNUC__) || defined(__clang__)\n");
@@ -511,7 +512,7 @@ void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point
     fprintf(out, "    }\n");
     fprintf(out, "    return false;\n");
     fprintf(out, "}\n");
-    emit_memory_mode_guard(out);
+    emit_memory_mode_guard(out, uses_fast_memory);
     fprintf(out, "\nstatic inline int dolrecomp_call(CPUState* ctx, u32 address) {\n");
     fprintf(out, "    u32 alias;\n");
     fprintf(out, "    ctx->pc = address;\n");

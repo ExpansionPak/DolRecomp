@@ -583,9 +583,13 @@ extern "C" bool dolllvm_codegen_fingerprint(char *out, size_t size) {
       (std::getenv("DOLRECOMP_INLINE_REGIONS") &&
                std::getenv("DOLRECOMP_INLINE_REGIONS")[0] == '1'
            ? "|inline=1" : "") +
-      // --memory-mode fast changes the body of every load and store, so a
-      // cached safe-mode object is not a valid answer for a fast-mode build.
-      (memory_mode_is_fast() ? "|mem=fast" : "");
+      // --memory-mode changes the body of every load and store, so a cached
+      // object from one mode is not a valid answer for a build in the other.
+      // Both modes are marked, unlike the other flags here: objects predating
+      // this option were emitted in safe mode and carried no marker, so
+      // leaving the new default unmarked would let them satisfy a fast-mode
+      // build. Marking both invalidates those once, which is the point.
+      (memory_mode_is_fast() ? "|mem=fast" : "|mem=safe");
   if (fingerprint.size() + 1 > size)
     return false;
   memcpy(out, fingerprint.c_str(), fingerprint.size() + 1);
