@@ -67,6 +67,20 @@ else
   export DOLRECOMP_FORCE_BACKEND="$BACKEND"
 fi
 
+# moderngekko-port runs whatever dolrecomp.exe sits next to it, so a build can
+# silently use a stale recompiler -- which is how a --lto thin run once produced
+# 1724 objects and zero bitcode with no error anywhere. Keep the sibling binary
+# current with the one just compiled.
+DOLRECOMP_EXE="${DOLRECOMP_EXE:-$(dirname "$0")/../build/dolrecomp.exe}"
+if [ -f "$DOLRECOMP_EXE" ]; then
+  if [ "$DOLRECOMP_EXE" -nt "$(dirname "$PORT")/dolrecomp.exe" ]; then
+    cp "$DOLRECOMP_EXE" "$(dirname "$PORT")/dolrecomp.exe" || exit 1
+    echo "[$SLUG] refreshed dolrecomp.exe beside moderngekko-port"
+  fi
+else
+  echo "[$SLUG] WARNING: no dolrecomp.exe at $DOLRECOMP_EXE; using whatever is beside the port"
+fi
+
 mkdir -p "$OUT"
 echo "[$SLUG] building into $OUT"
 start=$(date +%s)
