@@ -1218,6 +1218,75 @@ per-access overhead was.
 
 ---
 
+## 5r. Composing the two: sizes add, speed does not, and the titles disagree
+
+`--lto thin` and `--memory-mode fast` are orthogonal -- one removes redundant
+code across region boundaries, the other removes work inside every access -- so
+the obvious question is whether they compose.
+
+### Size: yes, almost exactly multiplicatively
+
+| | Luigi's Mansion | Mario Kart |
+|---|---|---|
+| baseline (safe, no LTO) | 251,288,064 B | 444,321,280 B |
+| `--memory-mode fast` | -6.1% | -4.6% |
+| `--lto thin` | -5.6% | -6.1% |
+| **both** | **-11.2%** | **-10.5%** |
+| predicted if independent | -11.4% | -10.4% |
+
+Build cost is the price: MKDD takes 3302 s with both against 928 s for the
+plain baseline, roughly 3.5x.
+
+### Speed: the two titles disagree, and both results are significant
+
+Measured as **combined vs `--memory-mode fast` alone**, which isolates what
+ThinLTO contributes on top of the memory work:
+
+| | Luigi's Mansion | Mario Kart |
+|---|---|---|
+| fps | **-4.1%** | **+2.5%** |
+| guest cycles/sec | -5.3% | +3.0% |
+| pairs favouring combined | 1 / 21 | 18 / 22 |
+| sign test | p = 0.00001 | p = 0.0043 |
+
+Not noise on either side: LM is negative in 20 of 21 pairs, MKDD positive in 18
+of 22. Adding ThinLTO on top of the memory fast path **costs 4% on one title and
+gains 2.5% on the other**, and the smaller module is the slower one on LM.
+
+`fallback` is 0 and `native` comparable across both arms of both titles, so this
+is not a module quietly falling back to the interpreter.
+
+### No mechanism is claimed
+
+An earlier draft of this section explained the LM regression as cross-module
+inlining merging live ranges -- the same effect behind E002/E003, where
+1024-instruction chunks cost 3x the code size of 128 for a third less speed.
+That story was written from the LM result alone and MKDD then pointed the other
+way, so it is **withdrawn**: it explains one title and contradicts the other.
+The E002/E003 finding stands on its own evidence; there is no evidence it is
+what is happening here.
+
+Establishing the real mechanism needs per-title inlining statistics and
+profile-guided attribution, which is future work rather than a guess recorded as
+a conclusion.
+
+### Recommendation
+
+* **Ship `--memory-mode fast`.** +6.7% on both titles independently (§5q), one
+  consistent story, assumptions verified at runtime.
+* **Leave `--lto thin` off.** It has never shown a runtime benefit alone (§5p),
+  and on top of the memory mode it helps one title and hurts the other. Its
+  size win is real and reproducible; its speed effect is title-dependent and
+  unpredictable, which is not a default anyone should get by accident.
+* Anyone shipping a specific title can measure the combination for that title.
+  That is the only way to know which side of this it falls on.
+
+This is the clearest argument in the whole document for the brief's insistence
+on two titles. Either title alone would have produced a confident, significant,
+and wrong general conclusion.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
