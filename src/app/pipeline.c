@@ -154,6 +154,10 @@ typedef struct {
     char name[128];
     char path[1400];
     char cache_path[1400];
+    /* Empty unless --lto thin. Emitted alongside the object, never instead of
+       it: the object keeps the build linkable while the thin link is developed,
+       and the two are verified byte-identical with and without bitcode. */
+    char bitcode_path[1400];
 } LLVMChunkJob;
 
 /* Uniform access to a job's runs whether or not it carries an explicit list. */
@@ -337,6 +341,12 @@ static u64 llvm_job_hash(const LLVMChunkJob* job) {
         hash = hash_bytes(hash, codegen, strlen(codegen));
     u32 opt_level = (u32)DOLLLVM_OPT_LEVEL;
     hash = hash_bytes(hash, &opt_level, sizeof(opt_level));
+    /* A cached object from an --lto off build has no bitcode beside it, so
+       reusing it under --lto thin would leave the thin link with a hole and no
+       error. The mode is part of what the artifacts are, not just how they were
+       made. */
+    u32 has_bitcode = job->bitcode_path[0] ? 1u : 0u;
+    hash = hash_bytes(hash, &has_bitcode, sizeof(has_bitcode));
     /* Every run, and the run partition itself: two regions covering the same
        instructions in a different grouping generate different code, so they
        must not collide in the cache. */
@@ -387,12 +397,33 @@ static int llvm_cache_dir(char* path, size_t size) {
     return make_dir_tree(path);
 }
 
+/* The cache stores one object per key. Under --lto thin a key also owns a
+   bitcode file, and a hit that restored only the object would leave the thin
+   link short a summary with nothing to indicate it -- so both move together, or
+   the job recompiles. */
+static int cache_bitcode_path(const LLVMChunkJob* job, char* out, size_t size) {
+    if (!job->cache_path[0] || !job->bitcode_path[0])
+        return 0;
+    return snprintf(out, size, "%s.bc", job->cache_path) < (int)size;
+}
+
 static int reuse_llvm_object(const LLVMChunkJob* job) {
+    char cached_bitcode[1440];
+    int wants_bitcode = job->bitcode_path[0] != 0;
+    if (wants_bitcode && !cache_bitcode_path(job, cached_bitcode,
+                                             sizeof(cached_bitcode)))
+        return 0;
     if (getenv("DOLRECOMP_LLVM_RESUME") && valid_object_file(job->path) &&
-        valid_llvm_job_stamp(job))
+        valid_llvm_job_stamp(job) &&
+        (!wants_bitcode || file_exists(job->bitcode_path)))
         return 1;
-    if (!job->cache_path[0] || !valid_object_file(job->cache_path) ||
-        !copy_file(job->cache_path, job->path))
+    if (!job->cache_path[0] || !valid_object_file(job->cache_path))
+        return 0;
+    if (wants_bitcode && !file_exists(cached_bitcode))
+        return 0;
+    if (!copy_file(job->cache_path, job->path))
+        return 0;
+    if (wants_bitcode && !copy_file(cached_bitcode, job->bitcode_path))
         return 0;
     write_llvm_job_stamp(job);
     return 1;
@@ -413,7 +444,21 @@ static void cache_llvm_object(const LLVMChunkJob* job) {
     remove(temp);
     if (!copy_file(job->path, temp))
         return;
-    if (rename(temp, job->cache_path) != 0)
+    if (rename(temp, job->cache_path) != 0) {
+        remove(temp);
+        return;
+    }
+    char cached_bitcode[1440];
+    if (!cache_bitcode_path(job, cached_bitcode, sizeof(cached_bitcode)) ||
+        file_exists(cached_bitcode))
+        return;
+    if (snprintf(temp, sizeof(temp), "%s.tmp.%d", cached_bitcode, process_id) >=
+        (int)sizeof(temp))
+        return;
+    remove(temp);
+    if (!copy_file(job->bitcode_path, temp))
+        return;
+    if (rename(temp, cached_bitcode) != 0)
         remove(temp);
 }
 
@@ -471,6 +516,10 @@ static int emit_llvm_chunk_job(const void* data, void* user) {
     options.verify = 1;
     options.function_ranges = job->ranges;
     options.function_range_count = job->range_count;
+    if (job->bitcode_path[0]) {
+        options.emit_bitcode = 1;
+        options.bitcode_path = job->bitcode_path;
+    }
     char ir_path[1440];
     const char* dump_ir = getenv("DOLRECOMP_LLVM_DUMP_IR");
     if (dump_ir && (!strcmp(dump_ir, "1") || strstr(job->name, dump_ir))) {
@@ -773,6 +822,8 @@ static int emit_llvm_regions(const LoadedCodeSection* sections, u32 section_coun
         goto done;
     }
 
+    const int thin_lto = options->lto_mode && !strcmp(options->lto_mode, "thin");
+
     DolRegionLimits limits;
     dolregion_default_limits(&limits);
     if (options->max_instructions)
@@ -907,6 +958,13 @@ static int emit_llvm_regions(const LoadedCodeSection* sections, u32 section_coun
             !join_path(job->path, sizeof(job->path), chunks_dir, job->name))
             goto done;
 
+        /* Beside the object and named for the same region, so the thin link
+           can pair them by directory listing. */
+        if (thin_lto &&
+            snprintf(job->bitcode_path, sizeof(job->bitcode_path), "%s.bc",
+                     job->path) >= (int)sizeof(job->bitcode_path))
+            job->bitcode_path[0] = '\0';
+
         job->hash = llvm_job_hash(job);
         if (cache_dir[0]) {
             char cache_name[64];
@@ -930,13 +988,21 @@ static int emit_llvm_regions(const LoadedCodeSection* sections, u32 section_coun
            path, so an appended "(N runs)" became part of the filename and the
            configure failed looking for "region_000000_80003100.o (16 runs)".
            Run counts belong in the region report, which already carries them. */
-        fprintf(manifest, "// object: chunks/%s\n", job->name);
+        /* Under --lto thin the manifest names the bitcode instead. lld reads
+           bitcode inputs natively and runs ThinLTO on them, so the link stage
+           needs no in-process LTO driver and the module template needs no
+           change: it still just forwards each listed file to the linker.
+           The object is still written beside it, so a build can fall back by
+           rerunning with --lto off without recompiling. */
+        fprintf(manifest, "// object: chunks/%s%s\n", job->name,
+                thin_lto && job->bitcode_path[0] ? ".bc" : "");
         file_count++;
     }
 
     u32 active_jobs = effective_chunk_jobs(plan.region_count, requested_jobs);
-    printf("  writing %u LLVM region objects with %u job%s\n", plan.region_count,
-           active_jobs, active_jobs == 1 ? "" : "s");
+    printf("  writing %u LLVM region objects with %u job%s%s\n",
+           plan.region_count, active_jobs, active_jobs == 1 ? "" : "s",
+           thin_lto ? " (+ThinLTO bitcode)" : "");
 
     cached_before_run = (unsigned char*)calloc(
         plan.region_count ? plan.region_count : 1u, 1u);

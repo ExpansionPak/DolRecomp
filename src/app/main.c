@@ -33,10 +33,12 @@ static int run_recompile(int argc, char** argv, CliOptions* opts_out) {
     region_options.max_ir_instructions = opts.region_max_ir;
     region_options.report_path = opts.region_report_path;
     region_options.profile_path = opts.region_profile_path;
+    region_options.lto_mode = opts.lto_mode_arg;
     pipeline_set_region_options(&region_options);
 
     if (!region_options.enabled &&
         (opts.region_mode_arg || opts.region_report_path || opts.region_profile_path ||
+         opts.lto_mode_arg ||
          opts.region_max_instructions || opts.region_max_ir)) {
         fprintf(stderr,
                 "error: region options require --backend llvm-aot\n");

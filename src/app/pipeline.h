@@ -22,6 +22,11 @@ typedef struct {
     u32 max_ir_instructions;  /* 0 -> planner default */
     const char* report_path;  /* NULL -> no report */
     const char* profile_path; /* NULL -> no weights; pgo mode degrades */
+    /* "off" (default) or "thin". Thin emits per-region bitcode carrying a
+       module summary alongside the object, which is what a thin link consumes.
+       The object is still emitted and still byte-identical, so a thin build
+       links today either way. */
+    const char* lto_mode;
 } DolRecompRegionOptions;
 
 void pipeline_set_region_options(const DolRecompRegionOptions* options);

@@ -16,7 +16,11 @@
 # producing a module that is not what the caller asked for.
 #
 # Usage:
-#   build_module.sh <game-root> <out-root> <backend> [region-mode] [max-instructions] [max-ir]
+#   build_module.sh <game-root> <out-root> <backend> [region-mode] [max-instructions] [max-ir] [lto]
+#
+# lto: off | thin. Under thin the manifest names bitcode, so the link runs
+# ThinLTO inside lld -- which makes it a different artifact from the same
+# region settings, hence part of the slug.
 #
 # backend: c | llvm | llvm-aot
 set -uo pipefail
@@ -27,6 +31,7 @@ BACKEND="${3:?missing backend}"
 REGION_MODE="${4:-}"
 MAX_INSTR="${5:-}"
 MAX_IR="${6:-}"
+LTO="${7:-}"
 
 MG_ROOT="${MG_ROOT:-C:/Users/douglaswhittingham/luigis-mansion-recomp/lib/ModernGekko}"
 PORT="$MG_ROOT/build/moderngekko-port.exe"
@@ -43,19 +48,21 @@ SLUG="$BACKEND"
 [ -n "$REGION_MODE" ] && SLUG="$SLUG-$REGION_MODE"
 [ -n "$MAX_INSTR" ] && SLUG="$SLUG-i$MAX_INSTR"
 [ -n "$MAX_IR" ] && SLUG="$SLUG-ir$MAX_IR"
+[ -n "$LTO" ] && SLUG="$SLUG-lto$LTO"
 OUT="$OUT_ROOT/$SLUG"
 
 # moderngekko-port validates --backend against its own c|llvm list, so an AOT
 # build asks for llvm and overrides it out of band.
 PORT_BACKEND="$BACKEND"
 unset DOLRECOMP_FORCE_BACKEND DOLRECOMP_REGION_MODE
-unset DOLRECOMP_REGION_MAX_INSTRUCTIONS DOLRECOMP_REGION_MAX_IR
+unset DOLRECOMP_REGION_MAX_INSTRUCTIONS DOLRECOMP_REGION_MAX_IR DOLRECOMP_LTO
 if [ "$BACKEND" = "llvm-aot" ]; then
   PORT_BACKEND="llvm"
   export DOLRECOMP_FORCE_BACKEND=llvm-aot
   [ -n "$REGION_MODE" ] && export DOLRECOMP_REGION_MODE="$REGION_MODE"
   [ -n "$MAX_INSTR" ] && export DOLRECOMP_REGION_MAX_INSTRUCTIONS="$MAX_INSTR"
   [ -n "$MAX_IR" ] && export DOLRECOMP_REGION_MAX_IR="$MAX_IR"
+  [ -n "$LTO" ] && export DOLRECOMP_LTO="$LTO"
 else
   export DOLRECOMP_FORCE_BACKEND="$BACKEND"
 fi

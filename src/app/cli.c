@@ -21,6 +21,7 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  --region-max-ir N              Estimated DolIR instructions per region\n");
     fprintf(stderr, "  --region-profile <path>        Execution weights for --region-mode pgo\n");
     fprintf(stderr, "  --emit-region-report <path>    Write the region plan as JSON\n");
+    fprintf(stderr, "  --lto off|thin                 Emit ThinLTO bitcode beside each region object\n");
     fprintf(stderr, "  --gamecube                     GameCube mode (no title ID required)\n");
     fprintf(stderr, "  --rel-base <addr>              Override first virtual load address for REL codegen\n");
     fprintf(stderr, "  --map <path>                   Load optional function names from a linker MAP\n");
@@ -318,6 +319,30 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             continue;
         }
 
+        if (strcmp(arg, "--lto") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --lto needs off or thin\n");
+                return 0;
+            }
+            opts->lto_mode_arg = argv[++i];
+            if (strcmp(opts->lto_mode_arg, "off") &&
+                strcmp(opts->lto_mode_arg, "thin")) {
+                fprintf(stderr, "error: --lto must be off or thin\n");
+                return 0;
+            }
+            continue;
+        }
+
+        if (strncmp(arg, "--lto=", 6) == 0) {
+            opts->lto_mode_arg = arg + 6;
+            if (strcmp(opts->lto_mode_arg, "off") &&
+                strcmp(opts->lto_mode_arg, "thin")) {
+                fprintf(stderr, "error: --lto must be off or thin\n");
+                return 0;
+            }
+            continue;
+        }
+
         if (strcmp(arg, "--region-profile") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "error: --region-profile needs a path\n");
@@ -450,6 +475,11 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
         if (value && *value &&
             !parse_u32_arg(value, "DOLRECOMP_REGION_MAX_IR", &opts->region_max_ir))
             return 0;
+    }
+    if (!opts->lto_mode_arg) {
+        const char* value = getenv("DOLRECOMP_LTO");
+        if (value && *value)
+            opts->lto_mode_arg = value;
     }
     if (!opts->region_profile_path) {
         const char* value = getenv("DOLRECOMP_REGION_PROFILE");
