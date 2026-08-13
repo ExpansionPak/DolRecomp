@@ -17,3 +17,8 @@ int memory_mode_is_fast(void) {
     const char* value = getenv("DOLRECOMP_MEMORY_MODE");
     return !(value && value[0] == 's');
 }
+
+int replacements_enabled(void) {
+    const char* value = getenv("DOLRECOMP_ENABLE_REPLACEMENTS");
+    return value && value[0] && value[0] != '0';
+}

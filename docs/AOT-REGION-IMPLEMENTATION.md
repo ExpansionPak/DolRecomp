@@ -257,7 +257,13 @@ where things actually stand.
       ground the region backend lost rather than beating the baseline.
 - [x] **Materialize narrowing** — store side of every barrier skips slots no
       path has written. Sound argument, differential-tested on straight-line
-      sequences, **not** validated on a real title.
+      sequences, **not** validated on a real title. Gated off by default.
+- [x] **Phase 5** — `--memory-mode fast`, now the default. +5.0% to +6.7% fps
+      across three titles on both consoles, 43 of 49 paired runs, p = 5.7e-08.
+      The first change of this effort with a measured speed win.
+- [x] **Phase 6** — ThinLTO bitcode and link, PGO region seeding, cache keys.
+      ~6% smaller modules; runtime effect title-dependent, so `--lto thin` stays
+      off. AArch64 not validatable on this host.
 
 ### Reverted
 
@@ -276,23 +282,72 @@ where things actually stand.
 | `bctr`/jump-table specialisation | 0.17% of weighted execution on MKDD |
 | Address-adjacency merging | 2.2x build time, +6.3% size, +1.1% crossings |
 
+### Phases 2, 3 and 4 — closed
+
+**Phase 2 (region-level SSA guest state, materialization barriers): closed.**
+DolIR was already SSA-shaped (§1.2) and the backend already promoted guest state
+to per-slot allocas cleaned up by mem2reg, so the phase's substance existed
+before it started; what it added was the single auditable barrier of D2 and two
+attempts to narrow it. Store-side narrowing landed and is **gated off**: -4.3%
+module size for +50% build time, `bursts/Mcycle` unchanged. Load-side narrowing
+was reverted as unsound. Nothing here is outstanding -- the remaining cost is
+the round trip itself, not the barrier's width, and that is Phase 3's item.
+
+**Phase 3 (direct native linking, patchability policies): closed.**
+Direct cross-region calls, `fastcc` on internal bodies, and ThinLTO for
+cross-module inlining all landed. The linking half is done and measured; see
+AOT-PERFORMANCE-RESULTS.md §5p.
+
+The patchability half was undefined and is now explicit. A direct call jumps to
+`func_XXXXXXXX_budget` and therefore does **not** pass
+`dolrecomp_dispatch_replacement`, `ppc_host_call`, or the physical-alias retry.
+That is sound only while nothing in the module can be replaced at runtime, which
+is true today -- the module template never defines
+`DOLRECOMP_ENABLE_REPLACEMENTS`, the check compiles to a stub returning 0, and
+`StaticRecompModuleDesc` exposes no way to register a replacement. It would stop
+being true the moment replacements were switched on, and the failure mode is a
+mod that installs and silently does nothing.
+
+So the policy is now enforced rather than assumed: `DOLRECOMP_ENABLE_REPLACEMENTS`
+suppresses every direct external transfer (they leave through the dispatcher
+instead) **and** emits the matching define into the generated header, so the two
+cannot diverge. It is in the codegen fingerprint. Verified on the cross-chunk
+fixture: the two external call sites disappear, the public wrappers do not.
+
+**Phase 4 (indirect calls, jump tables, blr, O(1) dispatch): closed, one item
+deliberately not pursued.**
+O(1) dispatch landed and is the one unambiguous performance fix of the region
+work -- worth 8x on irregular plans, now adaptive by default. Jump-table and
+`bctr` specialisation was measured at 0.17% of weighted execution on Mario Kart
+and abandoned; indirect transfers already lower to a switch over known
+continuations.
+
+`blr` is 10.95% of weighted execution and is **not** addressed, on purpose. A
+`blr` already returns natively to its LLVM caller, so the classic fix -- a
+shadow return stack -- targets a cost the direct-call lowering had already
+removed. What a `blr` actually pays is the materialize, which makes it the same
+problem as the per-call round trip below, not a separate one.
+
 ### Live leads, in priority order
 
-1. **Call-path differential coverage.** Blocking everything below it. Dispatch
-   helpers alone do not fix it -- tried, still hangs, see the note in
-   `gen_differential.cpp`. Start from two functions and one call.
-2. **Per-call state round trip.** `materialize` -> call -> returned-PC check ->
+1. **Per-call state round trip.** `materialize` -> call -> returned-PC check ->
    reload, paid per executed call. Calls are 7.79% and returns 10.95% of
-   weighted execution. The private `fastcc` ABI (D3) is the real fix; the
-   store-side narrowing already landed is a fraction of it.
-3. **`blr` handling** at 10.95%. Note that a `blr` already returns natively to
-   its LLVM caller, so shadow return stacks address a cost the direct-call
-   lowering removed. What it pays is the materialize.
-4. Phase 5 memory lowering and Phase 6 ThinLTO/AArch64, untouched.
+   weighted execution. The private `fastcc` ABI passing live state in registers
+   (D3) is the real fix; `fastcc` itself landed but the signature is still
+   `(ctx, guard_cycles, guard_steps)`, so no state travels in registers yet.
+   This is the largest identified remaining cost.
+2. **Call-path differential coverage** is now in place (calls with LR save and
+   restore through a shared dispatch loop), so item 1 is no longer blocked.
+3. **Fastmem.** §D6's guarded fastmem is what `--memory-mode fast` implements.
+   Mapped fastmem -- a reserved address space with guest faults handled by
+   SEH/signals -- removes the bounds check entirely rather than shortening it,
+   and is the next structural step for memory. Unstarted.
 
 ### Correctness debt
 
-- Call/return path has no differential coverage (see 1 above).
+- ~~Call/return path has no differential coverage.~~ Closed: the differential
+  harness emits calls with LR saved and restored around them, both arms driven
+  by a shared dispatch loop.
 - `stfs` diverges between backends on overflow and denormal input; excluded from
   the default differential pool, reproduces with `--stfs`. One backend is wrong
   about Gekko and it is not yet known which.

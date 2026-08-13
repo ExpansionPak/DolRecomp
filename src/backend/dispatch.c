@@ -474,6 +474,13 @@ void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point
     fprintf(out, "#else\n");
     fprintf(out, "#define DOLRECOMP_UNUSED\n");
     fprintf(out, "#endif\n");
+    /* One switch, not two. The emitter suppresses direct calls when
+       replacements are on (replacementsEnabled() in llvm_control_flow.cpp) and
+       the generated header defines the macro to match. Left independent, a
+       module could be compiled with replacements active while its call sites
+       were emitted to bypass them -- a mod that installs and does nothing. */
+    if (replacements_enabled())
+        fprintf(out, "\n#define DOLRECOMP_ENABLE_REPLACEMENTS 1\n");
     fprintf(out, "\n#if defined(DOLRECOMP_ENABLE_REPLACEMENTS)\n");
     fprintf(out, "int dolrecomp_dispatch_replacement(CPUState* ctx, u32 address);\n");
     fprintf(out, "#else\n");

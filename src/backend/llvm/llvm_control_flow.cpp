@@ -1,7 +1,9 @@
 #include "backend/llvm/llvm_function_emitter.h"
+#include "common/options.h"
 #include "cpu/cpu.h"
 
 #include <cstdio>
+#include <cstdlib>
 
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
@@ -48,8 +50,31 @@ const DolLLVMFunctionRange *FunctionEmitter::rangeFor(u32 address) const {
   return nullptr;
 }
 
+// Patchability policy for direct calls.
+//
+// A direct call goes straight to func_XXXXXXXX_budget and therefore does NOT
+// pass dolrecomp_dispatch_replacement, ppc_host_call, or the physical-alias
+// retry that dolrecomp_call performs. That is sound only while no address in
+// this module can be replaced at runtime.
+//
+// Today it is: the module template never defines DOLRECOMP_ENABLE_REPLACEMENTS,
+// so the generated dispatcher compiles the replacement check to a stub that
+// returns 0, and StaticRecompModuleDesc exposes no way to register one. But a
+// build that turns replacements on would get its replacements silently ignored
+// at every direct call site -- a mod that appears installed and does nothing.
+//
+// So the policy is explicit rather than incidental: when replacements are
+// enabled, every external transfer leaves through the dispatcher. Returning
+// nullptr here makes the caller emit a side exit, which is exactly that.
+static bool replacementsEnabled() {
+  static const bool enabled = replacements_enabled() != 0;
+  return enabled;
+}
+
 BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
                                                  u32 slot) {
+  if (replacementsEnabled())
+    return nullptr;
   u32 target = term.target_addresses[slot];
   const DolLLVMFunctionRange *range = rangeFor(target);
   if (!range)

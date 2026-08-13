@@ -13,6 +13,11 @@ extern "C" {
    answer. */
 int memory_mode_is_fast(void);
 
+/* Runtime function replacement, from DOLRECOMP_ENABLE_REPLACEMENTS. When on,
+   external transfers must leave through the dispatcher so a replacement gets
+   its chance; a direct call would bypass it silently. */
+int replacements_enabled(void);
+
 #ifdef __cplusplus
 }
 #endif
