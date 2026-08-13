@@ -1018,6 +1018,30 @@ subsumes part of the ABI question, since an inlined callee needs no ABI at all.
 The flag stays, off by default, because it costs nothing when off and becomes
 meaningful the moment ThinLTO lands.
 
+### The A/B confirms it, and calibrates the rig
+
+| Arm | fps | fps sd% | bursts/Mcycle | cycles/frame |
+|---|---:|---:|---:|---:|
+| noinline | 43.27 | **32.3%** | 172.5 | 10.40M |
+| inline | 27.14 | 4.7% | 179.1 | 10.03M |
+
+**No result is read from the fps column.** The baseline arm's run-to-run spread
+is 32.3%; a -37% delta against a baseline that varies by a third is noise, and
+the two modules differ by 0.017% so a real 37% gap between near-identical code
+would be extraordinary. `bursts/Mcycle` moved +3.9%, inside the 167-181 band
+every arm has occupied all session.
+
+The more useful finding is about the instrument. **A 32.3% spread on a
+nominally idle host means the 1.1-1.8% noise floor measured earlier does not
+hold across sessions**, and every fps-based comparison in this document should
+be read with that in mind. It is why the per-frame and per-Mcycle counters lead
+the tables: `cycles/frame` agreed to 3.6% across these arms while fps disagreed
+by 37%, and only one of those two numbers can be describing the machine.
+
+Anything intended as a real speed claim needs the noise floor re-established in
+the same session, from repeated runs of the *same* module, before the arms are
+compared.
+
 ---
 
 ## 6. Runtime counters
