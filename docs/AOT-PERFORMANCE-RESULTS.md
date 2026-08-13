@@ -981,6 +981,45 @@ all.
 
 ---
 
+## 5o. Cross-region inlining needs ThinLTO, and that is why Phase 6 exists
+
+With the internal bodies on `fastcc`, dropping `NoInline` should let LLVM inline
+a small or hot callee across a region boundary -- removing the call entirely
+rather than making it cheaper, which is the only thing that eliminates a whole
+state round trip.
+
+Measured on Mario Kart at cap 1024:
+
+| Arm | Module size | Build time |
+|---|---:|---:|
+| default | 444,321,280 | 1,024 s |
+| `DOLRECOMP_INLINE_REGIONS=1` | 444,395,008 | 1,123 s |
+| | **+0.017%** | +10% |
+
+**Nothing was inlined.** A 73 KB delta across a 444 MB module is noise.
+
+The reason is structural rather than a tuning problem. Each region is emitted as
+its own LLVM module and its own object file. A cross-region call targets
+`func_XXXXXXXX_budget` in a *different translation unit*, and LLVM cannot inline
+across object boundaries at all without link-time optimisation. Dropping
+`NoInline` only ever enabled inlining between the runs inside one region, which
+is a small population and evidently not a profitable one.
+
+So the direct-linking benefit the brief describes -- "permit LLVM to inline small
+or hot callees" -- is **not reachable from the emitter**. It is reachable only
+from the ThinLTO stage in Phase 6, which is precisely the phase that imports hot
+callees across module boundaries and internalises what is not exported.
+
+This reorders the remaining work. The register-passing ABI still stands on its
+own: passing live state in registers shrinks each call that survives. But
+*removing* calls -- the larger prize -- requires ThinLTO first, and ThinLTO also
+subsumes part of the ABI question, since an inlined callee needs no ABI at all.
+
+The flag stays, off by default, because it costs nothing when off and becomes
+meaningful the moment ThinLTO lands.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
