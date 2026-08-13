@@ -22,6 +22,36 @@ from collections import defaultdict
 from pathlib import Path
 
 
+# A run marked valid still only compares to another run that did the same guest
+# work. cycles/frame and bursts/Mcycle are backend-invariant for a fixed scene,
+# so a run that strays from what the other runs of that scene report executed
+# something else -- one LM run read 134 fps at 92.6 bursts/Mcycle against
+# everyone else's 153.8, and taken at face value it turned a -4% result into
+# +46%. Outliers are dropped against the median of the runs seen so far rather
+# than a hardcoded band, so this needs no per-title tuning.
+CYCLES_TOLERANCE = 0.08
+BURST_TOLERANCE = 0.05
+
+
+def comparable(data, seen):
+    reference = [r for group in seen.values() for r in group]
+    if len(reference) < 3:
+        return True
+    for key, tolerance in (("cycles_per_frame", CYCLES_TOLERANCE),
+                           ("bursts_per_mcycle", BURST_TOLERANCE)):
+        value = data.get(key)
+        others = [r[key] for r in reference if r.get(key)]
+        if not value or not others:
+            continue
+        middle = statistics.median(others)
+        if middle and abs(value - middle) / middle > tolerance:
+            print(f"  dropping {data.get('label')}: {key}={value:.4g} "
+                  f"differs from {middle:.4g} by more than "
+                  f"{tolerance:.0%} -- different guest work, not a faster run")
+            return False
+    return True
+
+
 def load(directory):
     runs = defaultdict(list)
     for path in sorted(Path(directory).glob("*.json")):
@@ -30,6 +60,8 @@ def load(directory):
         except Exception:
             continue
         if not data.get("valid", True):
+            continue
+        if not comparable(data, runs):
             continue
         label = data.get("label", path.stem)
         parts = label.split("-")

@@ -1044,6 +1044,69 @@ compared.
 
 ---
 
+## 5p. ThinLTO: 5.6% smaller, no readable runtime change
+
+`--lto thin` writes a `.bc` beside each region object via
+`ThinLTOBitcodeWriterPass` and points the object manifest at the bitcode. lld
+consumes bitcode inputs natively, so the link stage needs no in-process
+`lto::LTO` driver and the ModernGekko module template needs no change — it still
+just forwards each listed file to the linker. Verified with `llvm-bcanalyzer`
+that every emitted file carries `GLOBALVAL_SUMMARY_BLOCK`; the LM build fed
+1724/1724 bitcode files through the link.
+
+Luigi's Mansion, `cfg` mode, 1024 instructions, 1724 regions, same tree and same
+object cache for both arms:
+
+| | `--lto off` | `--lto thin` | delta |
+|---|---|---|---|
+| module | 251,288,064 B | 237,308,928 B | **-5.6%** |
+| build | 869 s | 1609 s | **+85%** |
+
+The size drop is real cross-region code elimination, and it is the first result
+that moves at all where emitter-level inlining managed +0.017% (§5o) — which is
+what established that this work needed ThinLTO rather than a smarter emitter.
+
+The runtime result is nothing. Fifteen runs, alternating arms against the pinned
+`bench.sav` scene, after dropping runs that did not do comparable guest work:
+
+| arm | valid runs | mean fps | spread |
+|---|---|---|---|
+| `off` | 5 | 29.86 | 17.0% |
+| `thin` | 6 | 28.57 | 18.4% |
+
+delta -4.3% against a 36.7% guard: **unreadable**. `bursts/Mcycle` is 153.7-153.8
+on every kept run in both arms, so ThinLTO does not change dispatcher behaviour
+either — expected, since it is a codegen-quality change and not a control-flow
+one.
+
+Two runs had to be discarded for reasons worth recording, because taken at face
+value they would have produced a headline:
+
+* An LM run read **134.44 fps** — a 4.5x "win". Its cycles/frame sat inside the
+  comparable band, but its `bursts/Mcycle` was 92.6 against everyone else's
+  153.8. It executed something else. Including it turned the arm mean from
+  28.57 to 43.70 and the delta from -4.3% to **+46.4%**.
+* An early pass had one valid `off` sample against two `thin` samples and read
+  +36%. That is the same shape as the retracted -22.1% dispatcher claim in §5g:
+  a difference between arms that were not running the same thing.
+
+`benchmarks/compare_arms.py` now drops runs whose `cycles_per_frame` or
+`bursts_per_mcycle` strays from the median of the runs already seen (8% and 5%),
+so this class of outlier cannot reach a reported number again.
+
+**Verdict: `--lto thin` stays off by default.** It buys 5.6% of module size for
+85% of build time and no measurable speed. It is worth keeping wired because the
+size result confirms cross-module inlining is now actually happening, which is a
+precondition for the Phase 3/4 work that needs callees visible across region
+boundaries — but on its own it is not a performance feature.
+
+A caveat on all of the above: the LM rig's per-arm spread is 17-18%, so it cannot
+resolve anything smaller than roughly a 35% effect. A real 5% gain would be
+invisible here. This is a limitation of the measurement, not evidence that the
+effect is zero.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
@@ -1101,5 +1164,6 @@ Identified, not yet addressed:
 3. **No cross-chunk direct calls by default** — gated behind
    `DOLRECOMP_UNSAFE_DIRECT_CALLS` because it bypasses chassis dispatch
    validation. Phase 3 makes this safe and default.
-4. **No whole-program optimization** — objects are emitted independently with no
-   final link-time inlining or internalization. Phase 6 adds ThinLTO.
+4. ~~**No whole-program optimization**~~ — addressed by `--lto thin` (§5p).
+   Cross-module inlining now happens and takes 5.6% off the module, but it did
+   not move fps on Luigi's Mansion, so it stays off by default.
