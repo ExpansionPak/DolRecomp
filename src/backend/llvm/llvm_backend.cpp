@@ -247,11 +247,17 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
   std::string tripleName =
       resolveTriple(options ? options->target_triple : nullptr);
   const llvm::Triple triple(tripleName);
-  if (triple.getArch() != llvm::Triple::x86_64 ||
+  // AArch64 is accepted alongside x86-64. Nothing in the function emitter or
+  // in the memory/runtime lowering is x86-specific -- there is no inline asm
+  // and functions are emitted with CallingConv::C -- so the IR is
+  // target-neutral and LLVM codegens AArch64 objects directly.
+  const bool arch_supported = triple.getArch() == llvm::Triple::x86_64 ||
+                              triple.getArch() == llvm::Triple::aarch64;
+  if (!arch_supported ||
       (!triple.isOSLinux() && !triple.isOSWindows())) {
     fprintf(
         diagnostics,
-        "dolllvm: supported production targets are x86-64 Linux and Windows\n");
+        "dolllvm: supported production targets are x86-64 and AArch64 Linux, and x86-64 Windows\n");
     return false;
   }
 
