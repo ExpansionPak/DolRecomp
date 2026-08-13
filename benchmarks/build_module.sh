@@ -32,6 +32,7 @@ REGION_MODE="${4:-}"
 MAX_INSTR="${5:-}"
 MAX_IR="${6:-}"
 LTO="${7:-}"
+MEM="${8:-}"
 
 MG_ROOT="${MG_ROOT:-C:/Users/douglaswhittingham/luigis-mansion-recomp/lib/ModernGekko}"
 PORT="$MG_ROOT/build/moderngekko-port.exe"
@@ -49,6 +50,7 @@ SLUG="$BACKEND"
 [ -n "$MAX_INSTR" ] && SLUG="$SLUG-i$MAX_INSTR"
 [ -n "$MAX_IR" ] && SLUG="$SLUG-ir$MAX_IR"
 [ -n "$LTO" ] && SLUG="$SLUG-lto$LTO"
+[ -n "$MEM" ] && SLUG="$SLUG-mem$MEM"
 OUT="$OUT_ROOT/$SLUG"
 
 # moderngekko-port validates --backend against its own c|llvm list, so an AOT
@@ -56,6 +58,7 @@ OUT="$OUT_ROOT/$SLUG"
 PORT_BACKEND="$BACKEND"
 unset DOLRECOMP_FORCE_BACKEND DOLRECOMP_REGION_MODE
 unset DOLRECOMP_REGION_MAX_INSTRUCTIONS DOLRECOMP_REGION_MAX_IR DOLRECOMP_LTO
+unset DOLRECOMP_MEMORY_MODE
 if [ "$BACKEND" = "llvm-aot" ]; then
   PORT_BACKEND="llvm"
   export DOLRECOMP_FORCE_BACKEND=llvm-aot
@@ -91,6 +94,8 @@ if [ -f "$DOLRECOMP_EXE" ]; then
 else
   echo "[$SLUG] WARNING: no dolrecomp.exe at $DOLRECOMP_EXE; using whatever is beside the port"
 fi
+
+[ -n "$MEM" ] && export DOLRECOMP_MEMORY_MODE="$MEM"
 
 mkdir -p "$OUT"
 echo "[$SLUG] building into $OUT"

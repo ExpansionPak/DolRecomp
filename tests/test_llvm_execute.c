@@ -18,6 +18,7 @@ void func_80002A00(CPUState* cpu);
 void func_80002B00(CPUState* cpu);
 void func_80002C00(CPUState* cpu);
 void func_80002D00(CPUState* cpu);
+void func_80003000(CPUState* cpu);
 
 static u32 fallback_count;
 static int fallback_bad;
@@ -278,6 +279,39 @@ int main(void) {
     func_80002D00(&cpu);
     CHECK(cpu.pc == 0x80002D00u || cpu.pc == 0x80002E00u);
     CHECK(cpu.downcount <= -128 && cpu.downcount >= -512);
+
+    // MEM1 boundary, which --memory-mode fast reduces to a compare against a
+    // constant. Each case is checked for the value actually written or read,
+    // not merely for "did not crash": a bound that is off by one word writes
+    // outside the RAM allocation, and that is the failure this mode could
+    // plausibly introduce.
+    {
+        const u32 last_word = GC_RAM_BASE + GC_MAIN_RAM_SIZE - 4u;
+
+        // Fully inside: the last addressable word must round-trip.
+        prepare_call(&cpu, 0x80003000u);
+        cpu.gpr[3] = last_word;
+        cpu.gpr[4] = 0xA5A5A5A5u;
+        cpu.gpr[5] = 0;
+        func_80003000(&cpu);
+        CHECK(mem_read32(&cpu, last_word) == 0xA5A5A5A5u);
+        CHECK(cpu.gpr[5] == 0xA5A5A5A5u);
+
+        // Straddling the end: three bytes inside, one past. Must take the slow
+        // path rather than the RAM path, so the last word keeps its value.
+        prepare_call(&cpu, 0x80003000u);
+        cpu.gpr[3] = last_word + 1u;
+        cpu.gpr[4] = 0x5A5A5A5Au;
+        func_80003000(&cpu);
+        CHECK(mem_read32(&cpu, last_word) == 0xA5A5A5A5u);
+
+        // Entirely past the end.
+        prepare_call(&cpu, 0x80003000u);
+        cpu.gpr[3] = GC_RAM_BASE + GC_MAIN_RAM_SIZE;
+        cpu.gpr[4] = 0x5A5A5A5Au;
+        func_80003000(&cpu);
+        CHECK(mem_read32(&cpu, last_word) == 0xA5A5A5A5u);
+    }
 
     cpu_free(&cpu);
     return 0;

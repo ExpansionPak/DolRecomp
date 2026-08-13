@@ -103,6 +103,19 @@ int main(int argc, char** argv) {
     };
     CHECK(add_chunk(&module, paired_words, 7, 0x80002B00u));
 
+    // MEM1 boundary. --memory-mode fast folds the MEM1 bound to a constant and
+    // drops the "size >= width" half of the range check as constant-true, so
+    // the exact edge is the one thing that mode can get wrong -- and nothing
+    // else tests it: the differential harness only ever touches a scratch
+    // offset deep inside MEM1.
+    //
+    // r3 holds the address, so the caller can place it at the last word in
+    // MEM1, straddling the end, or past it. stw r4,0(r3) then lwz r5,0(r3).
+    const u32 boundary_words[] = {
+        0x90830000u, 0x80A30000u, 0x4E800020u,
+    };
+    CHECK(add_chunk(&module, boundary_words, 3, 0x80003000u));
+
     // Runtime boundaries must not reset the dispatcher budget.
     const u32 budget_words[] = {
         0x38630001u, 0x00000000u, 0x2C032710u, 0x4180FFF4u, 0x4E800020u,
