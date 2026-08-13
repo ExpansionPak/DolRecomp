@@ -62,7 +62,18 @@ if [ "$BACKEND" = "llvm-aot" ]; then
   [ -n "$REGION_MODE" ] && export DOLRECOMP_REGION_MODE="$REGION_MODE"
   [ -n "$MAX_INSTR" ] && export DOLRECOMP_REGION_MAX_INSTRUCTIONS="$MAX_INSTR"
   [ -n "$MAX_IR" ] && export DOLRECOMP_REGION_MAX_IR="$MAX_IR"
-  [ -n "$LTO" ] && export DOLRECOMP_LTO="$LTO"
+  if [ -n "$LTO" ]; then
+    export DOLRECOMP_LTO="$LTO"
+    # ThinLTO's backend spawns one thread per core and holds several modules
+    # live at once. On Mario Kart (444 MB of objects) that link died with exit 1
+    # and no diagnostic at all -- the signature of the linker being killed
+    # rather than rejecting anything. The same link ran clean once the machine
+    # was quiet, so it is a footprint problem, not a bad-bitcode problem.
+    # Bound it. LDFLAGS is read at configure time by the module template.
+    if [ "$LTO" = thin ]; then
+      export LDFLAGS="${LDFLAGS:-} -Wl,/opt:lldltojobs=${LTO_JOBS:-8}"
+    fi
+  fi
 else
   export DOLRECOMP_FORCE_BACKEND="$BACKEND"
 fi

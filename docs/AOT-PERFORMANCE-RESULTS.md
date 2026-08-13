@@ -1044,7 +1044,7 @@ compared.
 
 ---
 
-## 5p. ThinLTO: 5.6% smaller, no readable runtime change
+## 5p. ThinLTO: ~6% smaller on both titles, no readable runtime change
 
 `--lto thin` writes a `.bc` beside each region object via
 `ThinLTOBitcodeWriterPass` and points the object manifest at the bitcode. lld
@@ -1054,33 +1054,41 @@ just forwards each listed file to the linker. Verified with `llvm-bcanalyzer`
 that every emitted file carries `GLOBALVAL_SUMMARY_BLOCK`; the LM build fed
 1724/1724 bitcode files through the link.
 
-Luigi's Mansion, `cfg` mode, 1024 instructions, 1724 regions, same tree and same
-object cache for both arms:
+`cfg` mode, 1024 instructions, same tree and same object cache within each title:
 
-| | `--lto off` | `--lto thin` | delta |
-|---|---|---|---|
-| module | 251,288,064 B | 237,308,928 B | **-5.6%** |
-| build | 869 s | 1609 s | **+85%** |
+| | Luigi's Mansion | Mario Kart |
+|---|---|---|
+| regions | 1,724 | 2,033 |
+| `--lto off` | 251,288,064 B | 444,321,280 B |
+| `--lto thin` | 237,308,928 B | 417,093,120 B |
+| **size delta** | **-5.6%** | **-6.1%** |
+| build, off | 869 s | 928 s |
+| build, thin | 1609 s (+85%) | 1492 s (+61%) |
 
-The size drop is real cross-region code elimination, and it is the first result
-that moves at all where emitter-level inlining managed +0.017% (§5o) — which is
-what established that this work needed ThinLTO rather than a smarter emitter.
+Two independent titles agreeing at roughly 6% is the result that matters here:
+cross-region inlining is genuinely happening. Emitter-level inlining managed
++0.017% (§5o), which is what established that this needed ThinLTO rather than a
+smarter emitter.
 
-The runtime result is nothing. Fifteen runs, alternating arms against the pinned
-`bench.sav` scene, after dropping runs that did not do comparable guest work:
+The runtime result is nothing, on either title. Arms alternated against a pinned
+`bench.sav` scene, runs that did not do comparable guest work dropped:
 
-| arm | valid runs | mean fps | spread |
-|---|---|---|---|
-| `off` | 5 | 29.86 | 17.0% |
-| `thin` | 6 | 28.57 | 18.4% |
+| title | arm | runs | mean fps | spread | delta | guard | verdict |
+|---|---|---|---|---|---|---|---|
+| Luigi's Mansion | `off` | 5 | 29.86 | 17.0% | | | |
+| Luigi's Mansion | `thin` | 6 | 28.57 | 18.4% | -4.3% | 36.7% | unreadable |
+| Mario Kart | `off` | 5 | 33.36 | 25.2% | | | |
+| Mario Kart | `thin` | 5 | 34.89 | 7.7% | +4.6% | 50.4% | unreadable |
 
-delta -4.3% against a 36.7% guard: **unreadable**. `bursts/Mcycle` is 153.7-153.8
-on every kept run in both arms, so ThinLTO does not change dispatcher behaviour
-either — expected, since it is a codegen-quality change and not a control-flow
-one.
+The two titles disagree on sign (-4.3% and +4.6%) and neither clears its noise
+floor, which is what no effect looks like. `bursts/Mcycle` holds at 153.7-153.8
+(LM) and 166.0-167.5 (MK) across both arms, so ThinLTO does not change
+dispatcher behaviour either — expected, since it is a codegen-quality change and
+not a control-flow one.
 
-Two runs had to be discarded for reasons worth recording, because taken at face
-value they would have produced a headline:
+Two Luigi's Mansion runs had to be discarded for reasons worth recording,
+because taken at face value they would have produced a headline (all ten Mario
+Kart runs were valid and comparable):
 
 * An LM run read **134.44 fps** — a 4.5x "win". Its cycles/frame sat inside the
   comparable band, but its `bursts/Mcycle` was 92.6 against everyone else's
@@ -1094,15 +1102,29 @@ value they would have produced a headline:
 `bursts_per_mcycle` strays from the median of the runs already seen (8% and 5%),
 so this class of outlier cannot reach a reported number again.
 
-**Verdict: `--lto thin` stays off by default.** It buys 5.6% of module size for
-85% of build time and no measurable speed. It is worth keeping wired because the
+### The Mario Kart link has to be bounded
+
+The MKDD ThinLTO link failed inside the full build: exit 1 after 1492 s with no
+diagnostic beyond `-Woverride-module` warnings. The identical link then ran
+clean when re-invoked on an otherwise idle machine, so it is a footprint
+problem, not bad bitcode: lld reports a killed process exactly this way.
+ThinLTO's backend spawns one thread per core and holds several modules live at
+once, and MKDD is 444 MB of objects against LM's 237 MB.
+
+`benchmarks/build_module.sh` therefore passes `-Wl,/opt:lldltojobs=8` (override
+with `LTO_JOBS`) whenever `--lto thin` is selected. Anyone linking a large title
+through their own build system needs the equivalent cap; without it the failure
+is silent and looks like a compiler bug.
+
+**Verdict: `--lto thin` stays off by default.** It buys ~6% of module size for
+60-85% of build time and no measurable speed. It is worth keeping wired because the
 size result confirms cross-module inlining is now actually happening, which is a
 precondition for the Phase 3/4 work that needs callees visible across region
 boundaries — but on its own it is not a performance feature.
 
-A caveat on all of the above: the LM rig's per-arm spread is 17-18%, so it cannot
-resolve anything smaller than roughly a 35% effect. A real 5% gain would be
-invisible here. This is a limitation of the measurement, not evidence that the
+A caveat on all of the above: per-arm spread is 17-18% on LM and 8-25% on MKDD,
+so the rig cannot resolve anything smaller than roughly a 35% effect. A real 5%
+gain would be invisible here. This is a limitation of the measurement, not evidence that the
 effect is zero.
 
 ---
