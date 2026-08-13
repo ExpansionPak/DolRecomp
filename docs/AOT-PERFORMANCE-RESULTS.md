@@ -20,7 +20,8 @@ extrapolated, and any measurement that could not be taken on this host is marked
 | Target triple | default (host); `DOLRECOMP_LLVM_TARGET` unset |
 | Target CPU / features | LLVM defaults; not yet overridable (Phase 6 adds `--target-cpu` / `--target-features`) |
 | PGO | off (`DOLRECOMP_LLVM_PGO` unset) |
-| LTO | off (not yet implemented; Phase 6) |
+| LTO | off by default; `--lto thin` available (§5p) |
+| Memory mode | safe by default; `--memory-mode fast` available (§5q) |
 | Region mode | `fixed` (only mode that exists at this commit) |
 | Mod policy | compatible (only mode that exists) |
 | Memory mode | safe (only mode that exists) |
@@ -1129,6 +1130,94 @@ effect is zero.
 
 ---
 
+## 5q. Guest memory lowering: the first measured speed win
+
+Every guest load and store read its bounds out of `CPUState` on every access and
+checked the write journal on every MEM1 store. Two of those are constant in
+practice, and `--memory-mode fast` exploits both:
+
+* `ram_size` is `GC_MAIN_RAM_SIZE` (24 MB) in this tree and in GXRuntime --
+  assigned once in `cpu_init`, carried across `cpu_reset`, never given another
+  value. Folding it removes a `CPUState` load per access and collapses the
+  bounds check to a single compare against a constant, because the
+  `size >= width` half is constant-true for any width under 24 MB.
+* `g_mem_write_journal` is null unless a runtime installs one, so the branch
+  leaves the MEM1 store path entirely.
+
+Confirmed in the emitted IR rather than assumed: fast mode emits
+`icmp ult i32 %20, 25165821` -- one compare against the constant -- where safe
+loads `ram_size` and does two. The MEM2 path keeps its dynamic form, because
+`exram_size` genuinely varies.
+
+### Results
+
+Both titles, `cfg` mode, 1024 instructions, same tree and object cache:
+
+| | Luigi's Mansion | Mario Kart |
+|---|---|---|
+| module, safe | 251,288,064 B | 444,321,280 B |
+| module, fast | 235,978,240 B | 424,067,584 B |
+| **size delta** | **-6.1%** | **-4.6%** |
+| **fps** | **+6.7%** | **+6.7%** |
+| **guest cycles/sec** | **+9.4%** | **+10.0%** |
+| pairs favouring fast | 11/12 | 15/18 |
+| sign test | p = 0.0063 | p = 0.0075 |
+
+Combined: **26 of 30 pairs, p = 0.000059**. Both titles land on +6.7% fps
+independently, which is the agreement that makes the result credible.
+
+The safe arm of each title reproduces that title's earlier module size exactly
+(251,288,064 and 444,321,280), so the default path is provably unchanged.
+
+### Why the analysis is paired
+
+The arms alternate, so run *i* of each saw the same machine state, and comparing
+within a pair cancels the drift that produces the 17-25% unpaired spreads seen
+throughout §5. **The unpaired 2x-spread guard used elsewhere in this document
+still calls this result unreadable**; that guard is the right test for unpaired
+means and far too blunt for alternating paired runs, where it would reject an
+effect that nearly every pair agrees on. Recorded explicitly rather than
+silently swapped, because switching to a friendlier test after seeing the data
+is exactly how a null result becomes a headline.
+
+Both metrics are reported because fast mode runs *more* guest cycles per frame
+and still more frames per second, so fps alone understates it. Guest cycles per
+wall second is throughput of the work the backend actually performs.
+
+`benchmarks/paired_arms.py` implements this, including the `bursts/Mcycle`
+filter that drops pairs where either run executed a different scene.
+
+### Correctness
+
+This is the change in the project most capable of silently corrupting guest
+memory, so the assumptions are verified rather than trusted:
+
+* **Checked at runtime, once, at dispatch entry.** If `ram_size` differs or a
+  journal is installed, `dolrecomp_call` returns 0 and the chassis keeps
+  interpreting. A violated assumption costs speed, never guest memory. The
+  guard never fired in any measured run (`fallback=0`, `native` high), so both
+  assumptions hold under ModernGekko and not merely in the source.
+* **The MEM1 boundary is now tested, and was not before.** The differential
+  harness only ever touches a scratch offset deep inside MEM1, so it could not
+  have caught an off-by-one at the edge -- precisely what folding the bound
+  risks. Three cases (last addressable word, straddling the end, entirely past)
+  assert the value written or read, not merely that nothing crashed. Green in
+  both modes.
+* 23/23 ctest in both modes, including the differential suite against the C
+  backend.
+
+### Why this worked where the others did not
+
+Region formation, PGO region seeding, `bctr` specialisation, adjacency merging,
+barrier store narrowing, emitter-level inlining and ThinLTO all reshaped control
+flow that was already direct calls, and all came back flat. This removes a load
+and roughly four instructions from *every* guest load and store -- a
+per-instruction cost on the most frequent operation class in the workload. The
+lesson is that the dispatcher was not the bottleneck it was assumed to be, and
+per-access overhead was.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
@@ -1180,9 +1269,11 @@ environment before that deliverable can be called done. Recorded in
 Identified, not yet addressed:
 
 1. **128-instruction chunk boundaries** (§4) — the dominant architectural cost.
-2. **`g_mem_write_journal` checked on every store** (`src/cpu/cpu.h`) — an
-   unconditional branch on a global function pointer in the store path. Phase 5
-   removes it from production builds via explicit journaling modes.
+2. ~~**`g_mem_write_journal` checked on every store**~~ — addressed by
+   `--memory-mode fast` (§5q), together with folding the MEM1 bound. Measured
+   +6.7% fps on both titles, p = 0.000059 combined. Off by default because it
+   assumes no write journal; the generated code verifies that at runtime and
+   falls back to the interpreter rather than trusting it.
 3. **No cross-chunk direct calls by default** — gated behind
    `DOLRECOMP_UNSAFE_DIRECT_CALLS` because it bypasses chassis dispatch
    validation. Phase 3 makes this safe and default.
