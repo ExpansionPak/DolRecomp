@@ -22,8 +22,8 @@ typedef struct {
        the summary is what lets the thin link decide which callees to import
        without reading every module's body.
 
-       NOT YET IMPLEMENTED -- these fields are accepted and ignored. See the
-       note in dolllvm_emit_object() for what the first attempt got wrong. */
+       Emitted from a clone of the optimised module, because the writer pass
+       splits the module in place and the object must not see that. */
     int emit_bitcode;
     const char* bitcode_path;
     const DolLLVMFunctionRange* function_ranges;

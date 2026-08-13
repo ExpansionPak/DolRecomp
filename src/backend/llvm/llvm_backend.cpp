@@ -13,9 +13,8 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/Verifier.h>
-#include <llvm/Analysis/ModuleSummaryAnalysis.h>
-#include <llvm/Bitcode/BitcodeWriter.h>
-#include <llvm/IR/ModuleSummaryIndex.h>
+#include <llvm/Transforms/IPO/ThinLTOBitcodeWriter.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/IR/PassInstrumentation.h>
 #include <llvm/Passes/PassBuilder.h>
@@ -399,6 +398,49 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
                                                       /*IsCS=*/false));
     passes.run(module, mam);
 
+    // ThinLTO bitcode, emitted from a CLONE of the optimised module.
+    //
+    // ThinLTOBitcodeWriterPass is not a pure writer: it splits the module into
+    // the part that can be thin-imported and the part that cannot, and it does
+    // that in place. Running it on `module` would hand a mutated module to the
+    // object emission below, so the object and the bitcode would describe
+    // different programs -- with the object being the wrong one.
+    //
+    // The clone costs memory proportional to one region, which is bounded by
+    // the region size cap, and only when bitcode is asked for.
+    //
+    // Letting the pass build the summary is the point: a first attempt called
+    // buildModuleSummaryIndex(module, nullptr, nullptr) by hand and segfaulted,
+    // because that signature wants a BlockFrequencyInfo callback and a real
+    // ProfileSummaryInfo rather than nulls. This is how clang does it.
+    if (options && options->emit_bitcode && options->bitcode_path) {
+      std::error_code bitcodeError;
+      llvm::raw_fd_ostream bitcodeFile(options->bitcode_path, bitcodeError,
+                                       llvm::sys::fs::OF_None);
+      if (bitcodeError) {
+        fprintf(diagnostics, "dolllvm: cannot write bitcode: %s\n",
+                bitcodeError.message().c_str());
+        return false;
+      }
+      std::unique_ptr<llvm::Module> clone = llvm::CloneModule(module);
+      llvm::LoopAnalysisManager cloneLam;
+      llvm::FunctionAnalysisManager cloneFam;
+      llvm::CGSCCAnalysisManager cloneCgam;
+      llvm::ModuleAnalysisManager cloneMam;
+      llvm::PassBuilder clonePassBuilder(machine);
+      clonePassBuilder.registerModuleAnalyses(cloneMam);
+      clonePassBuilder.registerCGSCCAnalyses(cloneCgam);
+      clonePassBuilder.registerFunctionAnalyses(cloneFam);
+      clonePassBuilder.registerLoopAnalyses(cloneLam);
+      clonePassBuilder.crossRegisterProxies(cloneLam, cloneFam, cloneCgam,
+                                            cloneMam);
+      llvm::ModulePassManager bitcodePasses;
+      bitcodePasses.addPass(
+          llvm::ThinLTOBitcodeWriterPass(bitcodeFile, /*ThinLinkOS=*/nullptr));
+      bitcodePasses.run(*clone, cloneMam);
+      bitcodeFile.flush();
+    }
+
     // P002. The verdict. Under `error` a stale profile stops the build here,
     // which is the point: the failure this gate exists for is a build that
     // SUCCEEDS while training on records that no longer describe it, and every
@@ -441,23 +483,6 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
     }
     module.print(irFile, nullptr);
   }
-
-  // Bitcode emission for ThinLTO is NOT implemented. A first attempt called
-  //     llvm::buildModuleSummaryIndex(module, nullptr, nullptr)
-  // and segfaulted. That signature takes a std::function returning
-  // BlockFrequencyInfo* as its second parameter and a ProfileSummaryInfo* as
-  // its third; an empty std::function crashes when invoked, and the PSI is
-  // dereferenced rather than checked.
-  //
-  // The correct shape is either a real ProfileSummaryInfo plus a BFI callback,
-  // or -- simpler and what clang actually does -- letting
-  // ThinLTOBitcodeWriterPass build the summary as part of the pass pipeline
-  // instead of constructing the index by hand.
-  //
-  // Left unimplemented rather than half-implemented: the emit path is on every
-  // region of every build, and a crash there is worse than the absence of a
-  // feature. options.emit_bitcode is accepted and ignored.
-  (void)0;
 
   std::error_code objectError;
   llvm::raw_fd_ostream objectFile(object_path, objectError,
