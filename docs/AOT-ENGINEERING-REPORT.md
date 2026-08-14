@@ -6,10 +6,14 @@ Branch `feature/llvm-aot-regions`, 73 commits on upstream
 Every number here was measured on this host. Negative and retracted results are
 included; nothing is extrapolated.
 
-Reproducing them: `benchmarks/build_module.sh` builds a module for one
-configuration into a directory keyed to it, `benchmarks/run_title_benchmark.py`
-measures one arm, and `benchmarks/paired_arms.py` / `compare_arms.py` compare
-two. Titles are supplied locally and none is committed.
+Method: each configuration is built into its own directory (the module cache
+keys on backend and binary hash, not on region settings, so two configurations
+sharing an output directory silently collide). Throughput is frames over wall
+time with Dolphin's throttle disabled, since `fps` in `status.txt` stays 0
+headless and pins at 1.00 windowed. Arms alternate and are compared pairwise
+with a sign test, dropping any run whose `cycles_per_frame` or
+`bursts_per_mcycle` strays from the median -- those executed a different scene.
+Titles are supplied locally and none is committed.
 
 ---
 
@@ -163,14 +167,20 @@ more than the claims.
 
 Two guards came out of this and are now in the tooling:
 
-* `benchmarks/compare_arms.py` drops runs whose `cycles_per_frame` or
-  `bursts_per_mcycle` strays from the median of runs already seen. One Luigi's
-  Mansion run read **134 fps** at 92.6 `bursts/Mcycle` against everyone else's
-  153.8 — a different execution, not a fast one. Including it moved a −4.3%
-  result to +46.4%.
-* `benchmarks/paired_arms.py` compares alternating arms **pairwise** and reports
-  a sign test. The unpaired 2x-spread guard is the right test for unpaired means
-  and far too blunt for paired runs; where the two disagree, both are stated.
+* **Outlier rejection on the invariants, not on fps.** A run whose
+  `cycles_per_frame` or `bursts_per_mcycle` strays from the median executed a
+  different scene and is dropped. One Luigi's Mansion run read **134 fps** at
+  92.6 `bursts/Mcycle` against everyone else's 153.8 — a different execution,
+  not a fast one. Including it moved a −4.3% result to +46.4%.
+* **Pairwise comparison with a sign test.** Arms alternate, so run *i* of each
+  saw the same machine state; comparing within pairs cancels the drift behind
+  the 17-25% unpaired spreads. The unpaired 2x-spread guard is right for
+  unpaired means and far too blunt for paired runs; where the two disagree,
+  both are stated.
+* Neither invariant survives crossing *backends* — the C module has 182 chunks
+  against 2,033 regions, and the backends charge guest cycles differently — so
+  cross-backend comparisons reject outliers within each arm against its own
+  median instead.
 
 ---
 
