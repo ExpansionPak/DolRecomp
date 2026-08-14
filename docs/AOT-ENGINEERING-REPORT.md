@@ -227,8 +227,9 @@ feature flags. `materialize()` is now the guest PC and the cycles owed.
 
 Verified three ways: **byte-identical IR** from the test fixture before and
 after, a full Mario Kart build at **exactly the same 85,770,752 bytes**, and a
-paired runtime A/B that reads +0.8% at p = 1.0 with `fallback` 0 throughout —
-indistinguishable, which is what a no-op deletion should measure.
+paired runtime A/B over 7 pairs reading −0.7% mean at p = 1.0, 3 of 7 favouring
+the post-deletion module, `fallback` 0 on every run — indistinguishable, which
+is what a no-op deletion should measure.
 
 One bug was introduced and caught during that deletion. Removing a statement
 under an unbraced `if` left the *following* `if` as its body, so `used_[MSR]`
