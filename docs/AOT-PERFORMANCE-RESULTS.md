@@ -1679,17 +1679,35 @@ Mario Kart, same scene, against the current default:
 p = 0.0039, `fallback` 0 on every run. Module grows 6.2% (85.8 -> 91.1 MB),
 which is PGO doing what it does: hot paths grow, cold ones shrink.
 
-### The caveat that matters more than the number
+### The overfitting check, which it passed
 
-**The profile was collected on `bench.sav` and measured on `bench.sav`.** That
-is the same scene, so this figure is an upper bound and not what a shipped
-profile would deliver. A real profile would be gathered across many scenes and
-then run on scenes it had never seen; the branch layout it produces would be a
-compromise rather than a perfect fit.
+The figure above was collected on `bench.sav` and measured on `bench.sav` --
+the same scene, so on its own it is an upper bound rather than what a shipped
+profile would deliver. That was tested rather than left as a caveat.
 
-Treat +14.9% as "PGO works on this backend and the mechanism is sound", not as
-"users get 15%". Establishing the honest figure needs a profile collected on
-one set of scenes and measured on a disjoint set, which is not done.
+A second profile was built from **five courses** (baby-park, dk-mountain,
+mushroom-city, dry-dry-desert, sherbet-land) and measured on **two courses it
+had never seen**:
+
+| held-out scene | fps | guest cycles/sec | pairs | sign test |
+|---|---|---|---|---|
+| Luigi Circuit | **+12.5%** | +22.2% | 7/8 | p = 0.070 |
+| Yoshi Circuit | **+18.9%** | +30.8% | 7/7 | p = 0.0156 |
+| **combined** | | | **14/16** | **p = 0.0042** |
+
+The held-out results **bracket the same-scene +14.9%**, so there is no
+overfitting penalty to subtract: the profile is not memorising a scene, it is
+learning something generic about how this backend executes. That is what the
+mechanism predicts, since the win is block placement on the MEM1/MEM2/slow-path
+chains that every scene hits on every guest load and store.
+
+`bench.sav` turns out to be a considerably heavier scene than any course --
+57 fps at 169 `bursts/Mcycle` against 67-95 fps at 107-134 -- so the courses are
+not simply easier versions of the same workload.
+
+Two limits remain. The profile set was all courses, so a heavy scene like
+`bench.sav` is still out-of-distribution in a way these held-out courses are
+not; and this is one title.
 
 ### Why it pays more here than it would have before
 
@@ -1717,9 +1735,10 @@ objects rather than whatever is first on PATH.
 
 ### Status
 
-One title, off by default, and the scene-overlap caveat above unresolved. It
-needs the treatment `--memory-mode fast` got -- three titles, disjoint profile
-and measurement scenes -- before it could be a default or a headline.
+Off by default, and validated on one title. The scene-overlap question is
+answered; what is still owed before it could be a default is the other two
+titles, and a check that the gain survives on a scene much heavier than
+anything in the profile set.
 
 ---
 
