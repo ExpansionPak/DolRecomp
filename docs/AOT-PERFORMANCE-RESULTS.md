@@ -1361,6 +1361,64 @@ whoever attempts the other half.
 
 ---
 
+## 5t. The C backend is 60% faster than llvm-aot on Mario Kart
+
+This should have been measured in Phase 0 and was not. Every runtime number
+above §5t compares LLVM builds against other LLVM builds. The C backend is the
+brief's semantic reference, and its throughput was never established, so
+nothing above was ever positioned against it.
+
+| | C backend | `llvm-aot`, `--memory-mode fast` |
+|---|---|---|
+| **fps, mean** | **53.01** | 33.24 |
+| fps, median | 52.24 | 33.12 |
+| fps, range | 47.1 - 62.4 | 29.3 - 38.3 |
+| valid runs | 6 | 9 |
+| module | 65,294,848 B | 424,067,584 B |
+| speed vs real time | 0.79 - 1.03x | ~0.55x |
+
+**+59.5% on the mean, and the ranges do not overlap** -- every kept C run beats
+every kept `llvm-aot` run. The comparison is generous to `llvm-aot`: it is in
+its best measured configuration, while the C backend is at plain baseline,
+because `--memory-mode fast` only changes LLVM lowering.
+
+The module is 6.5x smaller, which is the direction §4's E002/E003 finding
+predicts should also be faster: on this workload code size and speed move
+together, because size is a proxy for how much guest state the register
+allocator has to keep live.
+
+### The measurement method needed fixing first
+
+The comparability filter used throughout §5 is a **same-backend** tool and is
+invalid here. Neither invariant survives crossing backends:
+
+* `bursts/Mcycle` differs because the C module has 182 chunks against the region
+  build's 2,033, so dispatcher re-entries per unit of guest work legitimately
+  differ (166 vs 173).
+* `cycles/frame` differs too (12.6M vs 14.9M): the backends charge guest cycles
+  differently, so it is not the backend-invariant quantity across them that it
+  is within one.
+
+Applied naively it kept two `llvm-aot` outliers and left the C arm with n=1,
+reporting +20.8% -- a number assembled from noise. The correct method is
+outlier rejection **within** each arm against that arm's own median, then
+comparing fps directly. That is what the table above uses.
+
+### What this means for the rest of this document
+
+The region backend, and every improvement to it recorded above, sits well
+behind the reference backend on this title. The `--memory-mode fast` result
+(§5q) is real, reproduces on three titles, and improved the slower of the two
+paths. Nothing above is retracted -- the measurements are what they are -- but
+"faster than the previous llvm-aot build" is not "fast", and this document
+previously had no way to tell those apart.
+
+The open question is whether this is specific to the region path or true of the
+LLVM backend generally; the fixed-chunk `llvm` build is the arm that separates
+those, and the brief's own gate says `llvm-aot` must reach parity with it.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
