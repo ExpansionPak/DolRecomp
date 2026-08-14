@@ -25,6 +25,11 @@ int replacements_enabled(void);
    across an object boundary with no diagnostic. */
 int reg_args_enabled(void);
 
+/* Leave guest state in CPUState instead of promoting it to allocas at region
+   entry, from DOLRECOMP_STATE_MEMORY. Consulted from several translation units
+   of the emitter, so it has one definition. */
+int state_in_memory(void);
+
 #ifdef __cplusplus
 }
 #endif

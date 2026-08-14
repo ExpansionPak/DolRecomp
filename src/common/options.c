@@ -27,3 +27,8 @@ int reg_args_enabled(void) {
     const char* value = getenv("DOLRECOMP_REG_ARGS");
     return value && value[0] == '1';
 }
+
+int state_in_memory(void) {
+    const char* value = getenv("DOLRECOMP_STATE_MEMORY");
+    return value && value[0] == '1';
+}

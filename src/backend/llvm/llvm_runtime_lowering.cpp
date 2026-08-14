@@ -1,4 +1,5 @@
 #include "backend/llvm/llvm_function_emitter.h"
+#include "common/options.h"
 #include "cpu/cpu.h"
 
 #include <llvm/ADT/SmallVector.h>
@@ -24,6 +25,10 @@ void FunctionEmitter::syncState(DolIRStateSlot slot) {
 }
 
 void FunctionEmitter::reloadState(DolIRStateSlot slot) {
+  // Under DOLRECOMP_STATE_MEMORY the slot IS the CPUState field, so this would
+  // be a load of a location stored straight back to itself.
+  if (state_in_memory())
+    return;
   builder_.CreateStore(loadContext(slot), state_[slot]);
 }
 
@@ -32,6 +37,8 @@ void FunctionEmitter::reloadUsedState() {
     if (used_[slot])
       reloadState(static_cast<DolIRStateSlot>(slot));
   }
+  // The cycle counter is emitter bookkeeping rather than guest state, so it is
+  // reset in both modes.
   builder_.CreateStore(builder_.getInt64(0), cycles_);
 }
 

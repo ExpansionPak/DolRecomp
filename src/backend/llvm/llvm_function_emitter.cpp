@@ -68,6 +68,27 @@ static bool inlineRegions() {
 // successor model is derived from the emitter's own edges rather than
 // reconstructed alongside them.
 //   DOLRECOMP_REG_ARGS=1
+// Leave guest state in CPUState instead of promoting it to allocas at region
+// entry.
+//
+// The promoting design gives the register allocator far more simultaneously
+// live values than x86-64 has registers, so it spills them straight back:
+// measured at 29-33% of emitted instructions touching the stack against 3-5%
+// for the C backend, which operates directly on ctx->gpr[N] and lets clang
+// hoist only what pays (AOT-PERFORMANCE-RESULTS.md 5u). Running LLVM's own -O3
+// pipeline changed that number by nothing, so it is structural: no pass can
+// undo a live set larger than the machine.
+//
+// Under this flag state_[slot] points into CPUState rather than at an alloca.
+// Every load and store site is unchanged; what disappears is the entry
+// prologue, and with it the materialization barriers -- they exist only to
+// flush values that were hoisted, and nothing is hoisted here.
+//   DOLRECOMP_STATE_MEMORY=1
+static bool stateInMemory() {
+  static const bool enabled = state_in_memory() != 0;
+  return enabled;
+}
+
 static bool regArgs() {
   static const bool enabled = reg_args_enabled() != 0;
   return enabled;
@@ -538,6 +559,10 @@ void FunctionEmitter::computeReachingWrites() {
 // did before and is always correct.
 void FunctionEmitter::reloadLiveState(u32 block) {
   (void)block;
+  // Nothing was hoisted, so nothing has gone stale; the loads below would read
+  // a CPUState slot and store it straight back to itself.
+  if (stateInMemory())
+    return;
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (!used_[slot])
       continue;
@@ -731,6 +756,12 @@ void FunctionEmitter::emitEntry() {
     if (!used_[slot])
       continue;
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
+    if (stateInMemory()) {
+      // No load, no alloca, no copy: the slot is read and written where it
+      // already lives.
+      state_[slot] = bytePtr(stateOffset(stateSlot));
+      continue;
+    }
     state_[slot] = builder_.CreateAlloca(type(dolir_state_type(stateSlot)),
                                          nullptr, "state");
     // Equivalent to loadContext, because every caller materializes before the
@@ -773,6 +804,10 @@ void FunctionEmitter::chargeCycles(u32 cycles) {
 
 void FunctionEmitter::materialize(u32 pc) {
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
+    // Already there. This is the whole barrier problem dissolving: the stores
+    // exist only to put back what the entry prologue took out.
+    if (stateInMemory())
+      break;
     if (!dirty_[slot])
       continue;
     // Re-enabled after the third root cause: the predecessor model was missing

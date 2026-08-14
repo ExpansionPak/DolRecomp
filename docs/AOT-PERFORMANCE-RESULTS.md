@@ -1556,6 +1556,80 @@ before anything is committed to it.
 
 ---
 
+## 5v. Not promoting guest state closes the entire gap
+
+`DOLRECOMP_STATE_MEMORY=1` prototypes the fix §5u argued for: leave guest state
+in `CPUState` and let the optimizer hoist what pays, as the C backend does.
+
+The change is small, because `state_[slot]` was only ever used as a pointer to
+load and store through. Pointing it into `CPUState` instead of at an alloca
+leaves every access site untouched:
+
+* entry sets `state_[slot] = bytePtr(stateOffset(slot))` -- no alloca, no
+  prologue load, no copy;
+* `materialize()` skips the slot-store loop, because nothing was hoisted and so
+  nothing needs flushing (it still stores PC and adjusts downcount);
+* `reloadState` / `reloadLiveState` become no-ops -- they would load a
+  `CPUState` field and store it straight back to itself.
+
+### Mario Kart, same scene and protocol as 5t
+
+| | fps | module | build | stack traffic |
+|---|---|---|---|---|
+| `llvm-aot`, promoting (default) | 33.24 | 424,067,584 B | ~930 s | 33.5% |
+| **`llvm-aot`, state in memory** | **53.49** | **85,770,752 B** | **48 s** | **2.5%** |
+| C backend | 52.86 | 65,294,848 B | -- | 5.0% |
+
+**+60.9% over the promoting default, and level with the C backend.** The +1.2%
+against C is inside heavily overlapping ranges (50.4-58.4 against 51.5-57.2), so
+the honest claim is parity, not an advantage. `fallback` is 0 on every run in
+both arms, so both are executing natively.
+
+The module is 4.9x smaller and builds 19x faster. Most of that ~930 s was LLVM
+optimizing and register-allocating IR whose only purpose was shuttling guest
+state between `CPUState` and the stack.
+
+Spill traffic fell from 33.5% to **2.5%**, below the C backend's own 5.0%, which
+is the prediction §5u made and the reason to believe the mechanism rather than
+just the outcome.
+
+### What this retires
+
+Nearly every difficulty in §5m-§5s existed to manage hoisted state:
+
+* the materialization barriers themselves;
+* the reaching-writes and liveness analyses built to narrow them;
+* three narrowing attempts -- one unsound and reverted (§5m), one sound but
+  worthless at -4.3% size for +50% build (§5n), one measured negative at -2.3%
+  fps (§5s);
+* the register-argument ABI, whose entire purpose was moving hoisted state
+  across a call boundary more cheaply.
+
+With nothing hoisted, `materialize()` is two stores and the reload paths are
+empty. The correct move was to delete the problem rather than to keep
+optimizing it, and it took measuring against the C backend to see that -- which
+§5t notes should have happened in Phase 0.
+
+### Status: prototype, not a default
+
+Off by default and validated only on Mario Kart. Before it could become a
+default it needs what `--memory-mode fast` got: three titles across both
+consoles, differential seed sweeps, and paired runs with a stated significance
+test. Two earlier changes passed the full suite and then hung Mario Kart at
+boot, so a green ctest is not evidence that a real title runs.
+
+Open questions for the full version:
+
+* Whether any promotion is worth keeping for the hottest few slots, or whether
+  the optimizer's local decisions are strictly better.
+* Whether `bursts/Mcycle` differing between arms (168.7 vs 173.0) indicates a
+  real behavioural difference or only a scene that diverges slightly.
+* Whether the barrier machinery, the two dataflow analyses and the reg-arg ABI
+  should be deleted outright once this lands, rather than left as dead weight
+  behind flags.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile

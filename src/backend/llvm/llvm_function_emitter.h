@@ -139,7 +139,10 @@ private:
   llvm::Value *guard_cycles_ = nullptr;
   // Termination backstop for zero-cycle loops.
   llvm::Value *guard_steps_ = nullptr;
-  std::array<llvm::AllocaInst *, DOLIR_STATE_COUNT> state_{};
+  // Where each guest state slot lives inside this function. Normally an
+  // alloca promoted by mem2reg; under DOLRECOMP_STATE_MEMORY a pointer straight
+  // into CPUState, so every load and store site works unchanged either way.
+  std::array<llvm::Value *, DOLIR_STATE_COUNT> state_{};
   std::array<bool, DOLIR_STATE_COUNT> used_{};
   std::array<bool, DOLIR_STATE_COUNT> dirty_{};
   // live_in_[block * DOLIR_STATE_COUNT + slot]. Flat rather than nested so the

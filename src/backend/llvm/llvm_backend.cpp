@@ -618,7 +618,10 @@ extern "C" bool dolllvm_codegen_fingerprint(char *out, size_t size) {
       // from the other setting is not merely slower, it is incompatible.
       (reg_args_enabled() ? "|regargs=1" : "") +
       // A different optimization pipeline entirely.
-      (defaultO3Pipeline() ? "|pipeline=o3" : "");
+      (defaultO3Pipeline() ? "|pipeline=o3" : "") +
+      // Changes where every guest state access points. Nothing about a cached
+      // object from the other mode is reusable.
+      (state_in_memory() ? "|state=mem" : "");
   if (fingerprint.size() + 1 > size)
     return false;
   memcpy(out, fingerprint.c_str(), fingerprint.size() + 1);
