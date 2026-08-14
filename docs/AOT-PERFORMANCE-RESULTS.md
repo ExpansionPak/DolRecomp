@@ -1413,9 +1413,58 @@ paths. Nothing above is retracted -- the measurements are what they are -- but
 "faster than the previous llvm-aot build" is not "fast", and this document
 previously had no way to tell those apart.
 
-The open question is whether this is specific to the region path or true of the
-LLVM backend generally; the fixed-chunk `llvm` build is the arm that separates
-those, and the brief's own gate says `llvm-aot` must reach parity with it.
+### It is the LLVM backend, not region formation
+
+The fixed-chunk `llvm` build separates those two possibilities, and the answer
+is unambiguous.
+
+| Mario Kart, same scene, same protocol | fps mean | fps median | module |
+|---|---|---|---|
+| **C backend** | **50.63** | 50.87 | 65,294,848 B |
+| `llvm-aot` regions + `--memory-mode fast` | 33.24 | 33.12 | 424,067,584 B |
+| fixed-chunk `llvm` | 29.80 | 29.54 | 320,031,232 B |
+
+The C backend measured 50.63 here and 53.01 in the §5t run, two independent
+sessions, so that arm is stable.
+
+Two conclusions, and they point opposite ways:
+
+1. **The region work met its own gate.** The brief requires `llvm-aot` to reach
+   parity with the fixed-chunk path before replacing it. It does better than
+   parity: 33.24 against 29.80, **+11.5%**. Region formation plus the memory
+   mode is a genuine improvement on the LLVM path.
+2. **The LLVM path is the wrong path on this title.** Both LLVM configurations
+   sit 60-70% behind the C backend, and the C module is 4.9x smaller than even
+   the fixed-chunk build. Region formation is a second-order detail on top of a
+   first-order problem.
+
+This also explains the §5i-§5k results that were previously filed as puzzling.
+Seven consecutive region-level interventions -- larger regions, PGO region
+formation, `bctr` specialisation, adjacency merging, barrier narrowing, emitter
+inlining, ThinLTO -- came back flat or negative. They were rearranging a
+structure whose dominant cost lives somewhere else.
+
+### Recommendation
+
+Do not spend more effort on region policy. The next measurement worth taking is
+**why** the LLVM path is slower than compiled C for the same guest program: both
+lower the same DolIR, so the gap is in what the backend emits, not in what it
+was asked to emit. Candidates, in the order the evidence supports:
+
+* Code size as a proxy for live state. E002/E003 established that on this
+  workload size and speed move together because size tracks how much guest
+  state the register allocator keeps live. The C backend is 4.9x smaller. That
+  is the first thing to explain.
+* The C backend gets clang's full pipeline over a whole translation unit; the
+  LLVM backend runs a fixed pass pipeline over one function at a time, in
+  process, with no cross-function view inside a chunk.
+* Guest state representation: the C backend leaves state in `CPUState` and lets
+  clang's SROA and alias analysis work on it, while this backend promotes to
+  allocas and reloads at every barrier.
+
+Until that gap is understood, `--memory-mode fast` (§5q) remains the correct
+default -- it is +6.7% on three titles and costs nothing -- but it is an
+improvement to the slower backend, and the report should say so.
 
 ---
 
