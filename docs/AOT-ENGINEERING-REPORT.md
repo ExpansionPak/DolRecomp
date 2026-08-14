@@ -153,9 +153,16 @@ helpers (`ppc_fp_available_inline`, `ppc_psq_load_inline`,
 `ppc_psq_store_inline`) exist in DolRecomp's `cpu.h` but in no vendored
 GXRuntime here, so the C backend **would not build against any ModernGekko
 checkout on this machine**. The differential suite never noticed, because it
-links DolRecomp's own `cpu.h`. Those three helpers were added to the vendored
-runtimes; that edit lives outside this repository and will be lost if GXRuntime
-is re-vendored.
+links DolRecomp's own `cpu.h`.
+
+The first fix added those helpers to the vendored runtimes. That was wrong: the
+vendored GXRuntime is a nested git submodule, so the edit would have been
+discarded by any `git submodule update`. The emitter now calls what the runtime
+actually declares instead -- the paired-single wrappers were pure pass-throughs,
+and the FP one's MSR[FP] fast path is spelled out in the generated C. Verified
+by reverting all three GXRuntime edits and building Mario Kart's C module
+against pristine headers, so nothing outside this repository has to be
+maintained.
 
 **The lesson, stated plainly: measure against the reference backend in Phase 0.**
 
