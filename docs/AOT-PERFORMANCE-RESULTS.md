@@ -1468,6 +1468,94 @@ improvement to the slower backend, and the report should say so.
 
 ---
 
+## 5u. Why the LLVM backend is slower: it spills the guest register file
+
+Three differences were found. The first is the mechanism; the other two are real
+but secondary.
+
+### 1. Eager state promotion spills, and it dominates
+
+Disassembling the final linked modules and counting instructions that touch the
+stack, two independent 400,000-instruction samples from each:
+
+| | sample A | sample B |
+|---|---|---|
+| C backend | **5.0%** | **3.2%** |
+| `llvm-aot` | **33.5%** | **29.1%** |
+
+**Roughly nine times the stack traffic.** One region body
+(`func_80012A90_budget`, 17,873 instructions) allocates a 216-byte frame and
+spends 6,822 instructions -- 38% of itself -- on stack loads and stores.
+
+The cause is the architecture in D2. This backend promotes *every used guest
+slot* to an alloca at region entry, loading each from `CPUState`. `mem2reg`
+turns those into SSA values, but a region that touches thirty-odd slots has far
+more simultaneously-live values than x86-64 has registers, so the allocator
+spills them straight back to the stack. The net effect is to replace "load from
+`CPUState` when needed" with "load from `CPUState` at entry, store to stack,
+reload from stack when needed" -- strictly one extra copy, plus a large frame.
+
+The C backend never does this. Its generated code operates directly on
+`ctx->gpr[N]`:
+
+```c
+ctx->gpr[6] = ctx->gpr[6] + (u32)(s32)(4);
+u32 ea = ctx->gpr[6] + (u32)(s32)(0);
+ctx->gpr[7] = mem_read32(ctx, ea);
+```
+
+State stays in memory and clang promotes it to registers only across the ranges
+where that pays, using full alias analysis. There are no materialization
+barriers because nothing was ever hoisted out of `CPUState` to need flushing.
+
+This also retroactively explains E002/E003 (§4), which has sat unexplained since
+Phase 0: 1024-instruction chunks cost 3x the code of 128-instruction chunks and
+ran a third slower. A larger chunk touches more distinct guest slots, so more
+values are live at entry, so more spill. Same mechanism, measured two different
+ways a year apart.
+
+### 2. The C backend gets ThinLTO; the LLVM backend does not
+
+The module template sets `INTERPROCEDURAL_OPTIMIZATION TRUE` for Clang, so every
+C chunk compiles to **bitcode** -- verified by the `BCÀÞ` magic on the
+`.c.obj` files -- and the whole module goes through ThinLTO at link. The LLVM
+backend's region objects are pre-built native `.o` files added as
+`EXTERNAL_OBJECT`, which that property does not touch, so they bypass it
+entirely.
+
+So §5t's comparison was C-with-whole-program-optimization against
+LLVM-without. `--lto thin` (§5p) closes that gap on paper, and it is worth
+noting it did *not* close the performance gap -- consistent with spill traffic,
+not missing IPO, being the dominant cost.
+
+### 3. A weaker pass pipeline
+
+`kPassPipeline` is hand-rolled and runs once over each function. clang -O3
+iterates function simplification, interleaves inlining with cleanup inside the
+CGSCC walk, and runs SROA, loop unrolling and several more rounds of
+instcombine. Here `cgscc(inline)` is *last*, followed only by `ipsccp` and
+`globaldce`, so inlined code is never simplified afterwards. Codegen also runs
+at `CodeGenOptLevel::Default` (O2) rather than `Aggressive`.
+
+`DOLRECOMP_LLVM_PIPELINE=o3` swaps in LLVM's own `-O3` module pipeline and
+raises codegen to Aggressive, so this is measurable rather than assumed.
+
+### What to do about it
+
+The spill traffic is the thing to fix, and it is a design change rather than a
+tuning knob: **stop promoting guest state eagerly at region entry.** Leave it in
+`CPUState`, as the C backend does, and let the optimizer hoist what pays. That
+deletes the materialization barrier problem as a side effect -- the barriers
+exist only to flush values that were hoisted in the first place, which is also
+why every attempt to narrow them (§5m, §5n, §5s) has been either unsound or
+worthless.
+
+It is close to a rewrite of the emitter's state handling, so it should be
+prototyped on one title behind a flag and measured against the numbers here
+before anything is committed to it.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile

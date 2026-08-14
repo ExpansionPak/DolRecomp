@@ -93,6 +93,25 @@ static std::string targetFeatures() {
 // against CPU "generic" with an empty feature string is wrong -- SSE2 is part
 // of the x86-64 baseline, and Gekko paired-singles are inherently 2-wide f32
 // pairs, so SLP has real work to do at that baseline.
+// The hand-rolled pipeline below is one shot over each function, and it is
+// weaker than what the C backend's chunks get: clang -O3 iterates function
+// simplification, interleaves inlining with cleanup inside the CGSCC walk, and
+// runs SROA, loop unrolling and several more rounds of instcombine. Here
+// cgscc(inline) runs *last*, followed only by ipsccp and globaldce, so nothing
+// ever simplifies inlined code.
+//
+// DOLRECOMP_LLVM_PIPELINE=o3 swaps it for LLVM's own -O3 module pipeline, the
+// same one clang builds, and raises codegen from Default (O2) to Aggressive.
+// Measuring that is the first step in explaining why compiled C beats this
+// backend by 60-70% on the same DolIR (AOT-PERFORMANCE-RESULTS.md 5t).
+static bool defaultO3Pipeline() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("DOLRECOMP_LLVM_PIPELINE");
+    return value && value[0] == 'o' && value[1] == '3';
+  }();
+  return enabled;
+}
+
 static constexpr const char *kPassPipeline =
     "function(mem2reg,early-cse<memssa>,instcombine<no-verify-fixpoint>,"
     "simplifycfg,sccp,"
@@ -247,6 +266,8 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
   (void)initialized;
 
   int opt = options ? options->optimization_level : 2;
+  if (defaultO3Pipeline())
+    opt = 3;
   std::string tripleName =
       resolveTriple(options ? options->target_triple : nullptr);
   const llvm::Triple triple(tripleName);
@@ -595,7 +616,9 @@ extern "C" bool dolllvm_codegen_fingerprint(char *out, size_t size) {
       (replacements_enabled() ? "|repl=1" : "") +
       // Changes the signature of every internal region body, so a cached object
       // from the other setting is not merely slower, it is incompatible.
-      (reg_args_enabled() ? "|regargs=1" : "");
+      (reg_args_enabled() ? "|regargs=1" : "") +
+      // A different optimization pipeline entirely.
+      (defaultO3Pipeline() ? "|pipeline=o3" : "");
   if (fingerprint.size() + 1 > size)
     return false;
   memcpy(out, fingerprint.c_str(), fingerprint.size() + 1);
