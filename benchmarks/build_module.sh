@@ -34,6 +34,7 @@ MAX_IR="${6:-}"
 LTO="${7:-}"
 MEM="${8:-}"
 PIPE="${9:-}"
+PGO="${10:-}"
 
 MG_ROOT="${MG_ROOT:-C:/Users/douglaswhittingham/luigis-mansion-recomp/lib/ModernGekko}"
 PORT="$MG_ROOT/build/moderngekko-port.exe"
@@ -53,6 +54,7 @@ SLUG="$BACKEND"
 [ -n "$LTO" ] && SLUG="$SLUG-lto$LTO"
 [ -n "$MEM" ] && SLUG="$SLUG-mem$MEM"
 [ -n "$PIPE" ] && SLUG="$SLUG-p$PIPE"
+[ -n "$PGO" ] && SLUG="$SLUG-pgo$PGO"
 OUT="$OUT_ROOT/$SLUG"
 
 # moderngekko-port validates --backend against its own c|llvm list, so an AOT
@@ -60,7 +62,7 @@ OUT="$OUT_ROOT/$SLUG"
 PORT_BACKEND="$BACKEND"
 unset DOLRECOMP_FORCE_BACKEND DOLRECOMP_REGION_MODE
 unset DOLRECOMP_REGION_MAX_INSTRUCTIONS DOLRECOMP_REGION_MAX_IR DOLRECOMP_LTO
-unset DOLRECOMP_MEMORY_MODE DOLRECOMP_LLVM_PIPELINE
+unset DOLRECOMP_MEMORY_MODE DOLRECOMP_LLVM_PIPELINE DOLRECOMP_LLVM_PGO
 if [ "$BACKEND" = "llvm-aot" ]; then
   PORT_BACKEND="llvm"
   export DOLRECOMP_FORCE_BACKEND=llvm-aot
@@ -99,6 +101,40 @@ fi
 
 [ -n "$MEM" ] && export DOLRECOMP_MEMORY_MODE="$MEM"
 [ -n "$PIPE" ] && export DOLRECOMP_LLVM_PIPELINE="$PIPE"
+if [ -n "$PGO" ]; then
+  export DOLRECOMP_LLVM_PGO="$PGO"
+  if [ "$PGO" = use ]; then
+    # Keyed by the profile's CONTENT in the codegen fingerprint, so a profile
+    # regenerated in place cannot silently reuse objects built from the old one.
+    [ -n "${DOLRECOMP_LLVM_PROFILE:-}" ] || {
+      echo "[$SLUG] PGO use requires DOLRECOMP_LLVM_PROFILE" >&2; exit 1; }
+    export DOLRECOMP_LLVM_PROFILE
+  fi
+  if [ "$PGO" = gen ]; then
+    # Instrumented objects reference __llvm_profile_runtime and
+    # __llvm_profile_instrument_target, which live in compiler-rt's profile
+    # library. The module template has no reason to link it -- the region
+    # objects arrive pre-built, so nothing on its own command line asks for
+    # instrumentation -- and without it the module fails to link with two
+    # undefined symbols and no hint as to why.
+    # Must come from the SAME LLVM that instruments the objects. The system
+    # clang here is 22.x while the backend links 20.1.8, and mixing them
+    # produces a .profraw whose format version 20.1.8 then refuses to read --
+    # "unsupported instrumentation profile format version", at the use build,
+    # long after the profiling run is over.
+    if [ -z "${LLVM_ROOT:-}" ]; then
+      LLVM_DIR_LINE=$(grep -m1 "^LLVM_DIR" "$(dirname "$0")/../build/CMakeCache.txt" 2>/dev/null)
+      LLVM_ROOT=${LLVM_DIR_LINE#*=}
+      LLVM_ROOT=${LLVM_ROOT%/lib/cmake/llvm}
+    fi
+    PROFILE_LIB="${PROFILE_LIB:-$(ls "$LLVM_ROOT/lib/clang/"*/lib/windows/clang_rt.profile-x86_64.lib 2>/dev/null | head -1)}"
+    if [ -z "$PROFILE_LIB" ]; then
+      echo "[$SLUG] PGO gen requested but clang_rt.profile-x86_64.lib not found" >&2
+      exit 1
+    fi
+    export LDFLAGS="${LDFLAGS:-} \"$PROFILE_LIB\""
+  fi
+fi
 
 mkdir -p "$OUT"
 echo "[$SLUG] building into $OUT"

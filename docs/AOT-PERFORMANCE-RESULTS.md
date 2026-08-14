@@ -1661,6 +1661,68 @@ Open questions for the full version:
 
 ---
 
+## 5w. PGO on top of the memory-resident state: +14.9%, with a caveat
+
+Codegen PGO had never been measured. Every result above §5w was taken with
+`DOLRECOMP_LLVM_PGO` unset; the only PGO tested was *region seeding* (§5i),
+which is a different thing and was a dead end.
+
+Mario Kart, same scene, against the current default:
+
+| | fps | guest cycles/sec |
+|---|---|---|
+| default | 57.6 | 908 M |
+| **`DOLRECOMP_LLVM_PGO=use`** | **66.1** | **1,095 M** |
+| delta | **+14.9%** | **+21.4%** |
+
+9 of 9 comparable pairs favour it, range +10.5% to +19.9%, sign test
+p = 0.0039, `fallback` 0 on every run. Module grows 6.2% (85.8 -> 91.1 MB),
+which is PGO doing what it does: hot paths grow, cold ones shrink.
+
+### The caveat that matters more than the number
+
+**The profile was collected on `bench.sav` and measured on `bench.sav`.** That
+is the same scene, so this figure is an upper bound and not what a shipped
+profile would deliver. A real profile would be gathered across many scenes and
+then run on scenes it had never seen; the branch layout it produces would be a
+compromise rather than a perfect fit.
+
+Treat +14.9% as "PGO works on this backend and the mechanism is sound", not as
+"users get 15%". Establishing the honest figure needs a profile collected on
+one set of scenes and measured on a disjoint set, which is not done.
+
+### Why it pays more here than it would have before
+
+With guest state no longer spilling (§5v), what remains is dominated by the
+MEM1/MEM2/slow-path branch chain on every guest load and store. Block placement
+and branch probability are exactly what a profile buys, so the same profile
+would have been worth far less against the old spill-bound code.
+
+### Toolchain trap
+
+The system clang is 22.1.5; the backend links LLVM 20.1.8. Linking clang 22's
+`clang_rt.profile` against 20.1.8-instrumented objects produces a `.profraw`
+that 20.1.8 refuses to read -- and the error appears at the **use** build, long
+after the profiling run is over:
+
+```
+error: mkdd.profdata: unsupported instrumentation profile format version
+```
+
+No module was produced, so the profile was not silently ignored -- which is the
+failure mode that would matter, because a dropped profile looks exactly like
+"PGO does nothing". `benchmarks/build_module.sh` now derives the profile runtime
+from `LLVM_DIR` in `CMakeCache.txt`, so it tracks whichever LLVM instruments the
+objects rather than whatever is first on PATH.
+
+### Status
+
+One title, off by default, and the scene-overlap caveat above unresolved. It
+needs the treatment `--memory-mode fast` got -- three titles, disjoint profile
+and measurement scenes -- before it could be a default or a headline.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile
