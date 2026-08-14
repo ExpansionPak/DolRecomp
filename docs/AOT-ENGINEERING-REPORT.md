@@ -3,9 +3,13 @@
 Branch `feature/llvm-aot-regions`, 73 commits on upstream
 `fa0cf619e8d7eb8cba7eaf55267a12caaebb46aa`.
 
-Every number here was measured on this host and is reproducible from the
-commands in [AOT-PERFORMANCE-RESULTS.md](AOT-PERFORMANCE-RESULTS.md). Negative
-and retracted results are included; nothing is extrapolated.
+Every number here was measured on this host. Negative and retracted results are
+included; nothing is extrapolated.
+
+Reproducing them: `benchmarks/build_module.sh` builds a module for one
+configuration into a directory keyed to it, `benchmarks/run_title_benchmark.py`
+measures one arm, and `benchmarks/paired_arms.py` / `compare_arms.py` compare
+two. Titles are supplied locally and none is committed.
 
 ---
 
@@ -27,13 +31,13 @@ Two changes produced essentially all of it. Everything else measured flat.
 Profile-guided optimisation then adds **+5.6% to +18.9%** on top, validated on
 three titles and 34 of 36 paired runs (p = 1.9e-08), two of them with held-out
 measurement scenes. It needs a per-title profile, so it is a build-pipeline
-step rather than a default (§5w).
+step rather than a default (2.3).
 
 ---
 
 ## 2. What actually worked
 
-### 2.1 Guest state stays in `CPUState` (§5v)
+### 2.1 Guest state stays in `CPUState`
 
 The emitter used to promote every guest slot it touched to an alloca at region
 entry. That hands the register allocator far more simultaneously-live values
@@ -58,7 +62,7 @@ module was the largest and gains most, Luigi's Mansion the smallest and gains
 least. That is what the mechanism predicts, and it is the reason to believe the
 mechanism rather than only the outcome.
 
-### 2.2 `--memory-mode fast` (§5q)
+### 2.2 `--memory-mode fast`
 
 `ram_size` is `GC_MAIN_RAM_SIZE` in this tree and in GXRuntime — assigned once,
 carried across reset, never given another value — so the MEM1 bound folds to a
@@ -71,6 +75,41 @@ is null unless a runtime installs one, so its branch leaves the store path.
 Both assumptions are **verified once at dispatch entry**, not assumed. If either
 fails the module refuses to run natively and the chassis keeps interpreting, so
 a violated assumption costs speed and never guest memory.
+
+### 2.3 Profile-guided optimisation
+
+`DOLRECOMP_LLVM_PGO=gen` instruments, a run writes a `.profraw`, and
+`DOLRECOMP_LLVM_PGO=use` with `DOLRECOMP_LLVM_PROFILE` applies the merged
+profile. Codegen PGO had never been measured before this -- the only PGO
+previously tested was region *seeding*, which is unrelated and was a dead end.
+
+| title | scene design | fps | pairs | sign test |
+|---|---|---|---|---|
+| Mario Kart | **held out** (5 courses profiled, 2 measured) | +12.5% / +18.9% | 14/16 | p = 0.0042 |
+| Luigi's Mansion | **held out** (`foyer` profiled, `bench` measured) | **+5.6%** | 10/10 | p = 0.0020 |
+| Skyward Sword | same scene (only one gameplay state exists) | **+11.9%** | 10/10 | p = 0.0020 |
+
+Combined **34 of 36 pairs, p = 1.9e-08**, `fallback` 0 on every run.
+
+Two of the three use held-out measurement scenes, so generalisation is measured
+rather than assumed. Skyward Sword could not be: its only savestates are
+`gameplay` and `title`, and a title screen shares almost no code with gameplay.
+
+The spread tracks module size, as block placement predicts and matching the
+ordering seen in 2.1: Luigi's Mansion is the smallest module and gains least.
+
+It pays more here than it would have before 2.1, because with the spill gone
+what remains is dominated by the MEM1/MEM2/slow-path branch chain that every
+guest load and store walks.
+
+**Toolchain note.** The profile runtime must come from the same LLVM that
+instruments. A system clang newer than the backend's LLVM produces a `.profraw`
+the backend refuses to read, and the error appears at the *use* build, long
+after the profiling run is over. `build_module.sh` derives it from `LLVM_DIR`.
+
+Not a default in the sense the other options are, since it needs a per-title
+profile. Unmeasured: whether the gain holds on a scene much heavier than
+anything in the profile set.
 
 ---
 
@@ -224,7 +263,7 @@ evidence a smaller module does not reliably mean a faster one.
 
 The per-call state round trip remains the largest identified cost: calls are
 7.79% and returns 10.95% of weighted execution. The entry-side half of the
-private ABI was built and measured negative (§5s); the win, if any, is in not
+private ABI was built and measured negative (section 3); the win, if any, is in not
 materializing on the way *out*, which needs a staleness analysis this emitter
 has got wrong twice.
 
