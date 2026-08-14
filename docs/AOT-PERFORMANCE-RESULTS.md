@@ -1317,6 +1317,50 @@ and wrong general conclusion.
 
 ---
 
+## 5s. Register-passed guest state: measured, negative, kept behind a flag
+
+D3's private internal ABI says to pass live guest state in registers rather than
+through `CPUState`. `DOLRECOMP_REG_ARGS` implements the half of that which needs
+no dataflow analysis: the internal body takes GPR3..GPR10 as parameters, so a
+direct call hands them over in registers instead of the callee loading them.
+
+Safe by construction -- the caller materializes immediately before the call, so
+the parameters and `CPUState` hold identical values, and the public wrapper
+loads them from `CPUState` for dispatcher entries. Verified in the IR that the
+definition and the call site agree at 8 extra `i32` parameters; 23/23 with it on
+and off; differential green across four seeds.
+
+It is slower.
+
+| | Luigi's Mansion |
+|---|---|
+| module | 250,337,792 B vs 235,978,240 B, **+6.1%** |
+| fps | **-2.3%** |
+| guest cycles/sec | -2.3% |
+| pairs favouring it | 3 / 17 |
+| sign test | p = 0.0127 |
+
+The size number explains it. The entry side saves eight loads inside the callee,
+but the caller now sets up eight argument registers at every call site, and
+there are more call sites than function entries. The caller still materializes
+before the call -- that is exactly what makes the scheme provably safe -- so the
+argument setup is added **on top of** the stores rather than replacing them:
+overhead at the caller, a modest saving at the callee.
+
+Which identifies where the win in D3 actually lives. It was never in passing
+state *in*; it is in not having to materialize it *out*. That requires the
+return side, and the return side requires knowing which slots are stale at each
+of the 18 return sites in the body -- every one of which sits after a helper
+that may have written `CPUState`. That is the staleness analysis this emitter
+has got wrong twice, each time passing the full suite and then hanging a real
+title.
+
+Kept behind the flag rather than reverted: it is the half of D3 that can be
+built without that analysis, and the negative result is the useful part for
+whoever attempts the other half.
+
+---
+
 ## 6. Runtime counters
 
 **Not measured at this commit.** The Phase 0a runtime counters exist and compile

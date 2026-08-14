@@ -281,6 +281,7 @@ where things actually stand.
 | Static crossing count as a proxy | falls 21% while runtime rate moves 0.8% |
 | `bctr`/jump-table specialisation | 0.17% of weighted execution on MKDD |
 | Address-adjacency merging | 2.2x build time, +6.3% size, +1.1% crossings |
+| Register-passed GPR3..GPR10, entry side | +6.1% size, -2.3% fps, p = 0.0127 |
 
 ### Phases 2, 3 and 4 — closed
 
@@ -332,10 +333,12 @@ problem as the per-call round trip below, not a separate one.
 
 1. **Per-call state round trip.** `materialize` -> call -> returned-PC check ->
    reload, paid per executed call. Calls are 7.79% and returns 10.95% of
-   weighted execution. The private `fastcc` ABI passing live state in registers
-   (D3) is the real fix; `fastcc` itself landed but the signature is still
-   `(ctx, guard_cycles, guard_steps)`, so no state travels in registers yet.
-   This is the largest identified remaining cost.
+   weighted execution. Still the largest identified remaining cost, but the
+   entry-side half of D3 has now been measured and is **negative** (§5s):
+   passing GPR3..GPR10 in costs more at the caller than it saves at the callee,
+   because the caller must still materialize. The win is in not materializing,
+   which needs the return side, which needs the staleness analysis. Do not
+   retry the entry side.
 2. **Call-path differential coverage** is now in place (calls with LR save and
    restore through a shared dispatch loop), so item 1 is no longer blocked.
 3. **Fastmem.** §D6's guarded fastmem is what `--memory-mode fast` implements.
