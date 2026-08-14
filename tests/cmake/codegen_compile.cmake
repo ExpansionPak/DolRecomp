@@ -42,7 +42,11 @@ endif()
 if(NOT generated_source MATCHES "static void loop_80004040\\(CPUState\\* ctx\\)")
     message(FATAL_ERROR "ordinary RAM loop was not outlined")
 endif()
-if(NOT generated_source MATCHES "if \\(!ppc_fp_available_inline\\(ctx, 0x8000317Cu\\)\\) return;")
+# The gate is spelled out rather than calling ppc_fp_available_inline, because
+# that helper exists only in DolRecomp's cpu.h and generated modules compile
+# against the runtime's. Both halves are asserted: the MSR[FP] fast path and the
+# fallback call, so dropping either one still fails this test.
+if(NOT generated_source MATCHES "if \\(!\\(\\(ctx->msr & 0x00002000u\\) || ppc_fp_available\\(ctx, 0x8000317Cu\\)\\)\\) return;")
     message(FATAL_ERROR "generated floating-point code has no MSR FP gate")
 endif()
 if(NOT generated_source MATCHES "ppc_fallback_instruction\\(ctx, 0x7C13A0ACu")
