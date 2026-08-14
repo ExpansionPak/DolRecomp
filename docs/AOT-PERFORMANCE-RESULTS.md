@@ -1733,12 +1733,43 @@ failure mode that would matter, because a dropped profile looks exactly like
 from `LLVM_DIR` in `CMakeCache.txt`, so it tracks whichever LLVM instruments the
 objects rather than whatever is first on PATH.
 
+### All three titles
+
+| title | scene design | fps | guest cycles/sec | pairs | sign test |
+|---|---|---|---|---|---|
+| Mario Kart | **held out** (5 courses profiled, 2 measured) | +12.5% / +18.9% | +22.2% / +30.8% | 14/16 | p = 0.0042 |
+| Luigi's Mansion | **held out** (`foyer` profiled, `bench` measured) | **+5.6%** | +6.6% | 10/10 | p = 0.0020 |
+| Skyward Sword | same scene (only one gameplay state exists) | **+11.9%** | +15.0% | 10/10 | p = 0.0020 |
+
+Combined: **34 of 36 pairs, p = 1.9e-08**. `fallback` 0 on every run.
+
+Two of the three are held-out designs, so generalisation is measured rather
+than assumed. Skyward Sword could not be: its only savestates are `gameplay`
+and `title`, and a title screen shares almost no code with gameplay, so
+profiling it would test something nobody would do. The Skyward Sword figure
+therefore says "PGO helps on a Wii title with MEM2 live", not "it generalises
+there".
+
+The spread tracks module size, which is what the mechanism predicts: Luigi's
+Mansion is the smallest module and gains least (+5.6%), Mario Kart the largest
+and gains most. The same ordering appeared for the state-in-memory change
+(§5v), where LM gained +26.7% against Mario Kart's +60.9%.
+
+Instrumented modules run at close to full speed (52.97 fps against a 57 fps
+default on Mario Kart; 33.75 and 26.23 on the other two), so collecting a
+profile is cheap enough for a real build pipeline rather than only a lab.
+
 ### Status
 
-Off by default, and validated on one title. The scene-overlap question is
-answered; what is still owed before it could be a default is the other two
-titles, and a check that the gain survives on a scene much heavier than
-anything in the profile set.
+Validated on three titles and two held-out scene designs. This is not a
+"default" in the sense the other options are -- it needs a profile, which is a
+per-title build artifact -- so the recommendation is that any title shipping a
+tuned module should collect one.
+
+What is still unmeasured: whether the gain survives on a scene much heavier
+than anything in the profile set. All five Mario Kart profile scenes were
+courses, and `bench.sav` is considerably heavier than any of them (57 fps at
+169 `bursts/Mcycle` against 67-95 at 107-134).
 
 ---
 

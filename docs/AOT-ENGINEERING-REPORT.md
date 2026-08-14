@@ -24,6 +24,11 @@ it started with and builds **19x faster**.
 
 Two changes produced essentially all of it. Everything else measured flat.
 
+Profile-guided optimisation then adds **+5.6% to +18.9%** on top, validated on
+three titles and 34 of 36 paired runs (p = 1.9e-08), two of them with held-out
+measurement scenes. It needs a per-title profile, so it is a build-pipeline
+step rather than a default (§5w).
+
 ---
 
 ## 2. What actually worked
