@@ -18,19 +18,6 @@ namespace dolllvm {
 
 using namespace llvm;
 
-// Off by default: measured -4.3% module size for +50% build time, with
-// bursts/Mcycle unchanged. Correct, but not worth its cost as it stands. Kept
-// because the indirect-switch edge fix it forced is the prerequisite for
-// passing live state in registers.
-//   DOLRECOMP_NARROW_BARRIERS=1   narrow barrier stores by reaching-writes
-static bool narrowBarriers() {
-  static const bool enabled = [] {
-    const char *value = std::getenv("DOLRECOMP_NARROW_BARRIERS");
-    return value && value[0] == '1';
-  }();
-  return enabled;
-}
-
 // Off by default, and the reason is measured rather than assumed: chunk size
 // drives how much guest state the register allocator keeps live, and that is
 // what made 1024-instruction chunks cost 3x the code size of 128 for a third
@@ -50,50 +37,6 @@ static bool inlineRegions() {
   return enabled;
 }
 
-// Pass guest state in registers across the private fastcc boundary (D3).
-//
-// ENTRY SIDE ONLY, and the asymmetry is deliberate. The caller materializes
-// before a direct call, so CPUState and the incoming parameters agree by
-// construction -- seeding the callee's slots from parameters is then provably
-// equivalent to loading them, and saves the loads.
-//
-// Returning them is NOT symmetric and is not done here. Every return site in
-// the body sits after a helper that may have written CPUState (fallback,
-// external read/write, FP-unavailable, system call, rfi), so alloca values at
-// those points can be stale; returning them would hand the caller stale state.
-// Making them current means either reloading from CPUState at each return site
-// -- there are more return sites than call sites, so that costs more than it
-// saves -- or a staleness analysis, which is the analysis this emitter has got
-// wrong twice (see materialize()). The return side stays on CPUState until the
-// successor model is derived from the emitter's own edges rather than
-// reconstructed alongside them.
-//   DOLRECOMP_REG_ARGS=1
-// Leave guest state in CPUState instead of promoting it to allocas at region
-// entry.
-//
-// The promoting design gives the register allocator far more simultaneously
-// live values than x86-64 has registers, so it spills them straight back:
-// measured at 29-33% of emitted instructions touching the stack against 3-5%
-// for the C backend, which operates directly on ctx->gpr[N] and lets clang
-// hoist only what pays (AOT-PERFORMANCE-RESULTS.md 5u). Running LLVM's own -O3
-// pipeline changed that number by nothing, so it is structural: no pass can
-// undo a live set larger than the machine.
-//
-// Under this flag state_[slot] points into CPUState rather than at an alloca.
-// Every load and store site is unchanged; what disappears is the entry
-// prologue, and with it the materialization barriers -- they exist only to
-// flush values that were hoisted, and nothing is hoisted here.
-//   DOLRECOMP_STATE_MEMORY=1
-static bool stateInMemory() {
-  static const bool enabled = state_in_memory() != 0;
-  return enabled;
-}
-
-static bool regArgs() {
-  static const bool enabled = reg_args_enabled() != 0;
-  return enabled;
-}
-
 FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
                                  const DolIRFunction &source,
                                  const DolLLVMFunctionRange *ranges,
@@ -103,10 +46,8 @@ FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
 
 bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   auto *pointer = PointerType::getUnqual(context_);
-  SmallVector<Type *, 11> params{pointer, pointer, pointer};
-  if (regArgs())
-    params.append(kRegArgCount, Type::getInt32Ty(context_));
-  auto *type = FunctionType::get(Type::getVoidTy(context_), params, false);
+  auto *type = FunctionType::get(Type::getVoidTy(context_),
+                                 {pointer, pointer, pointer}, false);
   const std::string bodyName = std::string(source_.name) + "_budget";
   function_ = module_.getFunction(bodyName);
   if (!function_)
@@ -120,9 +61,10 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   // convention because that is the ModernGekko ABI and mods, hooks and the
   // dispatcher all call through it.
   //
-  // The private internal ABI (D3). With DOLRECOMP_REG_ARGS the signature also
-  // carries GPR3..GPR10, so a direct call hands them over in registers rather
-  // than through CPUState. See regArgs() above for why only the entry side.
+  // D3 also proposed carrying live guest state in these registers. That was
+  // built and measured at -2.3% fps (AOT-PERFORMANCE-RESULTS.md 5s), then
+  // removed outright when state stopped being hoisted: with nothing in
+  // registers to hand over, there is nothing for a wider signature to carry.
   function_->setCallingConv(CallingConv::Fast);
   function_->setVisibility(GlobalValue::HiddenVisibility);
   function_->setDSOLocal(true);
@@ -143,8 +85,6 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   // edges it discovers, and running them before it is what made the first two
   // attempts model a different graph than the emitter generates.
   scanContinuations();
-  computeLiveness();
-  computeReachingWrites();
   scanLoopHeaders();
   emitEntry();
   for (u32 i = 0; i < source_.block_count; i++)
@@ -179,20 +119,8 @@ bool FunctionEmitter::emitWrapper(raw_ostream &diagnostics) {
       builder.CreateAlloca(Type::getInt64Ty(context_), nullptr, "guard_steps");
   builder.CreateStore(builder.getInt64(0), guardCycles);
   builder.CreateStore(builder.getInt64(0), guardSteps);
-  SmallVector<Value *, 11> arguments{wrapper->getArg(0), guardCycles,
-                                     guardSteps};
-  if (regArgs()) {
-    // The public entry point is reached from the dispatcher, so CPUState is the
-    // only source for these.
-    for (u32 i = 0; i < kRegArgCount; i++) {
-      auto stateSlot = static_cast<DolIRStateSlot>(kRegArgFirst + i);
-      Value *address = builder.CreateConstInBoundsGEP1_64(
-          Type::getInt8Ty(context_), wrapper->getArg(0), stateOffset(stateSlot));
-      arguments.push_back(
-          builder.CreateLoad(Type::getInt32Ty(context_), address));
-    }
-  }
-  CallInst *body = builder.CreateCall(function_, arguments);
+  CallInst *body = builder.CreateCall(
+      function_, {wrapper->getArg(0), guardCycles, guardSteps});
   body->setCallingConv(CallingConv::Fast);
   builder.CreateRetVoid();
   return !verifyFunction(*wrapper, &diagnostics);
@@ -304,273 +232,6 @@ Value *FunctionEmitter::loadOffset(Type *valueType, size_t offset) {
   return builder_.CreateLoad(valueType, bytePtr(offset));
 }
 
-bool FunctionEmitter::liveAt(u32 block, DolIRStateSlot slot) const {
-  if (live_in_.empty())
-    return used_[slot];  // No liveness computed: fall back to the safe superset.
-  std::size_t index = (std::size_t)block * DOLIR_STATE_COUNT + (std::size_t)slot;
-  return index < live_in_.size() && live_in_[index] != 0;
-}
-
-// Which guest state slots are live on entry to each block.
-//
-// This exists to shrink the reload after a cross-region call. That reload
-// previously restored every slot the function touches anywhere, because
-// `used_` is a whole-function set -- so a call in a region that touches sixty
-// slots paid sixty loads even when the continuation reads three.
-//
-// Only the reload side can use it. Materialisation before the call must still
-// store every dirty slot: the callee reads guest state through CPUState and
-// nothing here knows which slots it looks at. Narrowing that needs
-// interprocedural information the emitter does not have.
-//
-// Conservative in three places, each of which would be a correctness bug the
-// other way:
-//   - a slot live out of any successor is live here;
-//   - an unresolved successor (an exit, an indirect transfer, a call that may
-//     not come back) makes everything the function uses live, because the
-//     value may be observed through CPUState after we leave;
-//   - a block whose terminator can raise makes everything live, since the
-//     exception path materialises.
-void FunctionEmitter::computeLiveness() {
-  const u32 blocks = source_.block_count;
-  if (blocks == 0)
-    return;
-
-  live_in_.assign((std::size_t)blocks * DOLIR_STATE_COUNT, 0);
-
-  std::vector<unsigned char> gen((std::size_t)blocks * DOLIR_STATE_COUNT, 0);
-  std::vector<unsigned char> kill((std::size_t)blocks * DOLIR_STATE_COUNT, 0);
-  std::vector<unsigned char> escapes(blocks, 0);
-
-  for (u32 b = 0; b < blocks; b++) {
-    const DolIRBlock &block = source_.blocks[b];
-    std::size_t base = (std::size_t)b * DOLIR_STATE_COUNT;
-    for (u32 i = 0; i < block.instruction_count; i++) {
-      const DolIRInstruction &inst = block.instructions[i];
-      if (inst.op == DOLIR_OP_STATE_READ) {
-        // Read before any write in this block: live coming in.
-        if (!kill[base + inst.aux])
-          gen[base + inst.aux] = 1;
-      } else if (inst.op == DOLIR_OP_STATE_WRITE) {
-        kill[base + inst.aux] = 1;
-      } else if (inst.effects & (DOLIR_EFFECT_MAY_RAISE | DOLIR_EFFECT_BARRIER)) {
-        // A helper that can raise or acts as a barrier observes CPUState.
-        escapes[b] = 1;
-      }
-    }
-
-    switch (block.terminator.kind) {
-    case DOLIR_TERM_BRANCH:
-    case DOLIR_TERM_COND_BRANCH:
-      break;  // Successors are inside the region.
-    default:
-      escapes[b] = 1;  // Return, indirect, side exit, fallback, sc, rfi.
-      break;
-    }
-  }
-
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (u32 i = blocks; i-- > 0;) {
-      const DolIRBlock &block = source_.blocks[i];
-      std::size_t base = (std::size_t)i * DOLIR_STATE_COUNT;
-
-      unsigned char out[DOLIR_STATE_COUNT] = {0};
-      if (escapes[i]) {
-        for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++)
-          out[slot] = used_[slot] ? 1 : 0;
-      }
-      for (u32 s = 0; s < 2; s++) {
-        u32 target = block.terminator.targets[s];
-        if (target == DOLIR_NO_BLOCK || target >= blocks)
-          continue;
-        std::size_t tbase = (std::size_t)target * DOLIR_STATE_COUNT;
-        for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++)
-          out[slot] |= live_in_[tbase + slot];
-      }
-      // The indirect switch reaches every continuation block, so anything live
-      // there is live out of an indirect terminator.
-      if (block.terminator.kind == DOLIR_TERM_INDIRECT) {
-        for (u32 continuation : continuations_) {
-          if (continuation >= blocks)
-            continue;
-          std::size_t cbase = (std::size_t)continuation * DOLIR_STATE_COUNT;
-          for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++)
-            out[slot] |= live_in_[cbase + slot];
-        }
-      }
-
-      for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
-        unsigned char live = gen[base + slot] ||
-                             (out[slot] && !kill[base + slot]);
-        if (live && !live_in_[base + slot]) {
-          live_in_[base + slot] = 1;
-          changed = true;
-        }
-      }
-    }
-  }
-}
-
-bool FunctionEmitter::mayBeDirty(u32 block, DolIRStateSlot slot) const {
-  if (dirty_in_.empty())
-    return dirty_[slot];  // No analysis: fall back to the safe superset.
-  std::size_t index = (std::size_t)block * DOLIR_STATE_COUNT + (std::size_t)slot;
-  if (index >= dirty_in_.size())
-    return dirty_[slot];
-  // Written on a path to this block, or written by this block itself. The
-  // second term is why this is safe without tracking position inside a block:
-  // a barrier partway through still stores anything the block writes, even
-  // writes that come after it.
-  return dirty_in_[index] || writes_in_block_[index];
-}
-
-// Which guest state slots may have been written on some path from entry.
-//
-// materialize() stores every slot in `dirty_`, which is a whole-function flag:
-// a slot written anywhere is stored at every barrier, including barriers on
-// paths where it was never touched. A slot that no path to here has written
-// still holds its entry value in CPUState, so storing it back writes the value
-// that is already there.
-//
-// This narrows the store side. It cannot narrow it by "what the caller reads":
-// every run start is a public func_XXXXXXXX the dispatcher may enter, and the
-// runtime can snapshot CPUState at any exit -- savestates, mods, debugger,
-// exception paths. Architectural state has to be complete whenever control
-// leaves generated code. What it can do is skip stores that are provably
-// redundant, which is a different and safe claim.
-void FunctionEmitter::computeReachingWrites() {
-  const u32 blocks = source_.block_count;
-  if (blocks == 0)
-    return;
-
-  const std::size_t span = (std::size_t)blocks * DOLIR_STATE_COUNT;
-  dirty_in_.assign(span, 0);
-  writes_in_block_.assign(span, 0);
-
-  for (u32 b = 0; b < blocks; b++) {
-    const DolIRBlock &block = source_.blocks[b];
-    std::size_t base = (std::size_t)b * DOLIR_STATE_COUNT;
-    for (u32 i = 0; i < block.instruction_count; i++) {
-      const DolIRInstruction &inst = block.instructions[i];
-      if (inst.op == DOLIR_OP_STATE_WRITE) {
-        writes_in_block_[base + inst.aux] = 1;
-        continue;
-      }
-      // Anything that writes guest state without saying which slot makes the
-      // whole block conservatively dirty.
-      //
-      // This is the fix for the first attempt, which counted STATE_WRITE only
-      // and diverged from the C backend on 3 of 64 differential pairs. The
-      // exact-float and paired-single helpers take a slot index and write it
-      // inside the runtime; DOLIR_HELPER_PSQ_LOAD writes an FPR and its ps1
-      // lane; SPR and FPSCR helpers write theirs. scanState() enumerates those
-      // cases to build `used_`, and duplicating that enumeration here would be
-      // a second place to forget one.
-      //
-      // Marking every used slot instead gives up narrowing inside blocks that
-      // contain a helper, and keeps it for blocks that do not -- which is most
-      // of them, and all of the integer ones. After being wrong twice about how
-      // state moves, the conservative direction is the one to be wrong in.
-      if (inst.op == DOLIR_OP_HELPER_CALL ||
-          (inst.effects & DOLIR_EFFECT_WRITE_STATE)) {
-        for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
-          if (used_[slot])
-            writes_in_block_[base + slot] = 1;
-        }
-      }
-    }
-  }
-
-  // Predecessors: the terminator edges, plus the indirect-switch edges.
-  //
-  // DOLIR_TERM_INDIRECT lowers to a switch over `continuations_` -- an indirect
-  // transfer whose target matches a known call-return point branches straight to
-  // that block. Those edges do not appear in terminator.targets[], and leaving
-  // them out is what broke the first two barrier-narrowing attempts: a
-  // continuation block normally has a targets-predecessor too, so it did not
-  // fall into the no-predecessor case, and it inherited a dirty set from the
-  // fallthrough path that the indirect path does not justify.
-  std::vector<std::vector<u32>> preds(blocks);
-  for (u32 b = 0; b < blocks; b++) {
-    for (u32 s = 0; s < 2; s++) {
-      u32 target = source_.blocks[b].terminator.targets[s];
-      if (target != DOLIR_NO_BLOCK && target < blocks)
-        preds[target].push_back(b);
-    }
-    if (source_.blocks[b].terminator.kind == DOLIR_TERM_INDIRECT) {
-      for (u32 continuation : continuations_) {
-        if (continuation < blocks)
-          preds[continuation].push_back(b);
-      }
-    }
-  }
-
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (u32 b = 0; b < blocks; b++) {
-      std::size_t base = (std::size_t)b * DOLIR_STATE_COUNT;
-      for (u32 p : preds[b]) {
-        std::size_t pbase = (std::size_t)p * DOLIR_STATE_COUNT;
-        for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
-          if (dirty_in_[base + slot])
-            continue;
-          if (dirty_in_[pbase + slot] || writes_in_block_[pbase + slot]) {
-            dirty_in_[base + slot] = 1;
-            changed = true;
-          }
-        }
-      }
-    }
-  }
-
-  // A block reachable only indirectly has no predecessor edge in this model,
-  // and its entry state is whatever the caller left. Treat every slot the
-  // function writes as possibly dirty there rather than assuming clean.
-  for (u32 b = 1; b < blocks; b++) {
-    if (!preds[b].empty())
-      continue;
-    std::size_t base = (std::size_t)b * DOLIR_STATE_COUNT;
-    for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++)
-      dirty_in_[base + slot] = dirty_[slot] ? 1 : 0;
-  }
-}
-
-// REVERTED to the conservative form. Narrowing this by liveness hung Mario Kart
-// at boot: the module loaded, reported running, and never advanced a frame.
-//
-// computeLiveness() below is unsound for this purpose as written, because the
-// successor model is incomplete. It follows terminator.targets[] only, but the
-// emitter also reaches blocks through the `continuations_` switch that
-// DOLIR_TERM_INDIRECT lowers to -- an indirect transfer whose target matches a
-// known continuation branches straight to that block. Those edges do not appear
-// in targets[], so liveness never propagates backward through them and reports
-// slots dead that a continuation-entered block goes on to read. The reload then
-// skips them and the block runs on stale guest state.
-//
-// The differential suite did not catch it and could not have: its sequences are
-// single functions with no calls, and this path only runs on a cross-function
-// call return. That coverage gap is the actual lesson here.
-//
-// Fixing this needs the indirect-continuation edges in the successor model.
-// Until then the reload restores everything the function uses, which is what it
-// did before and is always correct.
-void FunctionEmitter::reloadLiveState(u32 block) {
-  (void)block;
-  // Nothing was hoisted, so nothing has gone stale; the loads below would read
-  // a CPUState slot and store it straight back to itself.
-  if (stateInMemory())
-    return;
-  for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
-    if (!used_[slot])
-      continue;
-    auto stateSlot = static_cast<DolIRStateSlot>(slot);
-    builder_.CreateStore(loadContext(stateSlot), state_[slot]);
-  }
-}
-
 void FunctionEmitter::scanState() {
   for (u32 b = 0; b < source_.block_count; b++) {
     const DolIRBlock &block = source_.blocks[b];
@@ -578,8 +239,6 @@ void FunctionEmitter::scanState() {
       const DolIRInstruction &inst = block.instructions[i];
       if (inst.op == DOLIR_OP_STATE_READ || inst.op == DOLIR_OP_STATE_WRITE)
         used_[inst.aux] = true;
-      if (inst.op == DOLIR_OP_STATE_WRITE)
-        dirty_[inst.aux] = true;
       if (inst.op == DOLIR_OP_HELPER_CALL &&
           inst.aux == DOLIR_HELPER_FP_AVAILABLE)
         used_[DOLIR_STATE_MSR] = true;
@@ -593,35 +252,28 @@ void FunctionEmitter::scanState() {
           inst.aux == DOLIR_HELPER_PSQ_LOAD) {
         u32 reg = inst.immediate & 0xFFu;
         used_[DOLIR_STATE_FPR0 + reg] = true;
-        dirty_[DOLIR_STATE_FPR0 + reg] = true;
         used_[DOLIR_STATE_PS1_0 + reg] = true;
-        dirty_[DOLIR_STATE_PS1_0 + reg] = true;
       }
       if (inst.op == DOLIR_OP_HELPER_CALL &&
           inst.aux == DOLIR_HELPER_STORE_CONDITIONAL) {
         used_[DOLIR_STATE_CR] = true;
-        dirty_[DOLIR_STATE_CR] = true;
         used_[DOLIR_STATE_RESERVE_VALID] = true;
-        dirty_[DOLIR_STATE_RESERVE_VALID] = true;
         used_[DOLIR_STATE_RESERVE_ADDR] = true;
       }
       if (inst.op == DOLIR_OP_HELPER_CALL &&
           (inst.aux == DOLIR_HELPER_FPSCR_UPDATED ||
            inst.aux == DOLIR_HELPER_FPSCR_BIT)) {
         used_[DOLIR_STATE_FPSCR] = true;
-        dirty_[DOLIR_STATE_FPSCR] = true;
       }
       if (inst.op == DOLIR_OP_HELPER_CALL && inst.aux == DOLIR_HELPER_LSWX) {
         used_[DOLIR_STATE_XER] = true;
         for (u32 reg = 0; reg < 32; reg++) {
           used_[DOLIR_STATE_GPR0 + reg] = true;
-          dirty_[DOLIR_STATE_GPR0 + reg] = true;
         }
       }
       if (inst.op == DOLIR_OP_GUEST_STORE) {
         used_[DOLIR_STATE_RESERVE_ADDR] = true;
         used_[DOLIR_STATE_RESERVE_VALID] = true;
-        dirty_[DOLIR_STATE_RESERVE_VALID] = true;
       }
     }
   }
@@ -634,22 +286,18 @@ void FunctionEmitter::scanExactFloat(u64 descriptor) {
   u32 b = (descriptor >> 24) & 0xFFu;
   u32 c = (descriptor >> 32) & 0xFFu;
   used_[DOLIR_STATE_FPSCR] = true;
-  dirty_[DOLIR_STATE_FPSCR] = true;
   if (op == DOLIR_EXACT_FCMPU || op == DOLIR_EXACT_FCMPO) {
     used_[DOLIR_STATE_CR] = true;
-    dirty_[DOLIR_STATE_CR] = true;
     used_[DOLIR_STATE_FPR0 + a] = true;
     used_[DOLIR_STATE_FPR0 + b] = true;
     return;
   }
   used_[DOLIR_STATE_FPR0 + d] = true;
-  dirty_[DOLIR_STATE_FPR0 + d] = true;
   if (op == DOLIR_EXACT_FRES ||
       (op >= DOLIR_EXACT_FADDS && op <= DOLIR_EXACT_FDIVS) ||
       op == DOLIR_EXACT_FRSP ||
       (op >= DOLIR_EXACT_FMADDS && op <= DOLIR_EXACT_FNMSUBS)) {
     used_[DOLIR_STATE_PS1_0 + d] = true;
-    dirty_[DOLIR_STATE_PS1_0 + d] = true;
   }
   if (op == DOLIR_EXACT_FRES || op == DOLIR_EXACT_FRSQRTE ||
       op == DOLIR_EXACT_FCTIW || op == DOLIR_EXACT_FCTIWZ ||
@@ -676,10 +324,8 @@ void FunctionEmitter::scanExactPaired(u64 descriptor) {
   u32 b = (descriptor >> 24) & 0xFFu;
   u32 c = (descriptor >> 32) & 0xFFu;
   used_[DOLIR_STATE_FPSCR] = true;
-  dirty_[DOLIR_STATE_FPSCR] = true;
   if (op >= DOLIR_EXACT_PS_CMPU0) {
     used_[DOLIR_STATE_CR] = true;
-    dirty_[DOLIR_STATE_CR] = true;
     used_[DOLIR_STATE_FPR0 + a] = true;
     used_[DOLIR_STATE_PS1_0 + a] = true;
     used_[DOLIR_STATE_FPR0 + b] = true;
@@ -687,9 +333,7 @@ void FunctionEmitter::scanExactPaired(u64 descriptor) {
     return;
   }
   used_[DOLIR_STATE_FPR0 + d] = true;
-  dirty_[DOLIR_STATE_FPR0 + d] = true;
   used_[DOLIR_STATE_PS1_0 + d] = true;
-  dirty_[DOLIR_STATE_PS1_0 + d] = true;
   auto usePair = [this](u32 reg) {
     used_[DOLIR_STATE_FPR0 + reg] = true;
     used_[DOLIR_STATE_PS1_0 + reg] = true;
@@ -740,38 +384,15 @@ void FunctionEmitter::scanLoopHeaders() {
   }
 }
 
-// The caller's current value for a register-carried slot. Uses the local slot
-// when the function tracks it, and CPUState otherwise -- a function that never
-// touches GPR5 still has to forward whatever GPR5 held.
-Value *FunctionEmitter::regArgValue(u32 index) {
-  auto stateSlot = static_cast<DolIRStateSlot>(kRegArgFirst + index);
-  if (state_[kRegArgFirst + index])
-    return stateValue(stateSlot);
-  return loadContext(stateSlot);
-}
-
 void FunctionEmitter::emitEntry() {
   builder_.SetInsertPoint(entry_);
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (!used_[slot])
       continue;
-    auto stateSlot = static_cast<DolIRStateSlot>(slot);
-    if (stateInMemory()) {
-      // No load, no alloca, no copy: the slot is read and written where it
-      // already lives.
-      state_[slot] = bytePtr(stateOffset(stateSlot));
-      continue;
-    }
-    state_[slot] = builder_.CreateAlloca(type(dolir_state_type(stateSlot)),
-                                         nullptr, "state");
-    // Equivalent to loadContext, because every caller materializes before the
-    // call and the public wrapper loads these from CPUState -- so the parameter
-    // and CPUState hold the same value here. It just avoids the load.
-    Value *initial = nullptr;
-    if (regArgs() && slot >= kRegArgFirst && slot < kRegArgFirst + kRegArgCount)
-      initial = function_->getArg(3u + (slot - kRegArgFirst));
-    builder_.CreateStore(initial ? initial : loadContext(stateSlot),
-                         state_[slot]);
+    // Guest state is read and written where it already lives. No alloca, no
+    // prologue load, no copy -- and consequently nothing that later has to be
+    // flushed back, which is what removed the materialization barriers.
+    state_[slot] = bytePtr(stateOffset(static_cast<DolIRStateSlot>(slot)));
   }
   cycles_ =
       builder_.CreateAlloca(Type::getInt64Ty(context_), nullptr, "cycles");
@@ -803,46 +424,10 @@ void FunctionEmitter::chargeCycles(u32 cycles) {
 }
 
 void FunctionEmitter::materialize(u32 pc) {
-  for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
-    // Already there. This is the whole barrier problem dissolving: the stores
-    // exist only to put back what the entry prologue took out.
-    if (stateInMemory())
-      break;
-    if (!dirty_[slot])
-      continue;
-    // Re-enabled after the third root cause: the predecessor model was missing
-    // the indirect-switch edges that DOLIR_TERM_INDIRECT lowers to. A
-    // continuation block normally has a targets-predecessor as well, so it never
-    // fell into the no-predecessor case, and inherited a dirty set the indirect
-    // path does not justify. Both dataflow passes now include those edges.
-    //
-    // Previously DISABLED because, even with helper writes handled, this hung
-    // Mario Kart: the module loaded, reported running, and never advanced a
-    // frame in 180 seconds across four attempts. The -12% module size and -23% build time
-    // it produced are real and worthless, because the module does not run.
-    //
-    // 240 differential pairs across 5 seeds agree with the C backend, including
-    // call-shaped sequences with LR save/restore. So whatever it breaks is not
-    // reached by straight-line code, nor by one level of direct calls -- the
-    // suite's remaining blind spots are branch-shaped control flow inside a
-    // region, indirect transfers through the continuations switch, exception
-    // paths, and re-entry from the dispatcher mid-region.
-    //
-    // The pattern across three attempts is consistent and worth stating: every
-    // narrowing of a materialisation barrier has failed on a path the emitter
-    // reaches by a route the analysis did not model. Barrier narrowing should
-    // not be attempted again until the successor model provably matches the
-    // edges the emitter actually generates -- and the way to establish that is
-    // to derive both from one description rather than to keep patching the
-    // analysis after each failure.
-    if (narrowBarriers() &&
-        !mayBeDirty(current_block_, static_cast<DolIRStateSlot>(slot)))
-      continue;
-    auto stateSlot = static_cast<DolIRStateSlot>(slot);
-    storeContext(
-        stateSlot,
-        builder_.CreateLoad(type(dolir_state_type(stateSlot)), state_[slot]));
-  }
+  // Guest state is already in CPUState -- it was never hoisted out (see
+  // emitEntry). What used to stand here was a flush of every dirty slot, and
+  // the analyses built to narrow it; all of that went when the hoisting did.
+  // What a barrier still owes is the guest PC and the cycles not yet charged.
   storeContext(DOLIR_STATE_PC,
                ConstantInt::get(Type::getInt32Ty(context_), pc));
   Value *downcount =

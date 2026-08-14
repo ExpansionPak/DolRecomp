@@ -20,28 +20,6 @@ Value *FunctionEmitter::stateValue(DolIRStateSlot slot) {
   return builder_.CreateLoad(type(dolir_state_type(slot)), state_[slot]);
 }
 
-void FunctionEmitter::syncState(DolIRStateSlot slot) {
-  storeContext(slot, stateValue(slot));
-}
-
-void FunctionEmitter::reloadState(DolIRStateSlot slot) {
-  // Under DOLRECOMP_STATE_MEMORY the slot IS the CPUState field, so this would
-  // be a load of a location stored straight back to itself.
-  if (state_in_memory())
-    return;
-  builder_.CreateStore(loadContext(slot), state_[slot]);
-}
-
-void FunctionEmitter::reloadUsedState() {
-  for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
-    if (used_[slot])
-      reloadState(static_cast<DolIRStateSlot>(slot));
-  }
-  // The cycle counter is emitter bookkeeping rather than guest state, so it is
-  // reset in both modes.
-  builder_.CreateStore(builder_.getInt64(0), cycles_);
-}
-
 void FunctionEmitter::continueAfterRuntimeBoundary(StringRef prefix) {
   Value *exception =
       loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exception));
@@ -54,21 +32,20 @@ void FunctionEmitter::continueAfterRuntimeBoundary(StringRef prefix) {
   builder_.SetInsertPoint(failed);
   builder_.CreateRetVoid();
   builder_.SetInsertPoint(resume);
-  reloadUsedState();
+  // Guest state is already current in CPUState; only the local cycle counter
+  // is emitter bookkeeping and has to be reset.
+  builder_.CreateStore(builder_.getInt64(0), cycles_);
 }
 
 void FunctionEmitter::emitFPSCRUpdated() {
-  syncState(DOLIR_STATE_FPSCR);
   auto callee = module_.getOrInsertFunction(
       "ppc_fpscr_control_updated",
       FunctionType::get(Type::getVoidTy(context_),
                         {PointerType::getUnqual(context_)}, false));
   builder_.CreateCall(callee, {ctx_});
-  reloadState(DOLIR_STATE_FPSCR);
 }
 
 void FunctionEmitter::emitFPSCRBit(u64 descriptor) {
-  syncState(DOLIR_STATE_FPSCR);
   const char *name =
       ((descriptor >> 8) & 1u) ? "ppc_mtfsb1_op" : "ppc_mtfsb0_op";
   auto callee = module_.getOrInsertFunction(
@@ -77,7 +54,6 @@ void FunctionEmitter::emitFPSCRBit(u64 descriptor) {
                 {PointerType::getUnqual(context_), Type::getInt8Ty(context_)},
                 false));
   builder_.CreateCall(callee, {ctx_, builder_.getInt8(descriptor & 0xFFu)});
-  reloadState(DOLIR_STATE_FPSCR);
 }
 
 void FunctionEmitter::emitProgramException(const DolIRInstruction &inst) {
@@ -218,10 +194,8 @@ void FunctionEmitter::emitExactFloat(u64 descriptor) {
   };
   Type *ptr = PointerType::getUnqual(context_);
   Type *f64 = Type::getDoubleTy(context_);
-  syncState(DOLIR_STATE_FPSCR);
 
   if (op == DOLIR_EXACT_FCMPU || op == DOLIR_EXACT_FCMPO) {
-    syncState(DOLIR_STATE_CR);
     auto callee = module_.getOrInsertFunction(
         "ppc_fcmp", FunctionType::get(Type::getVoidTy(context_),
                                       {ptr, Type::getInt8Ty(context_), f64, f64,
@@ -230,8 +204,6 @@ void FunctionEmitter::emitExactFloat(u64 descriptor) {
     builder_.CreateCall(callee, {ctx_, builder_.getInt8(crfd),
                                  stateValue(fprSlot(a)), stateValue(fprSlot(b)),
                                  builder_.getInt1(op == DOLIR_EXACT_FCMPO)});
-    reloadState(DOLIR_STATE_CR);
-    reloadState(DOLIR_STATE_FPSCR);
     return;
   }
 
@@ -270,14 +242,6 @@ void FunctionEmitter::emitExactFloat(u64 descriptor) {
     default:
       break;
     }
-    syncState(destination);
-    bool single = op <= DOLIR_EXACT_FDIVS || op == DOLIR_EXACT_FRSP;
-    if (single)
-      syncState(ps1Slot(d));
-    syncState(fprSlot(op == DOLIR_EXACT_FRSP ? b : a));
-    if (op != DOLIR_EXACT_FRSP)
-      syncState(
-          fprSlot(op == DOLIR_EXACT_FMULS || op == DOLIR_EXACT_FMUL ? c : b));
     if (op == DOLIR_EXACT_FRSP) {
       auto callee = module_.getOrInsertFunction(
           name, FunctionType::get(
@@ -299,9 +263,6 @@ void FunctionEmitter::emitExactFloat(u64 descriptor) {
            builder_.getInt8(
                op == DOLIR_EXACT_FMULS || op == DOLIR_EXACT_FMUL ? c : b)});
     }
-    reloadState(destination);
-    if (single)
-      reloadState(ps1Slot(d));
   } else if (op == DOLIR_EXACT_FCTIW || op == DOLIR_EXACT_FCTIWZ) {
     AllocaInst *output = temporary(Type::getInt64Ty(context_), "fctiw.result");
     builder_.CreateStore(
@@ -365,7 +326,6 @@ void FunctionEmitter::emitExactFloat(u64 descriptor) {
                            state_[ps1]);
     }
   }
-  reloadState(DOLIR_STATE_FPSCR);
 }
 
 void FunctionEmitter::emitExactPaired(u64 descriptor) {
@@ -382,22 +342,16 @@ void FunctionEmitter::emitExactPaired(u64 descriptor) {
     return static_cast<DolIRStateSlot>(DOLIR_STATE_PS1_0 + reg);
   };
   auto syncPair = [this, &fprSlot, &ps1Slot](u32 reg) {
-    syncState(fprSlot(reg));
-    syncState(ps1Slot(reg));
   };
   auto reloadPair = [this, &fprSlot, &ps1Slot](u32 reg) {
-    reloadState(fprSlot(reg));
-    reloadState(ps1Slot(reg));
   };
   Type *ptr = PointerType::getUnqual(context_);
   Type *i8 = Type::getInt8Ty(context_);
   Type *f64 = Type::getDoubleTy(context_);
-  syncState(DOLIR_STATE_FPSCR);
 
   if (op >= DOLIR_EXACT_PS_CMPU0) {
     bool lane1 = op == DOLIR_EXACT_PS_CMPU1 || op == DOLIR_EXACT_PS_CMPO1;
     bool ordered = op == DOLIR_EXACT_PS_CMPO0 || op == DOLIR_EXACT_PS_CMPO1;
-    syncState(DOLIR_STATE_CR);
     syncPair(a);
     syncPair(b);
     auto callee = module_.getOrInsertFunction(
@@ -408,8 +362,6 @@ void FunctionEmitter::emitExactPaired(u64 descriptor) {
                                  stateValue(lane1 ? ps1Slot(a) : fprSlot(a)),
                                  stateValue(lane1 ? ps1Slot(b) : fprSlot(b)),
                                  builder_.getInt1(ordered)});
-    reloadState(DOLIR_STATE_CR);
-    reloadState(DOLIR_STATE_FPSCR);
     return;
   }
 
@@ -479,7 +431,6 @@ void FunctionEmitter::emitExactPaired(u64 descriptor) {
                                  builder_.getInt8(rhs)});
   }
   reloadPair(d);
-  reloadState(DOLIR_STATE_FPSCR);
 }
 
 Value *FunctionEmitter::emitPSQ(const DolIRInstruction &inst) {
@@ -508,10 +459,6 @@ Value *FunctionEmitter::emitPSQ(const DolIRInstruction &inst) {
   builder_.SetInsertPoint(failed);
   builder_.CreateRetVoid();
   builder_.SetInsertPoint(resume);
-  for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
-    if (used_[slot])
-      reloadState(static_cast<DolIRStateSlot>(slot));
-  }
   builder_.CreateStore(builder_.getInt64(0), cycles_);
   return ConstantInt::getTrue(context_);
 }
@@ -537,10 +484,6 @@ void FunctionEmitter::emitStoreConditional(const DolIRInstruction &inst) {
   builder_.SetInsertPoint(failed);
   builder_.CreateRetVoid();
   builder_.SetInsertPoint(resume);
-  for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
-    if (used_[slot])
-      reloadState(static_cast<DolIRStateSlot>(slot));
-  }
   builder_.CreateStore(builder_.getInt64(0), cycles_);
 }
 

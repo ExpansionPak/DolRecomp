@@ -22,23 +22,3 @@ int replacements_enabled(void) {
     const char* value = getenv("DOLRECOMP_ENABLE_REPLACEMENTS");
     return value && value[0] && value[0] != '0';
 }
-
-int reg_args_enabled(void) {
-    const char* value = getenv("DOLRECOMP_REG_ARGS");
-    return value && value[0] == '1';
-}
-
-/* Default since the three-title validation: leaving guest state in CPUState
-   measured +60.9% fps on Mario Kart (reaching parity with the C backend),
-   +26.7% on Luigi's Mansion and +30.9% on Skyward Sword, with modules 75-80%
-   smaller and builds up to 19x faster. See AOT-PERFORMANCE-RESULTS.md 5v.
-
-   DOLRECOMP_STATE_MEMORY=0 restores the promoting emitter, which is what the
-   materialization barriers, the reaching-writes and liveness analyses and the
-   register-argument ABI all exist to serve. Kept because that machinery is
-   still in the tree and because a regression here would be expensive to
-   diagnose without an A/B. */
-int state_in_memory(void) {
-    const char* value = getenv("DOLRECOMP_STATE_MEMORY");
-    return !(value && value[0] == '0');
-}

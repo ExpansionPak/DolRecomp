@@ -43,33 +43,10 @@ private:
   llvm::Value *loadOffset(llvm::Type *value_type, std::size_t offset);
 
   void scanState();
-  // Backward dataflow over the region's blocks: which guest state slots are
-  // live on entry to each one. Used to reload only what the continuation
-  // actually needs after a call, instead of everything the function touches
-  // anywhere.
-  void computeLiveness();
-  bool liveAt(u32 block, DolIRStateSlot slot) const;
-  void reloadLiveState(u32 block);
-  // Forward dataflow: may a slot have been written on some path reaching this
-  // block? A slot never written still holds its entry value in CPUState, so
-  // storing it back at a barrier is pure waste.
-  void computeReachingWrites();
-  bool mayBeDirty(u32 block, DolIRStateSlot slot) const;
   void scanExactFloat(u64 descriptor);
   void scanExactPaired(u64 descriptor);
   void scanContinuations();
   void scanLoopHeaders();
-
-  // Guest state carried in registers across the private fastcc boundary
-  // instead of through CPUState. GPR3..GPR10 are the PowerPC argument and
-  // return registers, so they are exactly the slots a guest call passes.
-  //
-  // The set is fixed and identical for every region because caller and callee
-  // are compiled into separate objects and must agree on the signature without
-  // whole-program knowledge.
-  static constexpr u32 kRegArgFirst = DOLIR_STATE_GPR0 + 3u;
-  static constexpr u32 kRegArgCount = 8u;
-  llvm::Value *regArgValue(u32 index);
 
   void emitEntry();
   bool emitWrapper(llvm::raw_ostream &diagnostics);
@@ -87,9 +64,6 @@ private:
 
   llvm::AllocaInst *temporary(llvm::Type *value_type, llvm::StringRef name);
   llvm::Value *stateValue(DolIRStateSlot slot);
-  void syncState(DolIRStateSlot slot);
-  void reloadState(DolIRStateSlot slot);
-  void reloadUsedState();
   void continueAfterRuntimeBoundary(llvm::StringRef prefix);
   void emitFPSCRUpdated();
   void emitFPSCRBit(u64 descriptor);
@@ -139,20 +113,10 @@ private:
   llvm::Value *guard_cycles_ = nullptr;
   // Termination backstop for zero-cycle loops.
   llvm::Value *guard_steps_ = nullptr;
-  // Where each guest state slot lives inside this function. Normally an
-  // alloca promoted by mem2reg; under DOLRECOMP_STATE_MEMORY a pointer straight
-  // into CPUState, so every load and store site works unchanged either way.
+  // Where each guest state slot lives: a pointer straight into CPUState, so a
+  // read or write of a slot is a read or write of the field itself.
   std::array<llvm::Value *, DOLIR_STATE_COUNT> state_{};
   std::array<bool, DOLIR_STATE_COUNT> used_{};
-  std::array<bool, DOLIR_STATE_COUNT> dirty_{};
-  // live_in_[block * DOLIR_STATE_COUNT + slot]. Flat rather than nested so the
-  // fixpoint loop touches one contiguous buffer.
-  std::vector<unsigned char> live_in_;
-  // dirty_in_[block * DOLIR_STATE_COUNT + slot]: written on some path to here.
-  std::vector<unsigned char> dirty_in_;
-  // Slots written anywhere inside a block, folded in so a barrier partway
-  // through the block still stores what the block itself has written.
-  std::vector<unsigned char> writes_in_block_;
   u32 current_block_ = 0;
   std::vector<llvm::BasicBlock *> blocks_;
   std::vector<bool> loop_headers_;

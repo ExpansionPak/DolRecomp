@@ -598,9 +598,6 @@ extern "C" bool dolllvm_codegen_fingerprint(char *out, size_t size) {
       // one silently reuses objects built with the other setting and the
       // measurement compares nothing. That has happened three times in this
       // project; absent when off, so default objects stay byte-identical.
-      (std::getenv("DOLRECOMP_NARROW_BARRIERS") &&
-               std::getenv("DOLRECOMP_NARROW_BARRIERS")[0] == '1'
-           ? "|narrow=1" : "") +
       (std::getenv("DOLRECOMP_INLINE_REGIONS") &&
                std::getenv("DOLRECOMP_INLINE_REGIONS")[0] == '1'
            ? "|inline=1" : "") +
@@ -614,18 +611,14 @@ extern "C" bool dolllvm_codegen_fingerprint(char *out, size_t size) {
       // Suppresses every direct call, so it changes far more emitted code than
       // any other flag here.
       (replacements_enabled() ? "|repl=1" : "") +
-      // Changes the signature of every internal region body, so a cached object
-      // from the other setting is not merely slower, it is incompatible.
-      (reg_args_enabled() ? "|regargs=1" : "") +
       // A different optimization pipeline entirely.
       (defaultO3Pipeline() ? "|pipeline=o3" : "") +
-      // Changes where every guest state access points. Nothing about a cached
-      // object from the other mode is reusable.
-      // Both modes marked, not just the non-default one: every object built
-      // before this option existed was emitted by the promoting path and
-      // carries no marker, so leaving the new default unmarked would let a
-      // stale promoting object satisfy a state-in-memory build.
-      (state_in_memory() ? "|state=mem" : "|state=promote");
+      // Constant, and deliberately not removed with the promoting emitter it
+      // used to select. Every object built before guest state stopped being
+      // hoisted carries no marker, and those objects are incompatible with
+      // these; without something here to tell them apart, a stale one from a
+      // shared cache would satisfy this build silently.
+      "|state=mem";
   if (fingerprint.size() + 1 > size)
     return false;
   memcpy(out, fingerprint.c_str(), fingerprint.size() + 1);

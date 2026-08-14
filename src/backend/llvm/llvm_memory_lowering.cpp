@@ -84,10 +84,6 @@ Value *FunctionEmitter::externalRead(Value *address, u32 width) {
   builder_.SetInsertPoint(failed);
   builder_.CreateRetVoid();
   builder_.SetInsertPoint(resume);
-  for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
-    if (used_[slot])
-      reloadState(static_cast<DolIRStateSlot>(slot));
-  }
   builder_.CreateStore(builder_.getInt64(0), cycles_);
   builder_.CreateBr(join);
   BasicBlock *calledEnd = builder_.GetInsertBlock();
@@ -237,10 +233,6 @@ void FunctionEmitter::externalWrite(Value *address, Value *value, u32 width) {
   builder_.SetInsertPoint(failed);
   builder_.CreateRetVoid();
   builder_.SetInsertPoint(resume);
-  for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
-    if (used_[slot])
-      reloadState(static_cast<DolIRStateSlot>(slot));
-  }
   builder_.CreateStore(builder_.getInt64(0), cycles_);
   builder_.CreateBr(done);
   builder_.SetInsertPoint(done);

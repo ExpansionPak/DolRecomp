@@ -346,19 +346,48 @@ problem as the per-call round trip below, not a separate one.
    SEH/signals -- removes the bounds check entirely rather than shortening it,
    and is the next structural step for memory. Unstarted.
 
-### Superseded by state-in-memory (5v)
+### Removed with the promoting emitter
 
-Keeping guest state in `CPUState` is now the default, and it removes the reason
-most of the machinery below exists. None of it has been deleted yet -- the
-promoting path is still reachable with `DOLRECOMP_STATE_MEMORY=0` -- but it is
-dead weight on the default path and should be removed once the promoting path
-is retired:
+Keeping guest state in `CPUState` made the following unreachable, and all of it
+is now deleted (584 net lines):
 
-- the materialization barriers (D2), reduced to storing PC and downcount;
-- `computeReachingWrites` / `mayBeDirty` and `computeLiveness` / `liveAt`,
-  built solely to narrow those barriers;
-- `DOLRECOMP_NARROW_BARRIERS` and `DOLRECOMP_REG_ARGS`, both measured and both
-  serving hoisted state.
+- the materialization barriers of D2 -- `materialize()` is now the guest PC and
+  the cycles owed, nothing else;
+- `computeLiveness` / `liveAt` and `computeReachingWrites` / `mayBeDirty`, the
+  two dataflow analyses built only to narrow those barriers, along with their
+  `live_in_`, `dirty_in_` and `writes_in_block_` buffers;
+- `dirty_`, whose only consumers were the barrier and the indirect-transfer
+  flush;
+- `syncState`, `reloadState`, `reloadUsedState` and `reloadLiveState`, each of
+  which became a load of a `CPUState` field stored straight back to itself, and
+  their 23 call sites;
+- `DOLRECOMP_NARROW_BARRIERS` and `DOLRECOMP_REG_ARGS`, both measured, both
+  serving hoisted state;
+- the promoting emitter itself, and with it `DOLRECOMP_STATE_MEMORY`.
+
+The codegen fingerprint keeps a constant `|state=mem` marker. It no longer
+selects anything, but objects built before guest state stopped being hoisted
+carry no marker and are incompatible with these, and without something to tell
+them apart a stale one from a shared cache would satisfy a build silently.
+
+Verified by emitting the test module before and after: **byte-identical IR**,
+79,975 bytes both ways. The deletion changed no generated code.
+
+One bug was introduced and caught during the deletion, worth recording because
+the compiler could not see it. Removing the body of
+
+```c
+if (inst.op == DOLIR_OP_STATE_WRITE)
+  dirty_[inst.aux] = true;
+if (inst.op == DOLIR_OP_HELPER_CALL && inst.aux == DOLIR_HELPER_FP_AVAILABLE)
+  used_[DOLIR_STATE_MSR] = true;
+```
+
+left the second `if` as the body of the first. An instruction is never both, so
+`used_[MSR]` stopped being set and `emitFPAvailable` loaded through a null
+pointer. Line-based deletion of a statement under an unbraced conditional is
+silent when the following statement is itself a conditional; the two other
+instances of this in the same pass failed to compile and were obvious.
 
 ### Correctness debt
 

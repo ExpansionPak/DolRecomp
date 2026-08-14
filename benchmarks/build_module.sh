@@ -16,7 +16,7 @@
 # producing a module that is not what the caller asked for.
 #
 # Usage:
-#   build_module.sh <game-root> <out-root> <backend> [region-mode] [max-instructions] [max-ir] [lto]
+#   build_module.sh <game-root> <out-root> <backend> [region-mode] [max-instructions] [max-ir] [lto] [memory-mode] [pipeline]
 #
 # lto: off | thin. Under thin the manifest names bitcode, so the link runs
 # ThinLTO inside lld -- which makes it a different artifact from the same
@@ -33,9 +33,7 @@ MAX_INSTR="${5:-}"
 MAX_IR="${6:-}"
 LTO="${7:-}"
 MEM="${8:-}"
-REGARGS="${9:-}"
-PIPE="${10:-}"
-STATEMEM="${11:-}"
+PIPE="${9:-}"
 
 MG_ROOT="${MG_ROOT:-C:/Users/douglaswhittingham/luigis-mansion-recomp/lib/ModernGekko}"
 PORT="$MG_ROOT/build/moderngekko-port.exe"
@@ -54,9 +52,7 @@ SLUG="$BACKEND"
 [ -n "$MAX_IR" ] && SLUG="$SLUG-ir$MAX_IR"
 [ -n "$LTO" ] && SLUG="$SLUG-lto$LTO"
 [ -n "$MEM" ] && SLUG="$SLUG-mem$MEM"
-[ -n "$REGARGS" ] && SLUG="$SLUG-ra$REGARGS"
 [ -n "$PIPE" ] && SLUG="$SLUG-p$PIPE"
-[ -n "$STATEMEM" ] && SLUG="$SLUG-sm$STATEMEM"
 OUT="$OUT_ROOT/$SLUG"
 
 # moderngekko-port validates --backend against its own c|llvm list, so an AOT
@@ -64,7 +60,7 @@ OUT="$OUT_ROOT/$SLUG"
 PORT_BACKEND="$BACKEND"
 unset DOLRECOMP_FORCE_BACKEND DOLRECOMP_REGION_MODE
 unset DOLRECOMP_REGION_MAX_INSTRUCTIONS DOLRECOMP_REGION_MAX_IR DOLRECOMP_LTO
-unset DOLRECOMP_MEMORY_MODE DOLRECOMP_REG_ARGS DOLRECOMP_LLVM_PIPELINE DOLRECOMP_STATE_MEMORY
+unset DOLRECOMP_MEMORY_MODE DOLRECOMP_LLVM_PIPELINE
 if [ "$BACKEND" = "llvm-aot" ]; then
   PORT_BACKEND="llvm"
   export DOLRECOMP_FORCE_BACKEND=llvm-aot
@@ -102,9 +98,7 @@ else
 fi
 
 [ -n "$MEM" ] && export DOLRECOMP_MEMORY_MODE="$MEM"
-[ -n "$REGARGS" ] && export DOLRECOMP_REG_ARGS="$REGARGS"
 [ -n "$PIPE" ] && export DOLRECOMP_LLVM_PIPELINE="$PIPE"
-[ -n "$STATEMEM" ] && export DOLRECOMP_STATE_MEMORY="$STATEMEM"
 
 mkdir -p "$OUT"
 echo "[$SLUG] building into $OUT"

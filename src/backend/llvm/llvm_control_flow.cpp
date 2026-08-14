@@ -17,13 +17,6 @@ namespace dolllvm {
 
 using namespace llvm;
 
-// Both sides resolve through common/options.h, so caller and callee cannot
-// disagree about the signature.
-static bool regArgs() {
-  static const bool enabled = reg_args_enabled() != 0;
-  return enabled;
-}
-
 BasicBlock *FunctionEmitter::directDestination(const DolIRTerminator &term,
                                                u32 slot) {
   if (term.targets[slot] != DOLIR_NO_BLOCK)
@@ -96,13 +89,11 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   materialize(target);
   char name[64];
   snprintf(name, sizeof(name), "func_%08X_budget", range->start);
-  SmallVector<Type *, 11> calleeParams{PointerType::getUnqual(context_),
-                                       PointerType::getUnqual(context_),
-                                       PointerType::getUnqual(context_)};
-  if (regArgs())
-    calleeParams.append(kRegArgCount, Type::getInt32Ty(context_));
   auto callee = module_.getOrInsertFunction(
-      name, FunctionType::get(Type::getVoidTy(context_), calleeParams, false));
+      name, FunctionType::get(Type::getVoidTy(context_),
+                              {PointerType::getUnqual(context_),
+                               PointerType::getUnqual(context_),
+                               PointerType::getUnqual(context_)}, false));
   if (auto *calleeFunction = dyn_cast<Function>(callee.getCallee())) {
     calleeFunction->setVisibility(GlobalValue::HiddenVisibility);
     calleeFunction->setDSOLocal(true);
@@ -110,14 +101,8 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
     // merely slow.
     calleeFunction->setCallingConv(CallingConv::Fast);
   }
-  // materialize() ran just above, so these are the values CPUState now holds.
-  // Handing them over in registers saves the callee the loads; it does not
-  // change what the callee sees.
-  SmallVector<Value *, 11> arguments{ctx_, guard_cycles_, guard_steps_};
-  if (regArgs())
-    for (u32 i = 0; i < kRegArgCount; i++)
-      arguments.push_back(regArgValue(i));
-  CallInst *direct = builder_.CreateCall(callee, arguments);
+  CallInst *direct =
+      builder_.CreateCall(callee, {ctx_, guard_cycles_, guard_steps_});
   direct->setCallingConv(CallingConv::Fast);
   if (!term.linked) {
     builder_.CreateRetVoid();
@@ -145,10 +130,8 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   if (!local || continuationBlock >= blocks_.size()) {
     builder_.CreateRetVoid();
   } else {
-    // Only what the continuation actually needs. This used to restore every
-    // slot the function touches anywhere, which on a merged region meant tens
-    // of loads per call for a continuation that reads a handful.
-    reloadLiveState(continuationBlock);
+    // Nothing to restore: the callee wrote guest state where this function
+    // reads it. Only the local cycle counter is emitter bookkeeping.
     builder_.CreateStore(builder_.getInt64(0), cycles_);
     builder_.CreateBr(blocks_[continuationBlock]);
   }
@@ -204,14 +187,8 @@ bool FunctionEmitter::emitTerminator(const DolIRTerminator &term,
             blocks_[block]);
       builder_.SetInsertPoint(unknown);
     }
-    for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
-      if (dirty_[slot]) {
-        auto stateSlot = static_cast<DolIRStateSlot>(slot);
-        storeContext(stateSlot,
-                     builder_.CreateLoad(type(dolir_state_type(stateSlot)),
-                                         state_[slot]));
-      }
-    }
+    // Guest state is already in CPUState; only the transfer target and the
+    // cycles owed still have to be written back.
     storeContext(DOLIR_STATE_PC, target);
     Value *downcount =
         loadOffset(Type::getInt64Ty(context_), offsetof(CPUState, downcount));
