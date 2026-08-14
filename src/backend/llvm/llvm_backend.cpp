@@ -621,7 +621,11 @@ extern "C" bool dolllvm_codegen_fingerprint(char *out, size_t size) {
       (defaultO3Pipeline() ? "|pipeline=o3" : "") +
       // Changes where every guest state access points. Nothing about a cached
       // object from the other mode is reusable.
-      (state_in_memory() ? "|state=mem" : "");
+      // Both modes marked, not just the non-default one: every object built
+      // before this option existed was emitted by the promoting path and
+      // carries no marker, so leaving the new default unmarked would let a
+      // stale promoting object satisfy a state-in-memory build.
+      (state_in_memory() ? "|state=mem" : "|state=promote");
   if (fingerprint.size() + 1 > size)
     return false;
   memcpy(out, fingerprint.c_str(), fingerprint.size() + 1);

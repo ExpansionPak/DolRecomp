@@ -1572,6 +1572,25 @@ leaves every access site untouched:
 * `reloadState` / `reloadLiveState` become no-ops -- they would load a
   `CPUState` field and store it straight back to itself.
 
+### Validated on three titles, and now the default
+
+| | fps gain | pairs | sign test | module | build |
+|---|---|---|---|---|---|
+| Mario Kart | **+60.9%** (33.24 -> 53.49) | -- | parity with C backend | 424.1 -> 85.8 MB | 930s -> 48s |
+| Luigi's Mansion | **+26.7%** | 6/6 | p = 0.0312 | 236.0 -> 60.1 MB | -> 36s |
+| Skyward Sword | **+30.9%** | 13/13 | p = 0.0002 | 654.5 -> 136.8 MB | -> 118s |
+
+Unanimous on every comparable pair of all three titles, across both consoles and
+across 1,724 / 2,033 / 3,589 regions. `fallback` is 0 on all 14 Skyward Sword
+runs, so the Wii title with MEM2 populated and RELs in play executes natively.
+
+Mario Kart gains most because its promoting module was the largest and so had
+the most spill to remove; Luigi's Mansion, the smallest, gains least. That
+ordering is what the mechanism predicts.
+
+**This is the default as of this commit.** `DOLRECOMP_STATE_MEMORY=0` restores
+the promoting emitter.
+
 ### Mario Kart, same scene and protocol as 5t
 
 | | fps | module | build | stack traffic |
@@ -1610,13 +1629,25 @@ empty. The correct move was to delete the problem rather than to keep
 optimizing it, and it took measuring against the C backend to see that -- which
 §5t notes should have happened in Phase 0.
 
-### Status: prototype, not a default
+### Status and what is still owed
 
-Off by default and validated only on Mario Kart. Before it could become a
-default it needs what `--memory-mode fast` got: three titles across both
-consoles, differential seed sweeps, and paired runs with a stated significance
-test. Two earlier changes passed the full suite and then hung Mario Kart at
-boot, so a green ctest is not evidence that a real title runs.
+Default as of this commit, validated on three titles with differential seed
+sweeps green and 23/23 in both modes. The promoting path stays reachable via
+`DOLRECOMP_STATE_MEMORY=0`, because the barriers, the two dataflow analyses and
+the register-argument ABI all exist to serve it and a regression here would be
+expensive to diagnose without an A/B.
+
+Two loose ends worth stating rather than burying:
+
+* **Dropped pairs.** Six of twelve Luigi's Mansion pairs were rejected on
+  `bursts/Mcycle` mismatch, a high rate. The surviving six are unanimous, and
+  Skyward Sword kept 13 of 14, so the result does not rest on the rejections --
+  but LM's rig noise is worse than the other two titles'.
+* **A small systematic dispatcher difference.** The state-in-memory arm reads
+  168.7 `bursts/Mcycle` against the C backend's 173.0 on Mario Kart, and the
+  promoting and non-promoting arms differ similarly on Luigi's Mansion. It may
+  be a slightly divergent scene rather than different dispatch behaviour, but it
+  is unexplained.
 
 Open questions for the full version:
 

@@ -346,6 +346,20 @@ problem as the per-call round trip below, not a separate one.
    SEH/signals -- removes the bounds check entirely rather than shortening it,
    and is the next structural step for memory. Unstarted.
 
+### Superseded by state-in-memory (5v)
+
+Keeping guest state in `CPUState` is now the default, and it removes the reason
+most of the machinery below exists. None of it has been deleted yet -- the
+promoting path is still reachable with `DOLRECOMP_STATE_MEMORY=0` -- but it is
+dead weight on the default path and should be removed once the promoting path
+is retired:
+
+- the materialization barriers (D2), reduced to storing PC and downcount;
+- `computeReachingWrites` / `mayBeDirty` and `computeLiveness` / `liveAt`,
+  built solely to narrow those barriers;
+- `DOLRECOMP_NARROW_BARRIERS` and `DOLRECOMP_REG_ARGS`, both measured and both
+  serving hoisted state.
+
 ### Correctness debt
 
 - ~~Call/return path has no differential coverage.~~ Closed: the differential
