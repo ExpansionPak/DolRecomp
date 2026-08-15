@@ -109,15 +109,22 @@ if(DOLRECOMP_ENABLE_LLVM)
             target_link_libraries(dr_llvm PRIVATE
                 "${DOLRECOMP_LLVM_SHARED_IMPORT}")
         else()
+            # AArch64 alongside the host target so an x86-64 build can emit
+            # for the Pi. Linking it costs binary size on a build machine and
+            # nothing at runtime; without it a cross target fails at
+            # lookupTarget with "No available targets are compatible", which
+            # reads like a bad triple rather than a missing component.
             llvm_map_components_to_libnames(DOLRECOMP_LLVM_LIBS
-                Core Support Analysis Passes Target MC native nativecodegen)
+                Core Support Analysis Passes Target MC native nativecodegen
+                AArch64CodeGen AArch64AsmParser AArch64Desc AArch64Info)
             target_link_libraries(dr_llvm PRIVATE ${DOLRECOMP_LLVM_LIBS})
         endif()
     elseif(TARGET LLVM)
         target_link_libraries(dr_llvm PRIVATE LLVM)
     else()
         llvm_map_components_to_libnames(DOLRECOMP_LLVM_LIBS
-            Core Support Analysis Passes Target MC native nativecodegen)
+            Core Support Analysis Passes Target MC native nativecodegen
+            AArch64CodeGen AArch64AsmParser AArch64Desc AArch64Info)
         target_link_libraries(dr_llvm PRIVATE ${DOLRECOMP_LLVM_LIBS})
     endif()
 endif()

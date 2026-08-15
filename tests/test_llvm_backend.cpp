@@ -146,6 +146,33 @@ int main(int argc, char** argv) {
                              std::istreambuf_iterator<char>());
     CHECK(irText.find("define hidden void @func_80001000") !=
           std::string::npos);
+
+    // The same module emitted for AArch64, which is a cross-compile on every
+    // host this suite currently runs on. Accepting the triple is not enough on
+    // its own: if the AArch64 target is not registered, lookupTarget cannot see
+    // it and reports it as an unsupported triple, so emission fails here rather
+    // than producing a wrong object.
+    const std::string aarch64Path = std::string(argv[1]) + ".aarch64.o";
+    DolLLVMOptions aarch64Options = options;
+    aarch64Options.emit_ir = 0;
+    aarch64Options.ir_path = nullptr;
+    aarch64Options.target_triple = "aarch64-unknown-linux-gnu";
+    CHECK(dolllvm_emit_object(&module, aarch64Path.c_str(), &aarch64Options,
+                              stderr));
+    FILE* aarch64Object = std::fopen(aarch64Path.c_str(), "rb");
+    CHECK(aarch64Object != nullptr);
+    unsigned char header[20]{};
+    const bool headerRead =
+        std::fread(header, 1, sizeof(header), aarch64Object) == sizeof(header);
+    std::fclose(aarch64Object);
+    CHECK(headerRead);
+    // An explicit triple selects the object format too, so this is ELF even on
+    // a Windows host. e_machine sits at offset 18 and is EM_AARCH64 (183).
+    CHECK(header[0] == 0x7f && header[1] == 'E' && header[2] == 'L' &&
+          header[3] == 'F');
+    CHECK(header[4] == 2);   // ELFCLASS64
+    CHECK(header[5] == 1);   // ELFDATA2LSB
+    CHECK(header[18] == 0xB7 && header[19] == 0x00);
     dolir_module_free(&module);
     return 0;
 }

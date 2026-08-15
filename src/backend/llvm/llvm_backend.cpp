@@ -239,6 +239,15 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();
+    // AArch64 as well, so an x86-64 build machine can emit objects for an
+    // AArch64 host. Relaxing the triple guard alone is not enough: a target
+    // that was never registered is simply absent from the registry, and
+    // lookupTarget reports it as an unsupported triple.
+    LLVMInitializeAArch64Target();
+    LLVMInitializeAArch64TargetInfo();
+    LLVMInitializeAArch64TargetMC();
+    LLVMInitializeAArch64AsmPrinter();
+    LLVMInitializeAArch64AsmParser();
     return true;
   }();
   (void)initialized;
