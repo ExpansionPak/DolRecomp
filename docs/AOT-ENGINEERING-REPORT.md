@@ -182,6 +182,37 @@ Two guards came out of this and are now in the tooling:
   cross-backend comparisons reject outliers within each arm against its own
   median instead.
 
+Measuring on the Pi added four more ways to produce a confident wrong number,
+all of which yield a plausible framerate rather than an obvious failure:
+
+* **A capped scene cannot show a difference.** Both backends hold Luigi's
+  Mansion's title screen at the 59.9 fps cap, so any comparison taken there
+  reports parity no matter what the backends do. The scene has to be one that
+  is actually CPU-bound — the mansion foyer runs 13 fps single-core — before
+  the measurement can say anything at all.
+* **Uncapped, the arms stop looking at the same thing.** With the speed limiter
+  off the faster arm is further into the game at every wall-clock instant, so
+  it is rendering different scenery; sampling more instants does not fix it.
+  Frame sizes in one such run clustered at 0.64 MB / 43 fps and 1.2 MB / 13 fps
+  — two scenes, averaged into one meaningless mean.
+* **Booting from a savestate silently bypasses the module.** Loading state at
+  boot leaves `native=0 bursts=0 cycles=0`: the recompiled code never executes
+  and the emulator's own core runs the game. Both arms then measure the same
+  thing and agree beautifully. Any run whose counters are zero has to be
+  discarded rather than averaged.
+* **A scripted controller can pause the game.** Driving the menus by replaying
+  a fixed sequence of button presses kept pressing Start after the game had
+  started; Start opens the pause menu, and a paused game renders cheaply at the
+  frame cap. The fix was to make the drive closed-loop — read the screen, press
+  Start only when the frame is small or the game is provably paused, and stop
+  pressing once gameplay is detected.
+
+The sample-count lesson also repeated, in the direction that matters. A first
+dual-core batch had `llvm-aot` ahead in all three pairs, +2.0%, which is the
+kind of result that gets written down. Extending the same comparison to five
+pairs reversed the sign to −0.9%. Three pairs all pointing one way is p = 0.125
+and cannot carry a claim, however tidy it looks.
+
 ---
 
 ## 5. The finding that reframed the effort
@@ -247,9 +278,39 @@ Two compatibility details are worth naming:
 
 ## 7. What is owed
 
-* **AArch64 is not done and cannot be done here.** No native host. Cross-compile
-  configures, but NEON paired-singles, fastmem addressing and the runtime ABI
-  need a real execution environment. Recorded as not validatable, not estimated.
+* **AArch64 is not covered by this branch, but it is not blocked either.** This
+  report previously said there was no native host and that AArch64 could not be
+  validated. Both halves were wrong: a Raspberry Pi 4 running Debian
+  clang/LLVM 19.1.7 is available, and PR #15 (`llvm19-aarch64-support`) already
+  relaxes the x86-64-only guard in `dolllvm_emit_object` and validates the
+  fixed-chunk LLVM backend on it — AArch64 ELF objects, module loading under
+  ModernGekko, correct rendering, and 19.51 fps against the C backend's 19.46 on
+  the same scene.
+
+  **This branch's** work — regions, the state-in-memory emitter and
+  `--memory-mode fast` — has since been measured there too, and the expectation
+  above held. Luigi's Mansion was cross-compiled from an x86-64 Windows host
+  (63,029,456 byte module) alongside a C-backend build of the same title, and
+  both were run on the Pi in the mansion foyer, a CPU-bound scene:
+
+  | configuration | `llvm-aot` | C backend | pairs favouring `llvm-aot` |
+  | --- | --- | --- | --- |
+  | single-core | 13.20 fps | 13.03 fps | 4 of 5 |
+  | dual-core | 19.29 fps | 19.46 fps | 3 of 5 |
+
+  Five alternating pairs per configuration, twenty fps samples per run, all
+  twenty runs passing the scene guards, `fallback=0` throughout. Neither
+  direction is significant — a sign test gives p = 0.19 and p = 0.50 — and the
+  spread within a single arm (12.74 to 13.46 fps across the `llvm-aot`
+  single-core runs) is wider than the difference between arms. The honest
+  reading is **parity on AArch64**, which is what the same comparison shows on
+  x86-64.
+
+  Cross-compiling to AArch64 from an x86-64 build machine needs the AArch64
+  target registered and its CodeGen/AsmParser/Desc/Info components linked;
+  relaxing the triple guard alone leaves `lookupTarget` reporting a registered-
+  target problem as an unsupported triple. That is on PR #15, with a test that
+  emits for `aarch64-unknown-linux-gnu` and checks `e_machine`.
 * **`stfs` diverges between backends** on overflow and denormal inputs. Excluded
   from the default differential pool, reproduces with `--stfs`. One backend is
   wrong about Gekko and it is not yet known which. This is the oldest open
