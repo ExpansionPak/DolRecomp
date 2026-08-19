@@ -182,8 +182,19 @@ Two guards came out of this and are now in the tooling:
   cross-backend comparisons reject outliers within each arm against its own
   median instead.
 
-Measuring on the Pi added four more ways to produce a confident wrong number,
+Measuring on the Pi added five more ways to produce a confident wrong number,
 all of which yield a plausible framerate rather than an obvious failure:
+
+* **A module can be loaded and still not execute.** The largest error in this
+  report was not a bad statistic but a bad subject: every backend comparison
+  taken on the Pi measured Dolphin's JIT against itself, because the static
+  module stopped dispatching after boot while still being loaded, named in the
+  log, and reporting healthy counters. Nothing in the framerate, the scene
+  guards or the pairing could have caught it. What caught it was asking perf
+  which shared object the samples landed in, and finding the module absent. Any
+  comparison of two backends should establish that the code under test is
+  running before it reports a number -- a profile by object, or a counter that
+  demonstrably advances with wall time.
 
 * **A capped scene cannot show a difference.** Both backends hold Luigi's
   Mansion's title screen at the 59.9 fps cap, so any comparison taken there
@@ -278,39 +289,43 @@ Two compatibility details are worth naming:
 
 ## 7. What is owed
 
-* **AArch64 is not covered by this branch, but it is not blocked either.** This
-  report previously said there was no native host and that AArch64 could not be
-  validated. Both halves were wrong: a Raspberry Pi 4 running Debian
-  clang/LLVM 19.1.7 is available, and PR #15 (`llvm19-aarch64-support`) already
-  relaxes the x86-64-only guard in `dolllvm_emit_object` and validates the
-  fixed-chunk LLVM backend on it — AArch64 ELF objects, module loading under
-  ModernGekko, correct rendering, and 19.51 fps against the C backend's 19.46 on
-  the same scene.
+* **AArch64 runs, but nothing has been measured about the backends there.**
+  This report previously claimed parity between `llvm-aot` and the C backend on
+  a Raspberry Pi 4. That claim is withdrawn: both arms were measured while the
+  static module was not executing the game.
 
-  **This branch's** work — regions, the state-in-memory emitter and
-  `--memory-mode fast` — has since been measured there too, and the expectation
-  above held. Luigi's Mansion was cross-compiled from an x86-64 Windows host
-  (63,029,456 byte module) alongside a C-backend build of the same title, and
-  both were run on the Pi in the mansion foyer, a CPU-bound scene:
+  Cross-compilation itself works. An x86-64 Windows host emits 1,829 AArch64
+  objects for Luigi's Mansion in 30 s, the Pi links them in 7.3 s, the module
+  loads, and the title plays. What does not happen is execution. Profiling the
+  emulator in the measured scene, sampled by shared object:
 
-  | configuration | `llvm-aot` | C backend | pairs favouring `llvm-aot` |
-  | --- | --- | --- | --- |
-  | single-core | 13.20 fps | 13.03 fps | 4 of 5 |
-  | dual-core | 19.29 fps | 19.46 fps | 3 of 5 |
+  | | share of CPU |
+  |---|---:|
+  | Dolphin's `JitArm64` generated code | 41.6% |
+  | `moderngekko-run` itself | 33.6% |
+  | `gGLME01_recomp.so` | **absent** |
 
-  Five alternating pairs per configuration, twenty fps samples per run, all
-  twenty runs passing the scene guards, `fallback=0` throughout. Neither
-  direction is significant — a sign test gives p = 0.19 and p = 0.50 — and the
-  spread within a single arm (12.74 to 13.46 fps across the `llvm-aot`
-  single-core runs) is wider than the difference between arms. The honest
-  reading is **parity on AArch64**, which is what the same comparison shows on
-  x86-64.
+  The list reaches 0.05% before the module appears at all, and the module's own
+  counters agree: `native=1641 bursts=77 cycles=418897`, unchanged across 55 s,
+  180 s and 400 s runs, in the attract loop and in the mansion foyer alike. A
+  Gekko issues 486 million cycles a second; the module accounts for roughly 419
+  thousand of them, once, during boot, and then never runs again.
 
-  Cross-compiling to AArch64 from an x86-64 build machine needs the AArch64
-  target registered and its CodeGen/AsmParser/Desc/Info components linked;
-  relaxing the triple guard alone leaves `lookupTarget` reporting a registered-
-  target problem as an unsupported triple. That is on PR #15, with a test that
-  emits for `aarch64-unknown-linux-gnu` and checks `e_machine`.
+  The withdrawn figures -- 13.20 vs 13.03 single-core, 19.29 vs 19.46 dual-core
+  -- were therefore Dolphin's JIT measured against itself. That is why every
+  configuration landed on parity, and why a three-pair advantage reversed sign
+  at five pairs: two modules that never execute cannot differ.
+
+  Why dispatch stops after boot is open, and is the next thing to establish. The
+  module loads without complaint, reports `smc_failed=0`, and completes 19 chunk
+  verifications before going quiet. Until that is understood, AArch64 has a
+  working build pipeline and no performance result of any kind.
+
+  Cross-compiling from an x86-64 build machine needs the AArch64 target
+  registered and its CodeGen/AsmParser/Desc/Info components linked; relaxing the
+  triple guard alone leaves `lookupTarget` reporting a missing-component problem
+  as an unsupported triple. That is on PR #15, with a test that emits for
+  `aarch64-unknown-linux-gnu` and checks `e_machine`.
 * **`stfs` diverges between backends** on overflow and denormal inputs. Excluded
   from the default differential pool, reproduces with `--stfs`. One backend is
   wrong about Gekko and it is not yet known which. This is the oldest open
