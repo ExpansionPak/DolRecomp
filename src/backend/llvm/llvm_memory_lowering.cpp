@@ -53,6 +53,7 @@ Value *FunctionEmitter::endianLoad(Value *pointer, Type *resultType,
                                    u32 width) {
   Type *integerType = IntegerType::get(context_, width * 8u);
   Value *loaded = builder_.CreateLoad(integerType, pointer);
+  tagGuestMemory(loaded);
   loaded = bswap(loaded);
   if (resultType != integerType)
     loaded = builder_.CreateZExtOrTrunc(loaded, resultType);
@@ -201,7 +202,7 @@ void FunctionEmitter::endianStore(Value *pointer, Value *value, u32 width) {
   Value *narrowed = value;
   if (value->getType() != integerType)
     narrowed = builder_.CreateZExtOrTrunc(value, integerType);
-  builder_.CreateStore(bswap(narrowed), pointer);
+  tagGuestMemory(builder_.CreateStore(bswap(narrowed), pointer));
 }
 
 void FunctionEmitter::externalWrite(Value *address, Value *value, u32 width) {

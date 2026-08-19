@@ -9,6 +9,8 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
+#include <llvm/IR/MDBuilder.h>
+#include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/Format.h>
@@ -76,6 +78,13 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   guard_cycles_->setName("guard_cycles");
   guard_steps_ = function_->getArg(2);
   guard_steps_->setName("guard_steps");
+  // Both counters are allocas created in the wrapper and passed only to this
+  // body, so they cannot alias CPUState or each other -- but nothing said so,
+  // and the budget guard updates them inside the hottest loops. Without this
+  // every guard store looks like it might clobber cr/gpr, which forces a
+  // reload of guest state on the next instruction that reads it.
+  function_->addParamAttr(1, Attribute::NoAlias);
+  function_->addParamAttr(2, Attribute::NoAlias);
 
   entry_ = BasicBlock::Create(context_, "entry", function_);
   for (u32 i = 0; i < source_.block_count; i++)
@@ -219,17 +228,52 @@ Value *FunctionEmitter::bytePtr(size_t offset) {
       ConstantInt::get(Type::getInt64Ty(context_), offset));
 }
 
+void FunctionEmitter::initAliasScopes() {
+  llvm::MDBuilder md(context_);
+  alias_domain_ = md.createAnonymousAliasScopeDomain("dolrecomp.guest");
+  MDNode *const state = md.createAnonymousAliasScope(alias_domain_, "cpustate");
+  MDNode *const guest = md.createAnonymousAliasScope(alias_domain_, "guestmem");
+  scope_state_list_ = MDNode::get(context_, {state});
+  scope_guest_list_ = MDNode::get(context_, {guest});
+}
+
+// An access tagged with a scope declares it touches that scope; tagged noalias
+// against the other declares it cannot touch it. Anything left untagged stays
+// conservative and may alias both, which is what keeps helper calls and MMIO
+// paths correct without enumerating them.
+void FunctionEmitter::tagState(Value *access) {
+  auto *const instruction = llvm::dyn_cast_or_null<llvm::Instruction>(access);
+  if (!instruction || !scope_state_list_)
+    return;
+  instruction->setMetadata(llvm::LLVMContext::MD_alias_scope,
+                           scope_state_list_);
+  instruction->setMetadata(llvm::LLVMContext::MD_noalias, scope_guest_list_);
+}
+
+void FunctionEmitter::tagGuestMemory(Value *access) {
+  auto *const instruction = llvm::dyn_cast_or_null<llvm::Instruction>(access);
+  if (!instruction || !scope_guest_list_)
+    return;
+  instruction->setMetadata(llvm::LLVMContext::MD_alias_scope,
+                           scope_guest_list_);
+  instruction->setMetadata(llvm::LLVMContext::MD_noalias, scope_state_list_);
+}
+
 Value *FunctionEmitter::loadContext(DolIRStateSlot slot) {
-  return builder_.CreateLoad(type(dolir_state_type(slot)),
-                             bytePtr(stateOffset(slot)));
+  Value *const loaded = builder_.CreateLoad(type(dolir_state_type(slot)),
+                                            bytePtr(stateOffset(slot)));
+  tagState(loaded);
+  return loaded;
 }
 
 void FunctionEmitter::storeContext(DolIRStateSlot slot, Value *value) {
-  builder_.CreateStore(value, bytePtr(stateOffset(slot)));
+  tagState(builder_.CreateStore(value, bytePtr(stateOffset(slot))));
 }
 
 Value *FunctionEmitter::loadOffset(Type *valueType, size_t offset) {
-  return builder_.CreateLoad(valueType, bytePtr(offset));
+  Value *const loaded = builder_.CreateLoad(valueType, bytePtr(offset));
+  tagState(loaded);
+  return loaded;
 }
 
 void FunctionEmitter::scanState() {
@@ -385,6 +429,7 @@ void FunctionEmitter::scanLoopHeaders() {
 }
 
 void FunctionEmitter::emitEntry() {
+  initAliasScopes();
   builder_.SetInsertPoint(entry_);
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (!used_[slot])
@@ -532,9 +577,10 @@ bool FunctionEmitter::emitInstruction(const DolIRInstruction &inst,
     break;
   case DOLIR_OP_STATE_READ:
     result = builder_.CreateLoad(resultType, state_[inst.aux]);
+    tagState(result);
     break;
   case DOLIR_OP_STATE_WRITE:
-    builder_.CreateStore(operand(inst, 0), state_[inst.aux]);
+    tagState(builder_.CreateStore(operand(inst, 0), state_[inst.aux]));
     break;
   case DOLIR_OP_ADD:
     result = builder_.CreateAdd(operand(inst, 0), operand(inst, 1));

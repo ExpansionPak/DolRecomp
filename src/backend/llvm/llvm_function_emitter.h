@@ -17,6 +17,7 @@ class Argument;
 class BasicBlock;
 class Function;
 class LLVMContext;
+class MDNode;
 class Module;
 class Type;
 class Value;
@@ -41,6 +42,15 @@ private:
   llvm::Value *loadContext(DolIRStateSlot slot);
   void storeContext(DolIRStateSlot slot, llvm::Value *value);
   llvm::Value *loadOffset(llvm::Type *value_type, std::size_t offset);
+
+  // Guest RAM and CPUState are separate allocations -- guest addresses reach
+  // RAM through ctx->ram and can never name the host-side state struct -- but
+  // nothing told LLVM that. Both are reached through pointers loaded out of
+  // ctx, so every guest store looked like it might clobber cr/gpr and forced a
+  // reload afterwards. Two alias scopes state the disjointness.
+  void initAliasScopes();
+  void tagState(llvm::Value *access);
+  void tagGuestMemory(llvm::Value *access);
 
   void scanState();
   void scanExactFloat(u64 descriptor);
@@ -116,6 +126,10 @@ private:
   // Where each guest state slot lives: a pointer straight into CPUState, so a
   // read or write of a slot is a read or write of the field itself.
   std::array<llvm::Value *, DOLIR_STATE_COUNT> state_{};
+
+  llvm::MDNode *alias_domain_ = nullptr;
+  llvm::MDNode *scope_state_list_ = nullptr;
+  llvm::MDNode *scope_guest_list_ = nullptr;
   std::array<bool, DOLIR_STATE_COUNT> used_{};
   u32 current_block_ = 0;
   std::vector<llvm::BasicBlock *> blocks_;
