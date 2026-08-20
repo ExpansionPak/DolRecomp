@@ -123,7 +123,7 @@ static u32 c_chunk_instructions(void) {
 // the C backend on floating-point state, because helper calls write slots
 // without emitting DOLIR_OP_STATE_WRITE. Both barrier sides are conservative
 // again.
-#define DOLLLVM_CACHE_VERSION "dolllvm-v18"
+#define DOLLLVM_CACHE_VERSION "dolllvm-v20-mem1-hoist"
 // The LLVM optimisation level used for generated objects. Named so it can be
 // folded into the cache key; changing it must not reuse cached objects.
 #define DOLLLVM_OPT_LEVEL 2

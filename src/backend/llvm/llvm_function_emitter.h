@@ -119,6 +119,13 @@ private:
   llvm::Argument *ctx_ = nullptr;
   llvm::BasicBlock *entry_ = nullptr;
   llvm::AllocaInst *cycles_ = nullptr;
+  // MEM1's base, loaded once at region entry. ctx->ram is fixed for the whole
+  // burst -- the chassis sets it before dispatch and nothing the module can
+  // call reallocates MEM1 -- but it sat behind a load on every guest access,
+  // and LLVM cannot hoist that because a CPUState store shares its alias
+  // scope. MEM2 deliberately keeps its per-access load: cpu_alloc_mem2 can
+  // allocate it after a region has already started running.
+  llvm::Value *ram_base_ = nullptr;
   // Shared across generated calls until control returns to the dispatcher.
   llvm::Value *guard_cycles_ = nullptr;
   // Termination backstop for zero-cycle loops.

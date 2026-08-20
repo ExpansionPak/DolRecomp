@@ -439,6 +439,9 @@ void FunctionEmitter::emitEntry() {
     // flushed back, which is what removed the materialization barriers.
     state_[slot] = bytePtr(stateOffset(static_cast<DolIRStateSlot>(slot)));
   }
+  ram_base_ = loadOffset(PointerType::getUnqual(context_),
+                         offsetof(CPUState, ram));
+  ram_base_->setName("ram_base");
   cycles_ =
       builder_.CreateAlloca(Type::getInt64Ty(context_), nullptr, "cycles");
   builder_.CreateStore(ConstantInt::get(Type::getInt64Ty(context_), 0),

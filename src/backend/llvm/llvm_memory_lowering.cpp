@@ -117,8 +117,7 @@ Value *FunctionEmitter::emitGuestLoad(Value *address, Type *resultType,
   builder_.CreateCondBr(mem1, mem1Block, checkMem2);
 
   builder_.SetInsertPoint(mem1Block);
-  Value *ram =
-      loadOffset(PointerType::getUnqual(context_), offsetof(CPUState, ram));
+  Value *ram = ram_base_;
   Value *mem1Offset =
       builder_.CreateSub(normalized, builder_.getInt32(GC_RAM_BASE));
   Value *mem1Ptr =
@@ -258,8 +257,7 @@ void FunctionEmitter::emitGuestStore(Value *address, Value *value, u32 width) {
                         mem1Block, checkMem2);
 
   builder_.SetInsertPoint(mem1Block);
-  Value *ram =
-      loadOffset(PointerType::getUnqual(context_), offsetof(CPUState, ram));
+  Value *ram = ram_base_;
   Value *mem1Offset =
       builder_.CreateSub(normalized, builder_.getInt32(GC_RAM_BASE));
   journal(mem1Offset, width);
