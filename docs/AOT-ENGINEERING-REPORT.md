@@ -158,11 +158,43 @@ the module is 1.44 MB smaller -- redundant loads and stores going away rather
 than a layout accident. Unmeasured on x86-64, where the same reasoning applies
 but the register file is not the constraint it is here.
 
+It generalises, and by more than the title it came from. Pokemon Colosseum
+shares no code with Luigi's Mansion and was never profiled while developing
+this; it gains **+22.6%** from this change and the MEM1 hoist (2.5) together,
+5 of 5 pairs, on a module 5.2% smaller:
+
+| Colosseum, intro sequence, single core | fps |
+|---|---:|
+| before both changes | 12.84 |
+| after both changes | **15.74** |
+
+Luigi's Mansion gains about 17% from the same pair. Frame sizes match across
+arms at ~1.38 MB and guest cycles rise from 21.1 to 26.4 billion, so this is
+more guest work per wall-second rather than a lighter scene. Deriving both
+changes from one title's profile did not fit them to it.
+
 The change had to be made three times before it measured anything. The object
 cache does not hash the emitter source, so the first two attempts returned
 byte-identical objects and would have been written up as "no effect" had the
 hashes not been checked. `DOLLLVM_CACHE_VERSION` exists for this and has now
 bitten four times.
+
+### 2.5 MEM1's base loaded once per region
+
+Every guest memory access loaded `ctx->ram` before indexing it. The pointer is
+fixed for the whole burst -- the chassis sets it before dispatch and nothing the
+module can call reallocates MEM1 -- but LLVM cannot hoist that load, because the
+alias scope in 2.4 covers all of `CPUState` as one blob and a store to `cr` or a
+gpr blocks it.
+
+Loading it once in the prologue is **+1.7%** on Luigi's Mansion (5 of 5 pairs)
+and 590 KB off the module. Modest on its own because LLVM already CSEs these
+loads within a block; what this adds is the hoist across blocks and loops, which
+it could not prove for itself.
+
+MEM2 deliberately keeps its per-access load. `cpu_alloc_mem2` can allocate exram
+after a region has started running, so caching that pointer would be a bug
+rather than a missed optimisation.
 
 ---
 
