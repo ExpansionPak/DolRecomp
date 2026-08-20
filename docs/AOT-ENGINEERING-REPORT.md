@@ -115,6 +115,34 @@ Not a default in the sense the other options are, since it needs a per-title
 profile. Unmeasured: whether the gain holds on a scene much heavier than
 anything in the profile set.
 
+### 2.4 Guest RAM and `CPUState` declared disjoint
+
+Every guest register access goes through `CPUState`, and guest memory is
+reached through a pointer loaded out of `CPUState`. Nothing told LLVM the two
+are different objects, so a guest store looked like it might clobber `cr` or a
+gpr, and the next instruction that read one reloaded it.
+
+Two alias scopes in one domain say otherwise: `CPUState` accesses are tagged
+`cpustate`/noalias-`guestmem`, guest RAM accesses the reverse. Every `CPUState`
+access already funnels through `bytePtr()` and every guest RAM access through
+`endianLoad`/`endianStore`, so this is four tag sites. Anything untagged --
+helper calls, MMIO, external reads and writes -- stays conservative and
+may-alias, which is what keeps those paths correct without enumerating them.
+The two budget counters take `NoAlias` as well: they are allocas created in the
+wrapper and passed only to the body, but the guard updates them inside the
+hottest loops.
+
+**+15.0% on AArch64** (Luigi's Mansion foyer, single core, 5 of 5 pairs), and
+the module is 1.44 MB smaller -- redundant loads and stores going away rather
+than a layout accident. Unmeasured on x86-64, where the same reasoning applies
+but the register file is not the constraint it is here.
+
+The change had to be made three times before it measured anything. The object
+cache does not hash the emitter source, so the first two attempts returned
+byte-identical objects and would have been written up as "no effect" had the
+hashes not been checked. `DOLLLVM_CACHE_VERSION` exists for this and has now
+bitten four times.
+
 ---
 
 ## 3. What did not work
@@ -316,10 +344,34 @@ Two compatibility details are worth naming:
   configuration landed on parity, and why a three-pair advantage reversed sign
   at five pairs: two modules that never execute cannot differ.
 
-  Why dispatch stops after boot is open, and is the next thing to establish. The
-  module loads without complaint, reports `smc_failed=0`, and completes 19 chunk
-  verifications before going quiet. Until that is understood, AArch64 has a
-  working build pipeline and no performance result of any kind.
+  Why dispatch stopped after boot is now known, and it was not this project's
+  bug: the ModernGekko build on that machine had no static-recomp integration in
+  its ARM64 JIT at all. `Jit64` calls `StaticRecompShouldYieldAt` at block
+  boundaries so the static core regains control; the `JitArm64` in that tree
+  never did, so the first fall back into the JIT kept the CPU permanently.
+  Against a current runtime the same module executes 16.3 billion guest cycles
+  where it previously executed 419 thousand, and the numbers below are the
+  first on this target with the recompiled code actually running.
+
+  | Luigi's Mansion, mansion foyer, single core | fps |
+  |---|---:|
+  | `llvm-aot` as this branch stands | 4.76 |
+  | with alias metadata (2.4) | **5.48** |
+  | with alias metadata and a per-title profile | **6.71** |
+  | Dolphin's `JitArm64`, same scene | 13.20 |
+
+  Five alternating pairs per comparison, twenty samples per run, `CPUThread`
+  pinned per run and recorded in each result line. +15.0% and +21.9%, 5 of 5
+  pairs each. The static recompiler remains about **2x behind the JIT** on this
+  target, and the profile above is same-scene, so it is an upper bound.
+
+  What the JIT does that this does not is not structural. Its register cache
+  keeps guest registers in host registers across a block where every read here
+  goes to `CPUState`; it decrements a cycle counter once per block where the
+  budget guard here is per loop header; and fastmem removes the bounds check
+  that costs four instructions per guest access. In the measured hot loop those
+  came to roughly 67% and 28% of module time, against 0.3% for the guest's own
+  memory traffic.
 
   Cross-compiling from an x86-64 build machine needs the AArch64 target
   registered and its CodeGen/AsmParser/Desc/Info components linked; relaxing the
