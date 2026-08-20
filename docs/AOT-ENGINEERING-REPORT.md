@@ -19,11 +19,13 @@ Titles are supplied locally and none is committed.
 
 ## 1. Headline
 
-The region backend began the effort **60-70% behind the C backend** on Mario
+Two targets, two different stories, and the second one is not a footnote.
+
+**On x86-64** the region backend began **60-70% behind the C backend** on Mario
 Kart and ended at **parity with it**, on a module **4.9x smaller** than the one
 it started with and builds **19x faster**.
 
-| Mario Kart, one pinned scene | fps | module | build |
+| Mario Kart, one pinned scene, x86-64 | fps | module | build |
 |---|---:|---:|---:|
 | fixed-chunk `llvm` (the shipping LLVM path) | 29.80 | 320.0 MB | 351 s |
 | `llvm-aot` as first built | 33.24 | 424.1 MB | ~930 s |
@@ -36,6 +38,25 @@ Profile-guided optimisation then adds **+5.6% to +18.9%** on top, validated on
 three titles and 34 of 36 paired runs (p = 1.9e-08), two of them with held-out
 measurement scenes. It needs a per-title profile, so it is a build-pipeline
 step rather than a default (2.3).
+
+**On AArch64 it is about 2x behind Dolphin's own JIT**, and that gap is the
+honest headline for that target. Measured on a Raspberry Pi 4, Luigi's Mansion
+in the mansion foyer, single core, five alternating pairs per comparison with
+`CPUThread` pinned per run:
+
+| Luigi's Mansion, mansion foyer, AArch64 | fps | vs JIT |
+|---|---:|---:|
+| `llvm-aot` as this branch stands | 4.76 | 2.77x behind |
+| with alias metadata (2.4) | 5.48 | 2.41x behind |
+| with alias metadata and a per-title profile | 6.71 | 1.97x behind |
+| Dolphin's `JitArm64`, same scene | **13.20** | — |
+
+Nothing structural explains that gap: the JIT keeps guest registers in host
+registers across a block, decrements its cycle counter once per block, and uses
+fastmem instead of a bounds check per access. Section 7 has the measurements
+behind each. The x86-64 result above does not transfer to this target, and
+neither does its parity-with-C conclusion -- the AArch64 comparison against the
+C backend is 5.69 against 5.86, a 3.0% deficit rather than parity.
 
 ---
 
