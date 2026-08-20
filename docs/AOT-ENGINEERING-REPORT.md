@@ -116,6 +116,21 @@ previously tested was region *seeding*, which is unrelated and was a dead end.
 
 Combined **34 of 36 pairs, p = 1.9e-08**, `fallback` 0 on every run.
 
+It carries to AArch64, measured the same way on a Raspberry Pi 4 with
+`CPUThread` pinned per run, on top of the alias metadata and MEM1 hoist:
+
+| title, AArch64 | fps | pairs |
+|---|---:|---:|
+| Luigi's Mansion, mansion foyer | 5.50 to 6.71, **+21.9%** | 5/5 |
+| Pokemon Colosseum, intro sequence | 15.69 to 19.65, **+25.2%** | 5/5 |
+
+Both are **same-scene** and therefore upper bounds, unlike the held-out x86-64
+figures above -- the honest comparison for Luigi's Mansion is the +5.6% held-out
+row, not these. One Colosseum pair was discarded for sampling a scene
+transition: fps standard deviation 3.24 and 6.06 against 0.08-0.23 everywhere
+else. Including it the figure is +27.9%, so the exclusion does not carry the
+result.
+
 Two of the three use held-out measurement scenes, so generalisation is measured
 rather than assumed. Skyward Sword could not be: its only savestates are
 `gameplay` and `title`, and a title screen shares almost no code with gameplay.
@@ -431,6 +446,13 @@ Two compatibility details are worth naming:
   triple guard alone leaves `lookupTarget` reporting a missing-component problem
   as an unsupported triple. That is on PR #15, with a test that emits for
   `aarch64-unknown-linux-gnu` and checks `e_machine`.
+* **Dual core is worth more than any change measured here, and is not ours.**
+  Dolphin's CPU/GPU thread split is **+15.6%** on Colosseum with the full stack
+  applied (19.71 to 22.78 fps, 4 of 4 pairs, same module, core mode alternated),
+  and about +16% on Luigi's Mansion. It is a runtime setting with correctness
+  tradeoffs in timing-sensitive titles, so it is context for anyone reading the
+  AArch64 numbers rather than something this branch changes -- and it is why
+  every figure in this report names its core mode.
 * **`stfs` diverges between backends** on overflow and denormal inputs. Excluded
   from the default differential pool, reproduces with `--stfs`. One backend is
   wrong about Gekko and it is not yet known which. This is the oldest open
