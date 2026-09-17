@@ -5,6 +5,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Module.h>
+#include <llvm/TargetParser/Triple.h>
 
 #include "common/types.h"
 
@@ -18,7 +19,13 @@ static void markColdFixup(Function *function) {
   function->addFnAttr(Attribute::NoInline);
   function->addFnAttr(Attribute::NoUnwind);
   function->addFnAttr(Attribute::WillReturn);
-  function->setSection(".text.unlikely." + function->getName().str());
+  // Mach-O section specifiers are "__SEGMENT,__section" and its writer rejects
+  // anything else outright, so a bare ".text.unlikely.*" name aborts emission on
+  // Darwin targets ("invalid section specifier"). ELF and COFF both accept the
+  // name, and the Cold plus NoInline attributes already carry the placement hint
+  // on every target, so dropping only the name on Mach-O costs nothing.
+  if (!Triple(function->getParent()->getTargetTriple()).isOSBinFormatMachO())
+    function->setSection(".text.unlikely." + function->getName().str());
 }
 
 Function *getPairNaNFixup(Module &module, Type *pairType) {
