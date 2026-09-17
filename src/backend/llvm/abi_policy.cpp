@@ -1,6 +1,7 @@
 #include "backend/llvm/llvm_backend.h"
 
 #include <algorithm>
+#include <bitset>
 #include <deque>
 #include <functional>
 #include <unordered_map>
@@ -12,7 +13,7 @@ u32 stateCount(const u64 *first, const u64 *second = nullptr) {
   u32 count = 0;
   for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++)
     count += static_cast<u32>(
-        __builtin_popcountll(first[word] | (second ? second[word] : 0u)));
+        std::bitset<64>(first[word] | (second ? second[word] : 0u)).count());
   return count;
 }
 
