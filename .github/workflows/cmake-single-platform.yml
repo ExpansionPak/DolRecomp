@@ -51,28 +51,42 @@ jobs:
         run: ctest --build-config ${{ matrix.build_type }} --output-on-failure
 
   # Exercise the LLVM backend and both supported object formats.
+  #
+  # The matrix is keyed on toolchain, not just OS, because the two Windows
+  # entries are genuinely different configurations: mingw has the GCC builtins
+  # and links ELF-style, MSVC has neither. A break that only MSVC sees went
+  # unnoticed for exactly that reason, so both are built. macOS is here for the
+  # Mach-O object path, which nothing else in this workflow covers.
   llvm:
-    name: LLVM backend (${{ matrix.os }})
+    name: LLVM backend (${{ matrix.os }}, ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            toolchain: gcc
+          - os: windows-latest
+            toolchain: mingw
+          - os: windows-latest
+            toolchain: msvc
+          - os: macos-latest
+            toolchain: appleclang
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install LLVM (Linux)
-        if: runner.os == 'Linux'
+        if: matrix.toolchain == 'gcc'
         run: |
           curl -fsSL -o llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 20
           sudo apt-get install -y llvm-20-dev
 
-      - name: Install Windows toolchain
-        if: runner.os == 'Windows'
+      - name: Install Windows toolchain (mingw)
+        if: matrix.toolchain == 'mingw'
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -82,23 +96,39 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-ninja
 
-      - name: Install LLVM (Windows)
-        if: runner.os == 'Windows'
+      - name: Install LLVM (mingw)
+        if: matrix.toolchain == 'mingw'
         shell: msys2 {0}
         run: >
           pacman --noconfirm -U
           https://repo.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-llvm-20-20.1.8-4-any.pkg.tar.zst
 
+      - name: Install LLVM (MSVC)
+        if: matrix.toolchain == 'msvc'
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/clang+llvm-20.1.8-x86_64-pc-windows-msvc.tar.xz'
+          curl.exe -fsSL -o llvm.tar.xz $url
+          New-Item -ItemType Directory -Force -Path llvm | Out-Null
+          tar -xf llvm.tar.xz -C llvm --strip-components=1
+          "LLVM_ROOT=$((Resolve-Path llvm).Path)" >> $env:GITHUB_ENV
+
+      - name: Install LLVM (macOS)
+        if: matrix.toolchain == 'appleclang'
+        run: |
+          brew install llvm@20 ninja
+          echo "LLVM_ROOT=$(brew --prefix llvm@20)" >> "$GITHUB_ENV"
+
       - name: Configure (Linux)
-        if: runner.os == 'Linux'
+        if: matrix.toolchain == 'gcc'
         run: >
           cmake -B ${{ github.workspace }}/build -S ${{ github.workspace }}
           -DCMAKE_BUILD_TYPE=Release
           -DDOLRECOMP_ENABLE_LLVM=ON
           -DLLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm
 
-      - name: Configure (Windows)
-        if: runner.os == 'Windows'
+      - name: Configure (mingw)
+        if: matrix.toolchain == 'mingw'
         shell: msys2 {0}
         run: >
           cmake -G Ninja -B build -S .
@@ -106,21 +136,71 @@ jobs:
           -DDOLRECOMP_ENABLE_LLVM=ON
           -DLLVM_DIR=/ucrt64/opt/llvm-20/lib/cmake/llvm
 
+      - name: Configure (MSVC)
+        if: matrix.toolchain == 'msvc'
+        shell: pwsh
+        run: >
+          cmake -B build -S .
+          -DCMAKE_BUILD_TYPE=Release
+          -DDOLRECOMP_ENABLE_LLVM=ON
+          "-DLLVM_DIR=$env:LLVM_ROOT/lib/cmake/llvm"
+
+      - name: Configure (macOS)
+        if: matrix.toolchain == 'appleclang'
+        run: >
+          cmake -G Ninja -B build -S .
+          -DCMAKE_BUILD_TYPE=Release
+          -DDOLRECOMP_ENABLE_LLVM=ON
+          "-DLLVM_DIR=$LLVM_ROOT/lib/cmake/llvm"
+
       - name: Build (Linux)
-        if: runner.os == 'Linux'
+        if: matrix.toolchain == 'gcc'
         run: cmake --build ${{ github.workspace }}/build --config Release
 
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
+      - name: Build (mingw)
+        if: matrix.toolchain == 'mingw'
         shell: msys2 {0}
         run: cmake --build build
 
+      - name: Build (MSVC)
+        if: matrix.toolchain == 'msvc'
+        shell: pwsh
+        run: cmake --build build --config Release
+
+      - name: Build (macOS)
+        if: matrix.toolchain == 'appleclang'
+        run: cmake --build build
+
       - name: Test (Linux)
-        if: runner.os == 'Linux'
+        if: matrix.toolchain == 'gcc'
         working-directory: ${{ github.workspace }}/build
         run: ctest --build-config Release --output-on-failure
 
-      - name: Test (Windows)
-        if: runner.os == 'Windows'
+      - name: Test (mingw)
+        if: matrix.toolchain == 'mingw'
         shell: msys2 {0}
         run: ctest --test-dir build --output-on-failure
+
+      - name: Test (MSVC)
+        if: matrix.toolchain == 'msvc'
+        shell: pwsh
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      # Serial: these tests share artifacts in the build directory and report
+      # an inconsistent subset of failures when run in parallel.
+      #
+      # Three are excluded as known Darwin gaps rather than regressions, so
+      # that the other 29 can gate:
+      #   llvm_pipeline  - is_native_object() knows COFF and ELF only, and the
+      #                    pipeline emits both native Mach-O and cross-target
+      #                    ELF objects, so the check needs to know which is
+      #                    which before it can run here
+      #   modern_codegen - the wide return struct has a different element
+      #                    count under the arm64 Darwin ABI
+      #   llvm_codegen   - AArch64 disassembly assertions, symbol naming
+      #                    differs on Mach-O
+      - name: Test (macOS)
+        if: matrix.toolchain == 'appleclang'
+        run: >
+          ctest --test-dir build -j1 --output-on-failure
+          -E "modern_codegen|llvm_codegen|llvm_pipeline"
