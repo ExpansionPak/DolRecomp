@@ -1,53 +1,21 @@
 # Contributing to DolRecomp
 
-Look, forks are welcome if you want to mess around with the recompiler codebase, but **we are not accepting random Pull Requests right now.** The codebase is moving and changing way too fast during this early sprint. 
+Well... Let me just start over...
 
-Save yourself the time and don't open a PR unless a maintainer explicitly tells you to do so in an issue or on the Discord `#dolrecomp` channel. 
+## AI guidelines
 
-[![Discord Banner](https://discord.com/api/guilds/1508777745709269034/widget.png?style=banner2)](https://discord.gg/MMQJ4TdmFs)
+As of Early-August 2026 we have been accepting some AI contributions (**albiet controlled in areas we want it to be**). "**AI**" in this case means a Large Language Model ("**LLM**"), such as **ChatGPT**, **Claude**, **Copilot**, **Grok**, **etc**, but that does not automatically mean any AI generated PRs can be accepted. If your PR uses some form of generative AI for specific changes or additions (Whether code or documentation), they must follow these specific-guidelines
 
-## Code Quality & Rules
+1. The following PR has been tested and verified to compile and run as intended.
+2. The following code does not contain any over-explained comments for simple-single line additions. (A clear example of this can be found [here](https://github.com/mstan/PokemonStadiumRecomp/blob/main/game.toml))
+3. The following changes do not break GitHub workflows. (This is to make sure our code can compile on all 3 target platforms, Windows, macOS, and Linux, either through the **C** backend or the **LLVM** backend)
 
-If you are writing code for local forks, patches, or future submissions, keep these strict guidelines in mind:
+Any AI generated PRs that do not follow guidelines will be considered "**slop**" and will immediately be rejected.
 
-*   **No AI-Generated Code:** Absolutely no copy-pasted junk from Claude, Grok, ChatGPT, or any other LLM. Write the code yourself. If it looks like machine-slop, it’s getting tossed.
-*   **Write Non-Vague Comments:** Don't leave useless comments that explain *what* the obvious syntax is doing. Leave helpful, concrete comments explaining *why* a specific decoding choice or backend logic step was implemented.
+Remember. If your PR causes a workflow break, makes the code uncompilable, or destroy someone's computer, then that's on **you** because you are entirely responsible for what your PR does.
 
-## Filing Issues & Code of Conduct
+## But now...
 
-GitHub Issues are strictly for reproducible bugs, build failures, incorrect C codegen output, missing instruction support, and other actionable problems. 
+Other than that, the standard guidelines for human-made PRs are pretty much the same as the ones we have for AI PRs so... There's not much else to add here. Just, follow the rules, and stay cool. Okay?
 
-### Do Not Use Issues to Complain
-Issues are not your personal diary for non-technical complaints, drive-by trolling, or drama. We’ve already had to lock and close completely useless tickets from people complaining about the project tagline, structure, or lack of comments. 
-
-If you open an issue just to whine, say *"it doesn't work"*, or throw a tantrum without technical details, it will be closed and ignored instantly. 
-
-### Your issue must include:
-1. **The input type being tested:** (DOL, RPX, or REL)
-2. **The failing instruction or function:** (If you know it)
-3. **The exact commit/build used:** (Don't just say "latest")
-4. **Steps to reproduce:** (What did you run to make it choke?)
-
-## Local Environment & Building
-
-If you are setting up the repo to debug code generation or fix things locally, make sure you meet the baseline requirements:
-
-*   **CMake 3.16** or newer
-*   A **C11 compiler**
-*   **zlib** (Optional, but mandatory if you are testing compressed Wii U RPX sections)
-
-### Build Pipeline:
-```bash
-cmake -S . -B build
-cmake --build build --config Release -j 14
-ctest --test-dir build -C Release --output-on-failure
-```
-
-*Note: If you are messing with Wii U recompilation, devkitPro is highly recommended.*
-
-## Code Structure
-
-Before you start poking around the source tree, here is where everything lives:
-*   `src/frontend/` — DOL/RPX loading and PowerPC instruction decoding.
-*   `src/backend/` — Split C generation and manifest output.
-*   `tests/` — Decoder validation, CPU behavior, and codegen test cases.
+<sub>Also the old CONTRIBUTING.md was written entirely using AI, so after the new rule changes I have completely rewritten all of this entirely by myself :D
