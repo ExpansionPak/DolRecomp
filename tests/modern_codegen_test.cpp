@@ -66,6 +66,7 @@ int main(int argc, char **argv) {
 
   bool state_callback = false;
   bool native_call = false;
+  bool native_call_noinline = false;
   bool direct_memory = false;
   bool cold_escape = false;
   bool state_commit = false;
@@ -132,8 +133,10 @@ int main(int argc, char **argv) {
             cache_callback = true;
         }
         if (call && call->getCalledFunction() &&
-            call->getCalledFunction()->getName() == "func_80003600_budget")
+            call->getCalledFunction()->getName() == "func_80003600_budget") {
           native_call = true;
+          native_call_noinline |= call->hasFnAttr(llvm::Attribute::NoInline);
+        }
         if (call && call->getCalledFunction() &&
             call->getCalledFunction()->getName() == "_longjmp")
           cold_escape = true;
@@ -149,6 +152,7 @@ int main(int argc, char **argv) {
   }
   CHECK(state_callback);
   CHECK(native_call);
+  CHECK(native_call_noinline);
   CHECK(direct_memory);
   CHECK(cold_escape);
   CHECK(state_commit);

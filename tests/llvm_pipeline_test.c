@@ -76,6 +76,8 @@ static int run_generator(const char* executable, const char* dol,
         return 0;
     if (_putenv_s("DOLRECOMP_LLVM_CACHE", cache) != 0)
         return 0;
+    if (_putenv_s("DOLRECOMP_LLVM_RANGES_PER_OBJECT", "") != 0)
+        return 0;
     return _spawnl(_P_WAIT, executable, executable, "--gamecube",
                    "--backend=llvm", targets, "-j2", dol, output, NULL) == 0;
 #else
@@ -85,6 +87,7 @@ static int run_generator(const char* executable, const char* dol,
     if (child == 0) {
         setenv("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512", 1);
         setenv("DOLRECOMP_LLVM_CACHE", cache, 1);
+        unsetenv("DOLRECOMP_LLVM_RANGES_PER_OBJECT");
         execl(executable, executable, "--gamecube", "--backend=llvm", targets,
               "-j2", dol, output, NULL);
         _exit(127);
@@ -102,6 +105,8 @@ static int run_native_generator(const char* executable, const char* dol,
         return 0;
     if (_putenv_s("DOLRECOMP_LLVM_CACHE", cache) != 0)
         return 0;
+    if (_putenv_s("DOLRECOMP_LLVM_RANGES_PER_OBJECT", "") != 0)
+        return 0;
     return _spawnl(_P_WAIT, executable, executable, "--gamecube",
                    "--backend=llvm", "--runtime=moderngekko",
                    "--game-id=TEST01", "--targets=host", "-j2", dol, output,
@@ -113,6 +118,41 @@ static int run_native_generator(const char* executable, const char* dol,
     if (child == 0) {
         setenv("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512", 1);
         setenv("DOLRECOMP_LLVM_CACHE", cache, 1);
+        unsetenv("DOLRECOMP_LLVM_RANGES_PER_OBJECT");
+        execl(executable, executable, "--gamecube", "--backend=llvm",
+              "--runtime=moderngekko", "--game-id=TEST01", "--targets=host",
+              "-j2", dol, output, NULL);
+        _exit(127);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+           WEXITSTATUS(status) == 0;
+#endif
+}
+
+static int run_native_generator_batched(const char* executable,
+                                        const char* dol, const char* output,
+                                        const char* cache,
+                                        const char* ranges_per_object) {
+#if defined(_WIN32)
+    if (_putenv_s("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512") != 0)
+        return 0;
+    if (_putenv_s("DOLRECOMP_LLVM_CACHE", cache) != 0)
+        return 0;
+    if (_putenv_s("DOLRECOMP_LLVM_RANGES_PER_OBJECT", ranges_per_object) != 0)
+        return 0;
+    return _spawnl(_P_WAIT, executable, executable, "--gamecube",
+                   "--backend=llvm", "--runtime=moderngekko",
+                   "--game-id=TEST01", "--targets=host", "-j2", dol, output,
+                   NULL) == 0;
+#else
+    pid_t child = fork();
+    if (child < 0)
+        return 0;
+    if (child == 0) {
+        setenv("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512", 1);
+        setenv("DOLRECOMP_LLVM_CACHE", cache, 1);
+        setenv("DOLRECOMP_LLVM_RANGES_PER_OBJECT", ranges_per_object, 1);
         execl(executable, executable, "--gamecube", "--backend=llvm",
               "--runtime=moderngekko", "--game-id=TEST01", "--targets=host",
               "-j2", dol, output, NULL);
@@ -172,6 +212,18 @@ static int files_equal(const char* first, const char* second) {
     return equal;
 }
 
+static u32 count_manifest_objects(const char* path) {
+    FILE* file = fopen(path, "r");
+    if (!file)
+        return 0;
+    char line[2048];
+    u32 count = 0;
+    while (fgets(line, sizeof(line), file))
+        count += strncmp(line, "// object: ", 11) == 0;
+    fclose(file);
+    return count;
+}
+
 int main(int argc, char** argv) {
     CHECK(argc == 3);
     CHECK(make_dir(argv[2]));
@@ -191,6 +243,14 @@ int main(int argc, char** argv) {
     char native_output[1200];
     char native_header[1200];
     char native_object[1200];
+    char native_fallback[1200];
+    char native_manifest[1200];
+    char native_batch_output[1200];
+    char native_batch_header[1200];
+    char native_batch_object[1200];
+    char native_batch_bitcode[1200];
+    char native_batch_fallback[1200];
+    char native_batch_manifest[1200];
     char output_copy[1200];
     char header_copy[1200];
     char object_copy[1200];
@@ -222,6 +282,25 @@ int main(int argc, char** argv) {
     snprintf(native_object, sizeof(native_object),
              "%s/out-native/generated/chunks/chunk_0000_text0_80003100.o",
              argv[2]);
+    snprintf(native_fallback, sizeof(native_fallback),
+             "%s/out-native/generated/generated_fallbacks.csv", argv[2]);
+    snprintf(native_manifest, sizeof(native_manifest),
+             "%s/out-native/generated/generated.c", argv[2]);
+    snprintf(native_batch_output, sizeof(native_batch_output),
+             "%s/out-native-batch", argv[2]);
+    snprintf(native_batch_header, sizeof(native_batch_header),
+             "%s/out-native-batch/generated/generated.h", argv[2]);
+    snprintf(native_batch_object, sizeof(native_batch_object),
+             "%s/out-native-batch/generated/chunks/"
+             "chunk_0000_text0_80003100_r3.o", argv[2]);
+    snprintf(native_batch_bitcode, sizeof(native_batch_bitcode),
+             "%s/out-native-batch/generated/chunks/"
+             "chunk_0000_text0_80003100_r3.o.bc", argv[2]);
+    snprintf(native_batch_fallback, sizeof(native_batch_fallback),
+             "%s/out-native-batch/generated/generated_fallbacks.csv",
+             argv[2]);
+    snprintf(native_batch_manifest, sizeof(native_batch_manifest),
+             "%s/out-native-batch/generated/generated.c", argv[2]);
     snprintf(output_copy, sizeof(output_copy), "%s/out-copy", argv[2]);
     snprintf(header_copy, sizeof(header_copy),
              "%s/out-copy/generated/generated.h", argv[2]);
@@ -233,6 +312,8 @@ int main(int argc, char** argv) {
     CHECK(run_generator(argv[1], dol, single_output, "--targets=x86-64-v3",
                         cache));
     CHECK(run_native_generator(argv[1], dol, native_output, cache));
+    CHECK(run_native_generator_batched(argv[1], dol, native_batch_output,
+                                       cache, "3"));
     CHECK(run_generator(argv[1], dol, output, "--targets=x86-64-v2,x86-64-v3",
                         cache));
     CHECK(run_generator(argv[1], dol, output_copy,
@@ -274,6 +355,21 @@ int main(int argc, char** argv) {
     CHECK(fread(magic, 1, 4, file) == 4);
     fclose(file);
     CHECK(is_native_object(magic));
+    CHECK(files_equal(native_header, native_batch_header));
+    CHECK(files_equal(native_fallback, native_batch_fallback));
+    u32 native_object_count = count_manifest_objects(native_manifest);
+    u32 native_batch_object_count = count_manifest_objects(native_batch_manifest);
+    CHECK(native_object_count != 0);
+    CHECK(native_batch_object_count == (native_object_count + 2u) / 3u);
+    CHECK(native_batch_object_count < native_object_count);
+    file = fopen(native_batch_object, "rb");
+    CHECK(file != NULL);
+    CHECK(fread(magic, 1, 4, file) == 4);
+    fclose(file);
+    CHECK(is_native_object(magic));
+    file = fopen(native_batch_bitcode, "rb");
+    CHECK(file != NULL);
+    fclose(file);
     file = fopen(manifest, "rb");
     CHECK(file != NULL);
     length = fread(text, 1, sizeof(text) - 1, file);

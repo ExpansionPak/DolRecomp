@@ -111,6 +111,8 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   }
   CallInst *nativeCall = builder_.CreateCall(callee, arguments);
   nativeCall->setCallingConv(bodyCallingConvention());
+  if (nativeTarget)
+    nativeCall->addFnAttr(Attribute::NoInline);
   if (nativeTarget) {
     if (callDepth)
       builder_.CreateStore(callDepth, guard_steps_);

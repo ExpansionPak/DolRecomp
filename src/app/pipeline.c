@@ -55,6 +55,7 @@ static u32 c_chunk_instructions(void) {
 #ifdef DOLRECOMP_ENABLE_LLVM
 #define DOLLLVM_DEFAULT_CHUNK_INSTRUCTIONS 128u
 #define DOLLLVM_DEFAULT_WORKER_BATCH 1u
+#define DOLLLVM_DEFAULT_RANGES_PER_OBJECT 1u
 // SSA regions, ABI v4 variants and ThinLTO summaries.
 #define DOLLLVM_CACHE_VERSION "dolllvm-v29"
 
@@ -62,6 +63,8 @@ typedef struct {
     const PPCInst* insts;
     u32 count;
     u32 function_address;
+    u32 first_range_index;
+    u32 object_range_count;
     u32 index;
     u32 total;
     const DolLLVMFunctionRange* ranges;
@@ -141,6 +144,23 @@ static u32 llvm_worker_batch_size(void) {
                 "using %u\n",
                 DOLLLVM_DEFAULT_WORKER_BATCH);
         return DOLLLVM_DEFAULT_WORKER_BATCH;
+    }
+    return (u32)value;
+}
+
+static u32 llvm_ranges_per_object(void) {
+    const char* configured = getenv("DOLRECOMP_LLVM_RANGES_PER_OBJECT");
+    if (!configured || !configured[0])
+        return DOLLLVM_DEFAULT_RANGES_PER_OBJECT;
+    char* end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(configured, &end, 10);
+    if (errno || !end || *end || value < 1u || value > 256u) {
+        fprintf(stderr,
+                "warning: DOLRECOMP_LLVM_RANGES_PER_OBJECT must be 1..256; "
+                "using %u\n",
+                DOLLLVM_DEFAULT_RANGES_PER_OBJECT);
+        return DOLLLVM_DEFAULT_RANGES_PER_OBJECT;
     }
     return (u32)value;
 }
@@ -266,6 +286,10 @@ static u64 llvm_job_hash(const LLVMChunkJob* job) {
     hash =
         hash_bytes(hash, &job->function_address, sizeof(job->function_address));
     hash = hash_bytes(hash, &job->count, sizeof(job->count));
+    hash = hash_bytes(hash, &job->first_range_index,
+                      sizeof(job->first_range_index));
+    hash = hash_bytes(hash, &job->object_range_count,
+                      sizeof(job->object_range_count));
     u32 state_size = (u32)sizeof(CPUState);
     hash = hash_bytes(hash, &state_size, sizeof(state_size));
     hash = hash_bytes(hash, &job->target_profile, sizeof(job->target_profile));
@@ -681,9 +705,19 @@ static int emit_llvm_chunk_job(const void* data, void* user) {
     remove(temp_path);
     DolIRModule module;
     dolir_module_init(&module);
-    if (!dolir_build_chunk(&module, job->insts, job->count,
-                           job->function_address) ||
-        !dolir_verify(&module, stderr)) {
+    int built = 1;
+    for (u32 i = 0; i < job->object_range_count; i++) {
+        const DolLLVMFunctionRange* range =
+            &job->ranges[job->first_range_index + i];
+        u32 offset = (range->start - job->function_address) / 4u;
+        u32 count = (range->end - range->start) / 4u;
+        if (!dolir_build_chunk(&module, job->insts + offset, count,
+                               range->start)) {
+            built = 0;
+            break;
+        }
+    }
+    if (!built || !dolir_verify(&module, stderr)) {
         dolir_module_free(&module);
         return 0;
     }
@@ -1048,6 +1082,27 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                 dolllvm_report_abi_stats(ranges, range_count, triple, stdout);
         }
     }
+    const u32 ranges_per_object = llvm_ranges_per_object();
+    u32 total_job_count = 0;
+    u32 counted_ranges = 0;
+    for (u32 s = 0; s < section_count; s++) {
+        const LoadedCodeSection* section = &sections[s];
+        if (!section->data || !section->size)
+            continue;
+        u32 first = counted_ranges;
+        u32 section_end = section->address + section->size;
+        while (counted_ranges < range_count &&
+               ranges[counted_ranges].start >= section->address &&
+               ranges[counted_ranges].end <= section_end)
+            counted_ranges++;
+        u32 count = counted_ranges - first;
+        total_job_count +=
+            ((count + ranges_per_object - 1u) / ranges_per_object) *
+            profile_count;
+    }
+    if (counted_ranges != range_count)
+        goto fail;
+
     u32 emitted_range_count = 0;
     for (u32 s = 0; s < section_count; s++) {
         const LoadedCodeSection* section = &sections[s];
@@ -1090,20 +1145,33 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                ranges[emitted_range_count].end <= section_end)
             emitted_range_count++;
         u32 chunk_total = emitted_range_count - first_range;
-        u32 job_total = chunk_total * profile_count;
-        LLVMChunkJob* chunk_jobs =
-            (LLVMChunkJob*)calloc(job_total, sizeof(*chunk_jobs));
-        if (!chunk_jobs) {
+        u32 object_total =
+            (chunk_total + ranges_per_object - 1u) / ranges_per_object;
+        u32 job_total = object_total * profile_count;
+        LLVMChunkJob* chunk_jobs = job_total
+                                       ? (LLVMChunkJob*)calloc(
+                                             job_total, sizeof(*chunk_jobs))
+                                       : NULL;
+        if (job_total && !chunk_jobs) {
             free(insts);
             goto fail;
         }
-        for (u32 chunk_index = 0; chunk_index < chunk_total; chunk_index++) {
-            u32 output_index = first_range + chunk_index;
-            const DolLLVMFunctionRange* range = &ranges[output_index];
-            u32 function_address = range->start;
+
+        for (u32 object_index = 0; object_index < object_total;
+             object_index++) {
+            u32 local_first = object_index * ranges_per_object;
+            u32 object_range_count = chunk_total - local_first;
+            if (object_range_count > ranges_per_object)
+                object_range_count = ranges_per_object;
+            u32 output_index = first_range + local_first;
+            const DolLLVMFunctionRange* first = &ranges[output_index];
+            const DolLLVMFunctionRange* last =
+                &ranges[output_index + object_range_count - 1u];
+            u32 function_address = first->start;
             u32 start = (function_address - section->address) / 4u;
-            u32 chunk_count = (range->end - range->start) / 4u;
-            LLVMChunkJob* job = &chunk_jobs[chunk_index * profile_count];
+            u32 object_instruction_count =
+                (last->end - function_address) / 4u;
+            LLVMChunkJob* job = &chunk_jobs[object_index * profile_count];
             for (u32 variant = 0; variant < profile_count; variant++) {
                 LLVMChunkJob* target_job = &job[variant];
                 const char* target_suffix =
@@ -1112,16 +1180,37 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                     snprintf(target_job->symbol_suffix,
                              sizeof(target_job->symbol_suffix), "__%s",
                              target_suffix);
-                int name_length =
-                    variant
-                    ? snprintf(target_job->name, sizeof(target_job->name),
-                                   "chunk_%04u_%s%u_%08X_%s.o", output_index,
-                                   section->label, section->index,
-                                   function_address, target_suffix)
-                    : snprintf(target_job->name, sizeof(target_job->name),
-                               "chunk_%04u_%s%u_%08X.o", output_index,
-                               section->label, section->index,
-                               function_address);
+                int name_length;
+                if (ranges_per_object == 1u) {
+                    name_length =
+                        variant
+                            ? snprintf(target_job->name,
+                                       sizeof(target_job->name),
+                                       "chunk_%04u_%s%u_%08X_%s.o",
+                                       output_index, section->label,
+                                       section->index, function_address,
+                                       target_suffix)
+                            : snprintf(target_job->name,
+                                       sizeof(target_job->name),
+                                       "chunk_%04u_%s%u_%08X.o", output_index,
+                                       section->label, section->index,
+                                       function_address);
+                } else {
+                    name_length =
+                        variant
+                            ? snprintf(target_job->name,
+                                       sizeof(target_job->name),
+                                       "chunk_%04u_%s%u_%08X_r%u_%s.o",
+                                       output_index, section->label,
+                                       section->index, function_address,
+                                       object_range_count, target_suffix)
+                            : snprintf(target_job->name,
+                                       sizeof(target_job->name),
+                                       "chunk_%04u_%s%u_%08X_r%u.o",
+                                       output_index, section->label,
+                                       section->index, function_address,
+                                       object_range_count);
+                }
                 if (name_length >= (int)sizeof(target_job->name) ||
                     !join_path(target_job->path, sizeof(target_job->path),
                                chunks_dir, target_job->name)) {
@@ -1138,10 +1227,13 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                     goto fail;
                 }
                 target_job->insts = insts + start;
-                target_job->count = chunk_count;
+                target_job->count = object_instruction_count;
                 target_job->function_address = function_address;
-                target_job->index = output_index * profile_count + variant + 1u;
-                target_job->total = range_count * profile_count;
+                target_job->first_range_index = output_index;
+                target_job->object_range_count = object_range_count;
+                target_job->index = file_count +
+                                    object_index * profile_count + variant + 1u;
+                target_job->total = total_job_count;
                 target_job->ranges = ranges;
                 target_job->range_count = range_count;
                 target_job->entry_points = entry_points;
@@ -1152,8 +1244,8 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                                             : DOLLLVM_SEMANTICS_EXACT;
                 target_job->instrumentation =
                     options->lockstep_instrumentation
-                                                  ? DOLLLVM_INSTRUMENTATION_LOCKSTEP
-                                                  : DOLLLVM_INSTRUMENTATION_NONE;
+                        ? DOLLLVM_INSTRUMENTATION_LOCKSTEP
+                        : DOLLLVM_INSTRUMENTATION_NONE;
                 target_job->native_abi_policy =
                     (DolLLVMNativeABIPolicy)options->llvm_native_abi;
                 target_job->runtime = (DolLLVMRuntime)options->llvm_runtime;
@@ -1182,10 +1274,19 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                         target_job->cache_path[0] = '\0';
                 }
             }
+        }
+
+        // Logical range metadata is independent of physical object batching.
+        for (u32 chunk_index = 0; chunk_index < chunk_total; chunk_index++) {
+            u32 output_index = first_range + chunk_index;
+            const DolLLVMFunctionRange* range = &ranges[output_index];
+            u32 function_address = range->start;
+            u32 start = (function_address - section->address) / 4u;
+            u32 chunk_count = (range->end - range->start) / 4u;
             DolIRModule audit;
             dolir_module_init(&audit);
-            if (!dolir_build_chunk(&audit, job->insts, job->count,
-                                   job->function_address)) {
+            if (!dolir_build_chunk(&audit, insts + start, chunk_count,
+                                   function_address)) {
                 dolir_module_free(&audit);
                 free(chunk_jobs);
                 free(insts);
@@ -1196,7 +1297,7 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                 if (audit_function->blocks[i].terminator.kind !=
                     DOLIR_TERM_FALLBACK)
                     continue;
-                const PPCInst* fallback = &job->insts[i];
+                const PPCInst* fallback = &insts[start + i];
                 const char* reason =
                     fallback->embedded_data          ? "embedded-data"
                     : fallback->op == PPC_OP_UNKNOWN ? "unknown"
@@ -1245,14 +1346,20 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
             } else {
                 emit_chunk_prototype(header, function_address);
                 for (u32 variant = 1; variant < profile_count; variant++)
-                    fprintf(header, "void func_%08X%s(CPUState* ctx);\n",
-                            function_address, job[variant].symbol_suffix);
+                    fprintf(header, "void func_%08X__%s(CPUState* ctx);\n",
+                            function_address,
+                            dolllvm_target_profile_suffix(profiles[variant]));
                 if (!function_list_add(&funcs, function_address, range->end)) {
                     free(chunk_jobs);
                     free(insts);
                     goto fail;
                 }
             }
+        }
+
+        for (u32 object_index = 0; object_index < object_total;
+             object_index++) {
+            LLVMChunkJob* job = &chunk_jobs[object_index * profile_count];
             for (u32 variant = 0; variant < profile_count; variant++) {
                 fprintf(manifest, "// object: chunks/%s\n", job[variant].name);
                 fprintf(manifest, "// object[%s]: chunks/%s\n",
