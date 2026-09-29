@@ -8,9 +8,11 @@ namespace dolllvm {
 
 using namespace llvm;
 
-void FunctionEmitter::emitInstructionService(u32 pc) {
+void FunctionEmitter::emitInstructionService(u32 pc, u32 fallbackCycleCost) {
   constexpr u32 ServiceContinue = 0;
   constexpr u32 ServiceException = 1;
+  constexpr u32 ServiceYield = 2;
+  constexpr u32 ServiceFallback = 3;
   constexpr u32 ServiceStop = 4;
   constexpr u32 ExitException = 1;
   constexpr u32 ExitFallback = 2;
@@ -31,13 +33,43 @@ void FunctionEmitter::emitInstructionService(u32 pc) {
       FunctionType::get(i32, {pointer, i32}, false), function,
       {serviceContext, builder_.getInt32(pc)});
   status->addFnAttr(Attribute::NoUnwind);
+
+  if (fallbackCycleCost) {
+    Value *pending = builder_.CreateLoad(Type::getInt64Ty(context_),
+                                         pending_cycles_);
+    Value *charged = builder_.CreateAdd(
+        pending, builder_.getInt64(fallbackCycleCost));
+    Value *executed = builder_.CreateICmpNE(
+        status, builder_.getInt32(ServiceFallback));
+    builder_.CreateStore(builder_.CreateSelect(executed, charged, pending),
+                         pending_cycles_);
+  }
+
   BasicBlock *resume =
       BasicBlock::Create(context_, "instruction_service_resume", function_);
   BasicBlock *failed =
       BasicBlock::Create(context_, "instruction_service_exit", function_);
-  builder_.CreateCondBr(
-      builder_.CreateICmpEQ(status, builder_.getInt32(ServiceContinue)), resume,
-      failed, MDBuilder(context_).createBranchWeights(2000, 1));
+  if (fallbackCycleCost) {
+    BasicBlock *classify = BasicBlock::Create(
+        context_, "instruction_service_classify", function_);
+    BasicBlock *yield =
+        BasicBlock::Create(context_, "instruction_service_yield", function_);
+    builder_.CreateCondBr(
+        builder_.CreateICmpEQ(status, builder_.getInt32(ServiceContinue)),
+        resume, classify, MDBuilder(context_).createBranchWeights(2000, 1));
+    builder_.SetInsertPoint(classify);
+    builder_.CreateCondBr(
+        builder_.CreateICmpEQ(status, builder_.getInt32(ServiceYield)), yield,
+        failed, MDBuilder(context_).createBranchWeights(1, 2000));
+    builder_.SetInsertPoint(yield);
+    reloadCallCounters();
+    reloadUsedState();
+    sideExit(pc + 4u);
+  } else {
+    builder_.CreateCondBr(
+        builder_.CreateICmpEQ(status, builder_.getInt32(ServiceContinue)),
+        resume, failed, MDBuilder(context_).createBranchWeights(2000, 1));
+  }
 
   builder_.SetInsertPoint(failed);
   Value *reason = builder_.CreateSelect(

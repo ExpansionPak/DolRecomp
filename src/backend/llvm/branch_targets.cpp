@@ -32,6 +32,18 @@ const DolLLVMFunctionRange *FunctionEmitter::rangeFor(u32 address) const {
   return nullptr;
 }
 
+const DolLLVMCallEdge *FunctionEmitter::callEdge(const DolIRTerminator &term,
+                                                u32 slot) const {
+  for (u32 index = 0; index < call_edge_count_; index++) {
+    const DolLLVMCallEdge &edge = call_edges_[index];
+    if (edge.caller_start == source_.guest_start &&
+        edge.callsite_pc == term.guest_pc &&
+        edge.callee_address == term.target_addresses[slot])
+      return &edge;
+  }
+  return nullptr;
+}
+
 BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
                                                  u32 slot) {
   u32 target = term.target_addresses[slot];
@@ -56,6 +68,31 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   IRBuilderBase::InsertPoint saved = builder_.saveIP();
   builder_.SetInsertPoint(callBlock);
   emitBudgetGuard(target);
+  if (nativeTarget && !modern_runtime_) {
+    Type *pointer = PointerType::getUnqual(context_);
+    Value *hostCall = loadOffset(pointer, offsetof(CPUState, host_call));
+    BasicBlock *invoke =
+        BasicBlock::Create(context_, "native_call_invoke", function_);
+    BasicBlock *query =
+        BasicBlock::Create(context_, "native_call_query", function_);
+    builder_.CreateCondBr(builder_.CreateIsNull(hostCall), invoke, query);
+    builder_.SetInsertPoint(query);
+    FunctionCallee available = module_.getOrInsertFunction(
+        "ppc_native_region_available",
+        FunctionType::get(Type::getInt1Ty(context_),
+                          {pointer, Type::getInt32Ty(context_),
+                           Type::getInt32Ty(context_)},
+                          false));
+    Value *canEnter = builder_.CreateCall(
+        available, {ctx_, builder_.getInt32(range->start),
+                    builder_.getInt32(range->end)});
+    BasicBlock *blocked =
+        BasicBlock::Create(context_, "native_call_blocked", function_);
+    builder_.CreateCondBr(canEnter, invoke, blocked);
+    builder_.SetInsertPoint(blocked);
+    sideExit(target);
+    builder_.SetInsertPoint(invoke);
+  }
   char name[64];
   snprintf(name, sizeof(name), "func_%08X_budget", range->start);
   const std::string targetName = symbolName(name);
@@ -66,20 +103,17 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
     callDepth = builder_.CreateLoad(Type::getInt64Ty(context_), guard_steps_);
     BasicBlock *invoke = BasicBlock::Create(context_, "call_depth_ok", function_);
     BasicBlock *yield = BasicBlock::Create(context_, "call_depth_exit", function_);
-    builder_.CreateCondBr(
-        builder_.CreateICmpULT(callDepth, builder_.getInt64(64)), invoke,
-        yield);
+    builder_.CreateCondBr(builder_.CreateICmpULT(callDepth, builder_.getInt64(64)),
+                          invoke, yield);
     builder_.SetInsertPoint(yield);
     sideExit(target);
     builder_.SetInsertPoint(invoke);
-    builder_.CreateStore(builder_.CreateAdd(callDepth, builder_.getInt64(1)),
-                         guard_steps_);
+    builder_.CreateStore(builder_.CreateAdd(callDepth, builder_.getInt64(1)), guard_steps_);
   }
   const bool cyclesInResult = nativeTarget && nativeCyclesInResult(range);
   if (!cyclesInResult)
     flushCallCounters(true);
-  auto callee =
-      module_.getOrInsertFunction(targetName, bodyFunctionType(range));
+  auto callee = module_.getOrInsertFunction(targetName, bodyFunctionType(range));
   if (auto *calleeFunction = dyn_cast<Function>(callee.getCallee())) {
     calleeFunction->setCallingConv(bodyCallingConvention());
     calleeFunction->setVisibility(GlobalValue::HiddenVisibility);
@@ -109,11 +143,26 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
         arguments.push_back(stateValue(stateSlot));
     }
   }
+  if (modern_runtime_ && nativeTarget) {
+    const DolLLVMCallEdge *edge = callEdge(term, slot);
+    if (edge)
+      stageStateMask(edge->may_dirty_before);
+    else
+      syncDirtyState();
+  }
   CallInst *nativeCall = builder_.CreateCall(callee, arguments);
   nativeCall->setCallingConv(bodyCallingConvention());
   if (nativeTarget)
     nativeCall->addFnAttr(Attribute::NoInline);
   if (nativeTarget) {
+    if (modern_runtime_ && cold_escapes_) {
+      BasicBlock *structuredExit = BasicBlock::Create(context_, "native_call_structured_exit", function_);
+      BasicBlock *continued = BasicBlock::Create(context_, "native_call_continue", function_);
+      builder_.CreateCondBr(structuredExitPending(), structuredExit, continued);
+      builder_.SetInsertPoint(structuredExit);
+      returnStructuredExit();
+      builder_.SetInsertPoint(continued);
+    }
     if (callDepth)
       builder_.CreateStore(callDepth, guard_steps_);
     if (!cyclesInResult)
@@ -172,8 +221,7 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
     const u32 continuationBlock =
         local ? (continuation - source_.guest_start) / 4u : 0u;
     BasicBlock *resume = BasicBlock::Create(context_, "call_resume", function_);
-    BasicBlock *mismatch =
-        BasicBlock::Create(context_, "call_mismatch", function_);
+    BasicBlock *mismatch = BasicBlock::Create(context_, "call_mismatch", function_);
     Value *matches = builder_.CreateAnd(
         continues,
         builder_.CreateICmpEQ(returnedPC, builder_.getInt32(continuation)));
@@ -202,8 +250,7 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   if (local)
     continuationBlock = (continuation - source_.guest_start) / 4u;
   BasicBlock *resume = BasicBlock::Create(context_, "call_resume", function_);
-  BasicBlock *mismatch =
-      BasicBlock::Create(context_, "call_mismatch", function_);
+  BasicBlock *mismatch = BasicBlock::Create(context_, "call_mismatch", function_);
   Value *returnedPC =
       loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, pc));
   builder_.CreateCondBr(
@@ -232,8 +279,8 @@ BasicBlock *FunctionEmitter::exitDestination(u32 pc) {
   return exit;
 }
 
-BasicBlock *
-FunctionEmitter::fallbackDestination(const DolIRTerminator &terminator) {
+BasicBlock *FunctionEmitter::fallbackDestination(
+    const DolIRTerminator &terminator) {
   return fallbackEdge(terminator.guest_pc);
 }
 

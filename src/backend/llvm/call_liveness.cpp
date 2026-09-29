@@ -44,10 +44,12 @@ void addSuccessors(const DolIRFunction &function, u32 blockIndex,
 extern "C" bool dolllvm_analyze_callsite_state(const DolIRFunction *function,
                                                u32 blockIndex,
                                                const u64 *functionOutputs,
+                                               const u64 *postCallDefs,
                                                u64 *liveAfter,
-                                               u64 *definedBefore) {
+                                               u64 *definedBefore,
+                                               u64 *mayDirtyBefore) {
   if (!function || blockIndex >= function->block_count || !functionOutputs ||
-      !liveAfter || !definedBefore)
+      !liveAfter || !definedBefore || !mayDirtyBefore)
     return false;
   const u32 count = function->block_count;
   std::vector<std::vector<u32>> successors(count);
@@ -121,6 +123,31 @@ extern "C" bool dolllvm_analyze_callsite_state(const DolIRFunction *function,
     }
   }
 
+  std::vector<Mask> mayDirtyIn(count);
+  std::vector<Mask> mayDirtyOut(count);
+  changed = true;
+  while (changed) {
+    changed = false;
+    for (u32 block = 0; block < count; block++) {
+      Mask incoming{};
+      for (u32 predecessor : predecessors[block])
+        for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++)
+          incoming[word] |= mayDirtyOut[predecessor][word];
+      Mask outgoing{};
+      for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++) {
+        outgoing[word] = incoming[word] | defs[block][word];
+        if (postCallDefs)
+          outgoing[word] |=
+              postCallDefs[(size_t)block * DOLIR_STATE_MASK_WORDS + word];
+      }
+      if (incoming != mayDirtyIn[block] || outgoing != mayDirtyOut[block]) {
+        mayDirtyIn[block] = incoming;
+        mayDirtyOut[block] = outgoing;
+        changed = true;
+      }
+    }
+  }
+
   const DolIRTerminator &term = function->blocks[blockIndex].terminator;
   const u32 continuation = term.guest_pc + 4u;
   const bool localContinuation =
@@ -135,6 +162,8 @@ extern "C" bool dolllvm_analyze_callsite_state(const DolIRFunction *function,
   for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++) {
     liveAfter[word] = after[word];
     definedBefore[word] = definiteOut[blockIndex][word];
+    mayDirtyBefore[word] =
+        mayDirtyIn[blockIndex][word] | defs[blockIndex][word];
   }
   return true;
 }

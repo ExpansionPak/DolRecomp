@@ -157,12 +157,14 @@ extern "C" bool dolllvm_propagate_function_abis(DolLLVMFunctionRange *ranges,
     work.pop_front();
     queued[caller] = false;
     for (u32 relationIndex : callees[caller]) {
-      const u32 callee = relations[relationIndex].callee;
+      const Relation &relation = relations[relationIndex];
+      const u32 callee = relation.callee;
       bool changed = false;
       for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++) {
         const u64 oldEscape = ranges[callee].escape_state[word];
-        ranges[callee].escape_state[word] |= ranges[caller].escape_state[word] |
-                                             ranges[caller].output_state[word];
+        ranges[callee].escape_state[word] |=
+            ranges[caller].escape_state[word] |
+            ranges[caller].output_state[word];
         changed |= oldEscape != ranges[callee].escape_state[word];
       }
       if (changed && !queued[callee]) {
@@ -204,7 +206,7 @@ extern "C" void dolllvm_apply_native_abi_policy(DolLLVMFunctionRange *ranges,
       continue;
     const bool compact =
         stateCount(range.input_state, range.escape_state) <= 4u &&
-        packedReturnLanes(range.output_state) <= 2u;
+                         packedReturnLanes(range.output_state) <= 2u;
     if (policy == DOLLLVM_NATIVE_ABI_DISABLED ||
         (policy == DOLLLVM_NATIVE_ABI_COMPACT && !compact))
       range.abi_flags &=

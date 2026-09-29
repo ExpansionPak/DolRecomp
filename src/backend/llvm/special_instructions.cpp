@@ -24,16 +24,36 @@ void FunctionEmitter::emitStateWrite(const DolIRInstruction &inst) {
       builder_.CreateLoad(Type::getInt32Ty(context_), state_[inst.aux]);
   builder_.CreateStore(value, state_[inst.aux]);
   noteStateWrite(slot, value);
+  Value *serviced = builder_.getFalse();
+  if (modern_runtime_) {
+    Type *i32 = Type::getInt32Ty(context_);
+    Type *i64 = Type::getInt64Ty(context_);
+    Type *pointer = PointerType::getUnqual(context_);
+    FunctionCallee service = module_.getOrInsertFunction(
+        "moderngekko_try_write_msr",
+        FunctionType::get(i32, {pointer, i32, i32, i64}, false));
+    Value *elapsed = builder_.CreateAdd(
+        builder_.CreateLoad(i64, guard_cycles_local_),
+        builder_.CreateLoad(i64, cycles_));
+    CallInst *accepted = builder_.CreateCall(service, {ctx_, old, value, elapsed});
+    accepted->addFnAttr(Attribute::NoUnwind);
+    serviced = builder_.CreateICmpNE(accepted, builder_.getInt32(0));
+  }
   Value *enabled = builder_.CreateAnd(builder_.CreateNot(old), value);
   enabled = builder_.CreateICmpNE(
       builder_.CreateAnd(enabled, builder_.getInt32(0x8000)),
       builder_.getInt32(0));
+  Value *mustExit = modern_runtime_ ? builder_.CreateAnd(enabled, builder_.CreateNot(serviced))
+                                    : enabled;
   BasicBlock *exit = BasicBlock::Create(context_, "msr_ee_exit", function_);
   BasicBlock *resume = BasicBlock::Create(context_, "msr_ee_resume", function_);
-  builder_.CreateCondBr(enabled, exit, resume);
+  builder_.CreateCondBr(mustExit, exit, resume);
   builder_.SetInsertPoint(exit);
-  sideExit(inst.guest_pc + 4u);
+  sideExit(modern_runtime_ ? inst.guest_pc : inst.guest_pc + 4u,
+           modern_runtime_ ? 6u : 0u);
   builder_.SetInsertPoint(resume);
+  if (modern_runtime_)
+    emitBudgetGuard(inst.guest_pc + 4u);
 }
 
 void FunctionEmitter::emitStoreConditional(const DolIRInstruction &inst) {

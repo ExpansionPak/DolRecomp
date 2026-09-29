@@ -18,9 +18,10 @@ typedef enum {
   DOLLLVM_ABI_BLOCK_HELPER = 1u << 2,
   DOLLLVM_ABI_BLOCK_MEMORY_SERVICE = 1u << 3,
   DOLLLVM_ABI_BLOCK_RFI = 1u << 4,
+  DOLLLVM_ABI_BLOCK_FALLBACK = 1u << 5,
 } DolLLVMFunctionABIBlocker;
 
-#define DOLLLVM_NATIVE_ABI_VERSION 4u
+#define DOLLLVM_NATIVE_ABI_VERSION 5u
 
 typedef struct {
   u32 start;
@@ -44,9 +45,11 @@ typedef struct {
 
 typedef struct {
   u32 caller_start;
+  u32 callsite_pc;
   u32 callee_address;
   u64 live_after[DOLIR_STATE_MASK_WORDS];
   u64 defined_before[DOLIR_STATE_MASK_WORDS];
+  u64 may_dirty_before[DOLIR_STATE_MASK_WORDS];
 } DolLLVMCallEdge;
 
 typedef enum {
@@ -101,6 +104,8 @@ typedef struct {
   int state_in_memory;
   const DolLLVMFunctionRange *function_ranges;
   u32 function_range_count;
+  const DolLLVMCallEdge *call_edges;
+  u32 call_edge_count;
   const u32 *entry_points;
   u32 entry_point_count;
 } DolLLVMOptions;
@@ -111,6 +116,9 @@ bool dolllvm_effective_triple(const DolLLVMOptions *options, char *out,
                               size_t size);
 bool dolllvm_object_matches_options(const char *path,
                                     const DolLLVMOptions *options);
+u32 dolllvm_collect_native_entries(const DolIRFunction *function,
+                                   const DolLLVMOptions *options,
+                                   u32 *entries, u32 capacity);
 bool dolllvm_parse_target_profile(const char *name,
                                   DolLLVMTargetProfile *profile);
 const char *dolllvm_target_profile_name(DolLLVMTargetProfile profile);
@@ -121,7 +129,9 @@ bool dolllvm_analyze_function_abi(const DolIRFunction *function,
 bool dolllvm_analyze_callsite_state(const DolIRFunction *function,
                                     u32 block_index,
                                     const u64 *function_outputs,
-                                    u64 *live_after, u64 *defined_before);
+                                    const u64 *post_call_defs,
+                                    u64 *live_after, u64 *defined_before,
+                                    u64 *may_dirty_before);
 bool dolllvm_propagate_function_abis(DolLLVMFunctionRange *ranges,
                                      u32 range_count,
                                      const DolLLVMCallEdge *edges,

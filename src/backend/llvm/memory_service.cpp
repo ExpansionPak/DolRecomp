@@ -1,6 +1,7 @@
 #include "backend/llvm/emitter.h"
 #include "cpu/cpu.h"
 
+#include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/MDBuilder.h>
@@ -14,6 +15,8 @@ namespace {
 
 constexpr u32 ServiceContinue = 0;
 constexpr u32 ServiceException = 1;
+constexpr u32 ServiceYield = 2;
+constexpr u32 ServiceFallback = 3;
 constexpr u32 ServiceStop = 4;
 constexpr u32 ExitException = 1;
 constexpr u32 ExitFallback = 2;
@@ -21,34 +24,38 @@ constexpr u32 ExitStop = 5;
 
 } // namespace
 
-Value *FunctionEmitter::externalRead(Value *address, u32 width) {
+Value *FunctionEmitter::externalRead(Value *address, u32 width, Value **yielded) {
+  *yielded = builder_.getFalse();
   if (modern_runtime_) {
     Type *i32 = Type::getInt32Ty(context_);
     Type *i64 = Type::getInt64Ty(context_);
     Type *pointer = PointerType::getUnqual(context_);
-    StructType *servicesType =
-        StructType::get(context_, {i32, i32, pointer, pointer, pointer});
-    StructType *resultType = StructType::get(context_, {i64, i32, i32});
-    Value *services = runtimeField(11);
-    Value *function = builder_.CreateLoad(
-        pointer, builder_.CreateStructGEP(servicesType, services, 3));
-    materialize(current_pc_);
-    Value *serviceContext = builder_.CreateLoad(
-        pointer, builder_.CreateStructGEP(servicesType, services, 2));
-    CallInst *result = builder_.CreateCall(
-        FunctionType::get(resultType, {pointer, i32, i32, i32}, false),
-        function,
-        {serviceContext, builder_.getInt32(current_pc_), address,
-         builder_.getInt32(width)});
-    result->addFnAttr(Attribute::NoUnwind);
-    Value *status = builder_.CreateExtractValue(result, 1);
+    const u32 blockIndex = (current_pc_ - source_.guest_start) / 4u;
+    Value *elapsed = builder_.CreateSub(
+        builder_.CreateAdd(builder_.CreateLoad(i64, guard_cycles_local_),
+                           builder_.CreateLoad(i64, cycles_)),
+        builder_.getInt64(source_.blocks[blockIndex].cycle_cost));
+    materializeMemoryService(current_pc_);
+    AllocaInst *valueOut = temporary(i64, "read_service_value");
+    AllocaInst *remainingOut = temporary(i32, "read_service_remaining");
+    FunctionCallee service = module_.getOrInsertFunction(
+        "moderngekko_read_memory",
+        FunctionType::get(i32, {pointer, i32, i32, i32, i64, pointer, pointer},
+                          false));
+    CallInst *status = builder_.CreateCall(
+        service, {ctx_, builder_.getInt32(current_pc_), address,
+                  builder_.getInt32(width), elapsed, valueOut, remainingOut});
+    status->addFnAttr(Attribute::NoUnwind);
+    Value *isYield =
+        builder_.CreateICmpEQ(status, builder_.getInt32(ServiceYield));
+    Value *completed = builder_.CreateOr(
+        builder_.CreateICmpEQ(status, builder_.getInt32(ServiceContinue)), isYield);
     BasicBlock *resume =
         BasicBlock::Create(context_, "read_service_resume", function_);
     BasicBlock *failed =
         BasicBlock::Create(context_, "read_service_exit", function_);
-    builder_.CreateCondBr(
-        builder_.CreateICmpEQ(status, builder_.getInt32(ServiceContinue)),
-        resume, failed, MDBuilder(context_).createBranchWeights(2000, 1));
+    builder_.CreateCondBr(completed, resume, failed,
+                          MDBuilder(context_).createBranchWeights(2000, 1));
 
     builder_.SetInsertPoint(failed);
     Value *reason = builder_.CreateSelect(
@@ -57,13 +64,20 @@ Value *FunctionEmitter::externalRead(Value *address, u32 width) {
         builder_.CreateSelect(
             builder_.CreateICmpEQ(status, builder_.getInt32(ServiceStop)),
             builder_.getInt32(ExitStop), builder_.getInt32(ExitFallback)));
-    builder_.CreateStore(reason,
-                         builder_.CreateStructGEP(chainType(), chain_, 7));
-    returnFromBody();
+    branchMemoryServiceFailure(reason, elapsed);
 
     builder_.SetInsertPoint(resume);
     reloadCallCounters();
-    return builder_.CreateExtractValue(result, 0);
+    Value *remaining = builder_.CreateLoad(i32, remainingOut);
+    Value *budget =
+        builder_.CreateAdd(elapsed, builder_.CreateZExt(remaining, i64));
+    builder_.CreateStore(budget, builder_.CreateStructGEP(chainType(), chain_, 4));
+    Value *completedCycles = builder_.CreateAdd(
+        builder_.CreateLoad(i64, guard_cycles_local_),
+        builder_.CreateLoad(i64, cycles_));
+    *yielded = builder_.CreateOr(
+        isYield, builder_.CreateICmpUGE(completedCycles, budget));
+    return builder_.CreateLoad(i64, valueOut);
   }
 
   Type *pointer = PointerType::getUnqual(context_);
@@ -104,31 +118,74 @@ Value *FunctionEmitter::externalRead(Value *address, u32 width) {
   return phi;
 }
 
-void FunctionEmitter::externalWrite(Value *address, Value *value, u32 width) {
+void FunctionEmitter::branchMemoryServiceFailure(Value *reason, Value *elapsed) {
+  if (!memory_service_failure_) {
+    memory_service_failure_ =
+        BasicBlock::Create(context_, "memory_service_failure", function_);
+    IRBuilder<> failureBuilder(memory_service_failure_);
+    memory_service_failure_reason_ = failureBuilder.CreatePHI(
+        Type::getInt32Ty(context_), 0, "memory_service_failure_reason");
+    memory_service_failure_elapsed_ = failureBuilder.CreatePHI(
+        Type::getInt64Ty(context_), 0, "memory_service_failure_elapsed");
+  }
+  BasicBlock *from = builder_.GetInsertBlock();
+  memory_service_failure_reason_->addIncoming(reason, from);
+  memory_service_failure_elapsed_->addIncoming(elapsed, from);
+  builder_.CreateBr(memory_service_failure_);
+}
+
+void FunctionEmitter::emitMemoryServiceFailure() {
+  if (!memory_service_failure_)
+    return;
+
+  IRBuilderBase::InsertPoint saved = builder_.saveIP();
+  builder_.SetInsertPoint(memory_service_failure_);
+  builder_.CreateStore(memory_service_failure_reason_,
+                       builder_.CreateStructGEP(chainType(), chain_, 7));
+  builder_.CreateStore(memory_service_failure_elapsed_, pending_cycles_);
+
+  u64 registerDirty[DOLIR_STATE_MASK_WORDS]{};
+  for (u32 slot = DOLIR_STATE_GPR0; slot <= DOLIR_STATE_PS1_31; slot++) {
+    if (dirty_[slot])
+      registerDirty[slot / 64u] |= u64(1) << (slot & 63u);
+  }
+  stageStateMask(registerDirty);
+  commitModernState();
+  returnFromBody();
+  builder_.restoreIP(saved);
+}
+
+Value *FunctionEmitter::externalWrite(Value *address, Value *value, u32 width) {
   if (modern_runtime_) {
     Type *i32 = Type::getInt32Ty(context_);
     Type *i64 = Type::getInt64Ty(context_);
     Type *pointer = PointerType::getUnqual(context_);
-    StructType *servicesType =
-        StructType::get(context_, {i32, i32, pointer, pointer, pointer});
-    Value *services = runtimeField(11);
-    Value *function = builder_.CreateLoad(
-        pointer, builder_.CreateStructGEP(servicesType, services, 4));
-    materialize(current_pc_);
-    Value *serviceContext = builder_.CreateLoad(
-        pointer, builder_.CreateStructGEP(servicesType, services, 2));
+    const u32 blockIndex = (current_pc_ - source_.guest_start) / 4u;
+    Value *elapsed = builder_.CreateSub(
+        builder_.CreateAdd(builder_.CreateLoad(i64, guard_cycles_local_),
+                           builder_.CreateLoad(i64, cycles_)),
+        builder_.getInt64(source_.blocks[blockIndex].cycle_cost));
+    materializeMemoryService(current_pc_);
+    AllocaInst *remainingOut = temporary(i32, "write_service_remaining");
+    FunctionCallee service = module_.getOrInsertFunction(
+        "moderngekko_write_memory",
+        FunctionType::get(i32, {pointer, i32, i32, i64, i32, i64, pointer},
+                          false));
     CallInst *status = builder_.CreateCall(
-        FunctionType::get(i32, {pointer, i32, i32, i64, i32}, false), function,
-        {serviceContext, builder_.getInt32(current_pc_), address,
-         builder_.CreateZExtOrTrunc(value, i64), builder_.getInt32(width)});
+        service, {ctx_, builder_.getInt32(current_pc_), address,
+                  builder_.CreateZExtOrTrunc(value, i64), builder_.getInt32(width),
+                  elapsed, remainingOut});
     status->addFnAttr(Attribute::NoUnwind);
+    Value *isYield =
+        builder_.CreateICmpEQ(status, builder_.getInt32(ServiceYield));
+    Value *completed = builder_.CreateOr(
+        builder_.CreateICmpEQ(status, builder_.getInt32(ServiceContinue)), isYield);
     BasicBlock *resume =
         BasicBlock::Create(context_, "write_service_resume", function_);
     BasicBlock *failed =
         BasicBlock::Create(context_, "write_service_exit", function_);
-    builder_.CreateCondBr(
-        builder_.CreateICmpEQ(status, builder_.getInt32(ServiceContinue)),
-        resume, failed, MDBuilder(context_).createBranchWeights(2000, 1));
+    builder_.CreateCondBr(completed, resume, failed,
+                          MDBuilder(context_).createBranchWeights(2000, 1));
 
     builder_.SetInsertPoint(failed);
     Value *reason = builder_.CreateSelect(
@@ -137,13 +194,19 @@ void FunctionEmitter::externalWrite(Value *address, Value *value, u32 width) {
         builder_.CreateSelect(
             builder_.CreateICmpEQ(status, builder_.getInt32(ServiceStop)),
             builder_.getInt32(ExitStop), builder_.getInt32(ExitFallback)));
-    builder_.CreateStore(reason,
-                         builder_.CreateStructGEP(chainType(), chain_, 7));
-    returnFromBody();
+    branchMemoryServiceFailure(reason, elapsed);
 
     builder_.SetInsertPoint(resume);
     reloadCallCounters();
-    return;
+    Value *remaining = builder_.CreateLoad(i32, remainingOut);
+    Value *budget =
+        builder_.CreateAdd(elapsed, builder_.CreateZExt(remaining, i64));
+    builder_.CreateStore(budget, builder_.CreateStructGEP(chainType(), chain_, 4));
+    Value *completedCycles = builder_.CreateAdd(
+        builder_.CreateLoad(i64, guard_cycles_local_),
+        builder_.CreateLoad(i64, cycles_));
+    return builder_.CreateOr(
+        isYield, builder_.CreateICmpUGE(completedCycles, budget));
   }
 
   Type *pointer = PointerType::getUnqual(context_);
@@ -178,6 +241,7 @@ void FunctionEmitter::externalWrite(Value *address, Value *value, u32 width) {
   reloadUsedState();
   builder_.CreateBr(done);
   builder_.SetInsertPoint(done);
+  return builder_.getFalse();
 }
 
 } // namespace dolllvm

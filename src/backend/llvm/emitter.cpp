@@ -24,6 +24,7 @@ FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
     : context_(context), module_(module), source_(source), builder_(context),
       ranges_(options.function_ranges),
       range_count_(options.function_range_count),
+      call_edges_(options.call_edges), call_edge_count_(options.call_edge_count),
       entry_points_(options.entry_points),
       entry_point_count_(options.entry_point_count),
       write_journal_(options.instrumentation ==
@@ -127,6 +128,8 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
     blocks_[i] = region;
   }
   emitEntry();
+  if (modern_runtime_)
+    service_yield_ = temporary(Type::getInt1Ty(context_), "service_yield");
   for (u32 i = 0; i < source_.block_count; i++) {
     if (!region_leaders_[i] ||
         source_.blocks[i].terminator.kind == DOLIR_TERM_FALLBACK)
@@ -135,6 +138,8 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
       return false;
   }
   emitFallbackHandler();
+  emitMemoryServiceFailure();
+  emitSharedSideExit();
   finalizeStateSSA();
   if (verifyFunction(*function_, &diagnostics))
     return false;

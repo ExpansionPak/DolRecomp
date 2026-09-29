@@ -106,6 +106,7 @@ if(DOLRECOMP_ENABLE_LLVM)
         src/backend/llvm/emitter.cpp
         src/backend/llvm/native_wrapper.cpp
         src/backend/llvm/modern_wrapper.cpp
+        src/backend/llvm/modern_state.cpp
         src/backend/llvm/native_abi.cpp
         src/backend/llvm/abi_liveness.cpp
         src/backend/llvm/abi_policy.cpp
@@ -114,16 +115,20 @@ if(DOLRECOMP_ENABLE_LLVM)
         src/backend/llvm/cache_control.cpp
         src/backend/llvm/instruction_service.cpp
         src/backend/llvm/memory.cpp
+        src/backend/llvm/memory_store.cpp
         src/backend/llvm/memory_service.cpp
+        src/backend/llvm/fifo_service.cpp
         src/backend/llvm/memory_fallback.cpp
         src/backend/llvm/register_state.cpp
         src/backend/llvm/state_access.cpp
         src/backend/llvm/state_write.cpp
         src/backend/llvm/state_controls.cpp
         src/backend/llvm/exits.cpp
+        src/backend/llvm/exit_materialization.cpp
         src/backend/llvm/timing.cpp
         src/backend/llvm/native_exits.cpp
         src/backend/llvm/instructions.cpp
+        src/backend/llvm/regions.cpp
         src/backend/llvm/runtime.cpp
         src/backend/llvm/floating_point.cpp
         src/backend/llvm/fp_fixups.cpp
@@ -462,6 +467,7 @@ if(DOLRECOMP_ENABLE_LLVM)
     set_source_files_properties(${DOLRECOMP_TEST_OBJECT}
         PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
     set_source_files_properties(
+        ${DOLRECOMP_TEST_OBJECT}.native
         ${DOLRECOMP_ABI_CALLER_OBJECT}
         ${DOLRECOMP_ABI_CALLEE_OBJECT}
         ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}
@@ -477,6 +483,13 @@ if(DOLRECOMP_ENABLE_LLVM)
         ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}.context
         ${DOLRECOMP_ABI_LOOP_CALLEE_OBJECT}.context
         PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+    add_executable(modern_memory_service_test
+        tests/modern_memory_service_test.c ${DOLRECOMP_TEST_OBJECT}.native)
+    if(NOT WIN32)
+        target_link_libraries(modern_memory_service_test PRIVATE m)
+    endif()
+    add_test(NAME modern_memory_service COMMAND modern_memory_service_test)
+    set_tests_properties(modern_memory_service PROPERTIES DEPENDS llvm_fixture)
     add_executable(llvm_smoke_test tests/llvm_smoke_test.c ${DOLRECOMP_TEST_OBJECT})
     target_link_libraries(llvm_smoke_test PRIVATE dr_cpu)
     add_test(NAME llvm_smoke COMMAND llvm_smoke_test)

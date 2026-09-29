@@ -94,6 +94,87 @@ static bool test_static_memory_provenance(void) {
     CHECK(memory_ops == 2);
     dolir_module_free(&module);
 
+    PPCInst mem2_insts[] = {
+        decode(0x3C809000u, 0x80002520u),
+        decode(0x80640600u, 0x80002524u),
+        decode(0x90640604u, 0x80002528u),
+        decode(0x4E800020u, 0x8000252Cu),
+    };
+    dolir_module_init(&module);
+    CHECK(dolir_build_chunk(&module, mem2_insts, 4, 0x80002520u));
+    CHECK(dolir_verify(&module, stderr));
+    memory_ops = 0;
+    for (u32 b = 0; b < module.functions[0].block_count; b++) {
+        DolIRBlock* block = &module.functions[0].blocks[b];
+        for (u32 i = 0; i < block->instruction_count; i++) {
+            DolIRInstruction* instruction = &block->instructions[i];
+            if (instruction->op != DOLIR_OP_GUEST_LOAD &&
+                instruction->op != DOLIR_OP_GUEST_STORE)
+                continue;
+            CHECK(instruction->address_domain == DOLIR_ADDRESS_MEM2);
+            CHECK(instruction->address_lower ==
+                  WII_MEM2_BASE + 0x600u + memory_ops * 4u);
+            CHECK(instruction->address_upper == instruction->address_lower);
+            memory_ops++;
+        }
+    }
+    CHECK(memory_ops == 2);
+    dolir_module_free(&module);
+
+    PPCInst bounded_mem2_insts[] = {
+        decode(0x3C809000u, 0x80002540u), // lis r4, 0x9000
+        decode(0x70A503FCu, 0x80002544u), // andi. r5, r5, 0x03fc
+        decode(0x7C842A14u, 0x80002548u), // add r4, r4, r5
+        decode(0x80640000u, 0x8000254Cu), // lwz r3, 0(r4)
+        decode(0x90640004u, 0x80002550u), // stw r3, 4(r4)
+        decode(0x4E800020u, 0x80002554u),
+    };
+    dolir_module_init(&module);
+    CHECK(dolir_build_chunk(&module, bounded_mem2_insts, 6, 0x80002540u));
+    CHECK(dolir_verify(&module, stderr));
+    memory_ops = 0;
+    for (u32 b = 0; b < module.functions[0].block_count; b++) {
+        DolIRBlock* block = &module.functions[0].blocks[b];
+        for (u32 i = 0; i < block->instruction_count; i++) {
+            DolIRInstruction* instruction = &block->instructions[i];
+            if (instruction->op != DOLIR_OP_GUEST_LOAD &&
+                instruction->op != DOLIR_OP_GUEST_STORE)
+                continue;
+            CHECK(instruction->address_domain == DOLIR_ADDRESS_MEM2);
+            CHECK(instruction->address_lower == WII_MEM2_BASE + memory_ops * 4u);
+            CHECK(instruction->address_upper ==
+                  WII_MEM2_BASE + 0x3fcu + memory_ops * 4u);
+            memory_ops++;
+        }
+    }
+    CHECK(memory_ops == 2);
+    dolir_module_free(&module);
+
+    PPCInst bounded_mem1_insts[] = {
+        decode(0x3C808000u, 0x80002560u), // lis r4, 0x8000
+        decode(0x70A503FCu, 0x80002564u), // andi. r5, r5, 0x03fc
+        decode(0x7C842A14u, 0x80002568u), // add r4, r4, r5
+        decode(0x80640000u, 0x8000256Cu),
+        decode(0x4E800020u, 0x80002570u),
+    };
+    dolir_module_init(&module);
+    CHECK(dolir_build_chunk(&module, bounded_mem1_insts, 5, 0x80002560u));
+    CHECK(dolir_verify(&module, stderr));
+    bool bounded_mem1 = false;
+    for (u32 b = 0; b < module.functions[0].block_count; b++) {
+        DolIRBlock* block = &module.functions[0].blocks[b];
+        for (u32 i = 0; i < block->instruction_count; i++) {
+            DolIRInstruction* instruction = &block->instructions[i];
+            if (instruction->op != DOLIR_OP_GUEST_LOAD)
+                continue;
+            bounded_mem1 = instruction->address_domain == DOLIR_ADDRESS_MEM1 &&
+                           instruction->address_lower == GC_RAM_BASE &&
+                           instruction->address_upper == GC_RAM_BASE + 0x3fcu;
+        }
+    }
+    CHECK(bounded_mem1);
+    dolir_module_free(&module);
+
     PPCInst branch_insts[] = {
         decode(0x3C808000u, 0x80002600u),
         decode(0x48000004u, 0x80002604u),
@@ -110,6 +191,66 @@ static bool test_static_memory_provenance(void) {
             unknown = target->instructions[i].address_domain ==
                       DOLIR_ADDRESS_UNKNOWN;
     CHECK(unknown);
+    dolir_module_free(&module);
+    return true;
+}
+
+static bool test_mem2_and_bounded_memory_provenance(void) {
+    PPCInst exact_insts[] = {
+        decode(0x3C809000u, 0x80002620u),
+        decode(0x80640600u, 0x80002624u),
+        decode(0x90640604u, 0x80002628u),
+        decode(0x4E800020u, 0x8000262Cu),
+    };
+    DolIRModule module;
+    dolir_module_init(&module);
+    CHECK(dolir_build_chunk(&module, exact_insts, 4, 0x80002620u));
+    CHECK(dolir_verify(&module, stderr));
+    u32 exact_memory_ops = 0;
+    for (u32 b = 0; b < module.functions[0].block_count; b++) {
+        DolIRBlock* block = &module.functions[0].blocks[b];
+        for (u32 i = 0; i < block->instruction_count; i++) {
+            DolIRInstruction* instruction = &block->instructions[i];
+            if (instruction->op != DOLIR_OP_GUEST_LOAD &&
+                instruction->op != DOLIR_OP_GUEST_STORE)
+                continue;
+            CHECK(instruction->address_domain == DOLIR_ADDRESS_MEM2);
+            CHECK(instruction->address_lower ==
+                  WII_MEM2_BASE + 0x600u + exact_memory_ops * 4u);
+            CHECK(instruction->address_upper == instruction->address_lower);
+            exact_memory_ops++;
+        }
+    }
+    CHECK(exact_memory_ops == 2);
+    dolir_module_free(&module);
+
+    PPCInst bounded_insts[] = {
+        decode(0x70650FFFu, 0x80002640u), // andi. r5,r3,0xfff
+        decode(0x3C859000u, 0x80002644u), // addis r4,r5,0x9000
+        decode(0x80640000u, 0x80002648u), // lwz r3,0(r4)
+        decode(0x90640004u, 0x8000264Cu), // stw r3,4(r4)
+        decode(0x4E800020u, 0x80002650u),
+    };
+    dolir_module_init(&module);
+    CHECK(dolir_build_chunk(&module, bounded_insts, 5, 0x80002640u));
+    CHECK(dolir_verify(&module, stderr));
+    u32 bounded_memory_ops = 0;
+    for (u32 b = 0; b < module.functions[0].block_count; b++) {
+        DolIRBlock* block = &module.functions[0].blocks[b];
+        for (u32 i = 0; i < block->instruction_count; i++) {
+            DolIRInstruction* instruction = &block->instructions[i];
+            if (instruction->op != DOLIR_OP_GUEST_LOAD &&
+                instruction->op != DOLIR_OP_GUEST_STORE)
+                continue;
+            CHECK(instruction->address_domain == DOLIR_ADDRESS_MEM2);
+            CHECK(instruction->address_lower ==
+                  WII_MEM2_BASE + bounded_memory_ops * 4u);
+            CHECK(instruction->address_upper ==
+                  WII_MEM2_BASE + 0xFFFu + bounded_memory_ops * 4u);
+            bounded_memory_ops++;
+        }
+    }
+    CHECK(bounded_memory_ops == 2);
     dolir_module_free(&module);
     return true;
 }
@@ -179,6 +320,7 @@ static bool test_cache_timing(void) {
 int main(void) {
     if (!test_native_loop() || !test_memory_and_vector() ||
         !test_static_memory_provenance() ||
+        !test_mem2_and_bounded_memory_provenance() ||
         !test_float_record_and_paired_compare() || !test_segment_registers() ||
         !test_cache_timing())
         return 1;

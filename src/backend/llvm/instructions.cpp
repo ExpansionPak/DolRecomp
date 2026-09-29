@@ -12,50 +12,6 @@ namespace dolllvm {
 
 using namespace llvm;
 
-bool FunctionEmitter::emitRegion(u32 index, raw_ostream &diagnostics) {
-  resetFPRepresentations();
-  known_state_.fill(nullptr);
-  psq_direct_proven_ = false;
-  psq_indexed_proven_ = false;
-  fp_available_checked_ = false;
-  pending_fprf_ = nullptr;
-  builder_.SetInsertPoint(blocks_[index]);
-  for (u32 current = index; current < source_.block_count; current++) {
-    const DolIRBlock &block = source_.blocks[current];
-    if (current != index && region_leaders_[current]) {
-      materializeFPRF();
-      builder_.CreateBr(blocks_[current]);
-      return true;
-    }
-    const bool useService =
-        modern_runtime_ && native_abi_ && needsInterpreter(block);
-    if (loop_headers_[current])
-      emitBudgetGuard(block.guest_address);
-    chargeCycles(block.cycle_cost);
-    if (useService) {
-      emitInstructionService(block.guest_address);
-    } else {
-      values_.assign(source_.value_count, nullptr);
-      for (u32 i = 0; i < block.instruction_count; i++) {
-        if (!emitInstruction(block.instructions[i], diagnostics))
-          return false;
-      }
-    }
-    if (block.terminator.kind == DOLIR_TERM_FALLTHROUGH) {
-      u32 next = block.terminator.targets[0];
-      if (next != DOLIR_NO_BLOCK && next == current + 1u &&
-          next < source_.block_count && !region_leaders_[next])
-        continue;
-    }
-    materializeFPRF();
-    return emitTerminator(block.terminator, diagnostics);
-  }
-  diagnostics << "dolllvm: unterminated native region at 0x"
-              << format_hex_no_prefix(source_.blocks[index].guest_address, 8)
-              << "\n";
-  return false;
-}
-
 Value *FunctionEmitter::operand(const DolIRInstruction &inst, u32 index) {
   return values_[inst.operands[index]];
 }

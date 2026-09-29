@@ -18,21 +18,28 @@ Value *FunctionEmitter::normalizeAddress(Value *address) {
 
 Value *FunctionEmitter::provenMemoryPointer(const DolIRInstruction &instruction,
                                             Value *address, u32 width,
-                                            Value **offset) {
+                                            Value **offset,
+                                            Value **available) {
   if (!fixed_memory_layout_ ||
-      instruction.address_domain != DOLIR_ADDRESS_MEM1 ||
-      instruction.address_lower != instruction.address_upper)
+      (instruction.address_domain != DOLIR_ADDRESS_MEM1 &&
+       instruction.address_domain != DOLIR_ADDRESS_MEM2))
     return nullptr;
-  auto *constant = dyn_cast<ConstantInt>(address);
-  if (!constant || constant->getZExtValue() != instruction.address_lower)
+  const u32 lower = instruction.address_lower & ~0x40000000u;
+  const u32 upper = instruction.address_upper & ~0x40000000u;
+  const bool mem2 = instruction.address_domain == DOLIR_ADDRESS_MEM2;
+  const u32 base = mem2 ? WII_MEM2_BASE : GC_RAM_BASE;
+  const u32 expectedSize = mem2 ? expected_mem2_size_ : expected_ram_size_;
+  if (expectedSize < width || lower < base || upper < lower ||
+      upper - base > expectedSize - width)
     return nullptr;
-  const u32 normalized = instruction.address_lower & ~0x40000000u;
-  if (expected_ram_size_ < width || normalized < GC_RAM_BASE ||
-      normalized - GC_RAM_BASE > expected_ram_size_ - width)
-    return nullptr;
-  *offset = builder_.getInt32(normalized - GC_RAM_BASE);
-  function_->addFnAttr("dolrecomp-native-memory", "mem1");
-  return builder_.CreateInBoundsGEP(Type::getInt8Ty(context_), ram_, *offset);
+  Value *normalized = normalizeAddress(address);
+  *offset = builder_.CreateSub(normalized, builder_.getInt32(base));
+  *available = mem2 ? builder_.CreateIsNotNull(mem2_) : builder_.getTrue();
+  function_->addFnAttr("dolrecomp-native-memory", mem2 ? "mem2" : "mem1");
+  Value *memory = mem2 ? mem2_ : ram_;
+  return mem2 ? builder_.CreateGEP(Type::getInt8Ty(context_), memory, *offset)
+              : builder_.CreateInBoundsGEP(Type::getInt8Ty(context_), memory,
+                                           *offset);
 }
 
 Value *FunctionEmitter::rangeCheck(Value *normalized, u32 base, Value *size,
@@ -59,8 +66,51 @@ Value *FunctionEmitter::emitGuestLoad(const DolIRInstruction &instruction,
                                       Value *address, Type *resultType,
                                       u32 width, bool sign) {
   Value *directOffset = nullptr;
-  if (Value *pointer =
-          provenMemoryPointer(instruction, address, width, &directOffset)) {
+  Value *directAvailable = nullptr;
+  if (Value *pointer = provenMemoryPointer(instruction, address, width,
+                                           &directOffset, &directAvailable)) {
+    if (!isa<ConstantInt>(directAvailable)) {
+      materializeFPRF();
+      BasicBlock *directBlock =
+          BasicBlock::Create(context_, "load_proven_mem2", function_);
+      BasicBlock *slowBlock =
+          BasicBlock::Create(context_, "load_proven_mem2_slow", function_);
+      BasicBlock *join =
+          BasicBlock::Create(context_, "load_proven_mem2_join", function_);
+      builder_.CreateCondBr(directAvailable, directBlock, slowBlock,
+                            MDBuilder(context_).createBranchWeights(2000, 1));
+
+      builder_.SetInsertPoint(directBlock);
+      Value *directValue = endianLoad(pointer, resultType, width);
+      builder_.CreateBr(join);
+
+      builder_.SetInsertPoint(slowBlock);
+      Value *slowYield = nullptr;
+      Value *slow64 = externalRead(address, width, &slowYield);
+      Value *slowValue = builder_.CreateZExtOrTrunc(slow64, resultType);
+      BasicBlock *slowEnd = builder_.GetInsertBlock();
+      builder_.CreateBr(join);
+
+      builder_.SetInsertPoint(join);
+      PHINode *phi = builder_.CreatePHI(resultType, 2);
+      phi->addIncoming(directValue, directBlock);
+      phi->addIncoming(slowValue, slowEnd);
+      if (modern_runtime_) {
+        PHINode *yield = builder_.CreatePHI(Type::getInt1Ty(context_), 2);
+        yield->addIncoming(builder_.getFalse(), directBlock);
+        yield->addIncoming(slowYield, slowEnd);
+        Value *pending =
+            builder_.CreateLoad(Type::getInt1Ty(context_), service_yield_);
+        builder_.CreateStore(builder_.CreateOr(pending, yield), service_yield_);
+        service_yield_used_ = true;
+      }
+      if (sign && width * 8u < resultType->getIntegerBitWidth()) {
+        Value *narrow = builder_.CreateTrunc(
+            phi, IntegerType::get(context_, width * 8u));
+        return builder_.CreateSExt(narrow, resultType);
+      }
+      return phi;
+    }
     Value *loaded = endianLoad(pointer, resultType, width);
     if (sign && width * 8u < resultType->getIntegerBitWidth()) {
       Value *narrow =
@@ -105,7 +155,8 @@ Value *FunctionEmitter::emitGuestLoad(const DolIRInstruction &instruction,
   builder_.CreateBr(join);
 
   builder_.SetInsertPoint(slowBlock);
-  Value *slow64 = externalRead(address, width);
+  Value *slowYield = nullptr;
+  Value *slow64 = externalRead(address, width, &slowYield);
   Value *slowValue = builder_.CreateZExtOrTrunc(slow64, resultType);
   BasicBlock *slowEnd = builder_.GetInsertBlock();
   builder_.CreateBr(join);
@@ -115,6 +166,16 @@ Value *FunctionEmitter::emitGuestLoad(const DolIRInstruction &instruction,
   phi->addIncoming(mem1Value, mem1Block);
   phi->addIncoming(mem2Value, mem2Block);
   phi->addIncoming(slowValue, slowEnd);
+  if (modern_runtime_) {
+    PHINode *yield = builder_.CreatePHI(Type::getInt1Ty(context_), 3);
+    yield->addIncoming(builder_.getFalse(), mem1Block);
+    yield->addIncoming(builder_.getFalse(), mem2Block);
+    yield->addIncoming(slowYield, slowEnd);
+    Value *pending =
+        builder_.CreateLoad(Type::getInt1Ty(context_), service_yield_);
+    builder_.CreateStore(builder_.CreateOr(pending, yield), service_yield_);
+    service_yield_used_ = true;
+  }
   if (sign && width * 8u < resultType->getIntegerBitWidth()) {
     Value *narrow =
         builder_.CreateTrunc(phi, IntegerType::get(context_, width * 8u));
@@ -123,64 +184,60 @@ Value *FunctionEmitter::emitGuestLoad(const DolIRInstruction &instruction,
   return phi;
 }
 
-void FunctionEmitter::clearReservation(Value *address) {
-  Value *valid = builder_.CreateLoad(Type::getInt1Ty(context_),
-                                     state_[DOLIR_STATE_RESERVE_VALID]);
-  Value *reserved = builder_.CreateLoad(Type::getInt32Ty(context_),
-                                        state_[DOLIR_STATE_RESERVE_ADDR]);
-  Value *differentLine = builder_.CreateICmpNE(
-      builder_.CreateAnd(builder_.CreateXor(reserved, address),
-                         builder_.getInt32(~31u)),
-      builder_.getInt32(0));
-  builder_.CreateStore(builder_.CreateAnd(valid, differentLine),
-                       state_[DOLIR_STATE_RESERVE_VALID]);
-}
-
-void FunctionEmitter::journal(Value *offset, u32 width) {
-  if (!write_journal_)
-    return;
-  Type *ptr = PointerType::getUnqual(context_);
-  GlobalVariable *journal = cast<GlobalVariable>(
-      module_.getOrInsertGlobal("g_mem_write_journal", ptr));
-  GlobalVariable *user = cast<GlobalVariable>(
-      module_.getOrInsertGlobal("g_mem_write_journal_user", ptr));
-  Value *fn = builder_.CreateLoad(ptr, journal);
-  BasicBlock *call = BasicBlock::Create(context_, "journal", function_);
-  BasicBlock *done = BasicBlock::Create(context_, "journal_done", function_);
-  builder_.CreateCondBr(builder_.CreateIsNotNull(fn), call, done,
-                        MDBuilder(context_).createBranchWeights(2000, 1));
-  builder_.SetInsertPoint(call);
-  auto *functionType = FunctionType::get(
-      Type::getVoidTy(context_),
-      {Type::getInt32Ty(context_), Type::getInt32Ty(context_), ptr}, false);
-  builder_.CreateCall(
-      functionType, fn,
-      {offset, builder_.getInt32(width), builder_.CreateLoad(ptr, user)});
-  builder_.CreateBr(done);
-  builder_.SetInsertPoint(done);
-}
-
-void FunctionEmitter::endianStore(Value *pointer, Value *value, u32 width) {
-  Type *integerType = IntegerType::get(context_, width * 8u);
-  Value *narrowed = value;
-  if (value->getType() != integerType)
-    narrowed = builder_.CreateZExtOrTrunc(value, integerType);
-  StoreInst *store = builder_.CreateStore(bswap(narrowed), pointer);
-  store->setAlignment(Align(1));
-}
-
 void FunctionEmitter::emitGuestStore(const DolIRInstruction &instruction,
                                      Value *address, Value *value, u32 width) {
   Value *directOffset = nullptr;
-  if (Value *pointer =
-          provenMemoryPointer(instruction, address, width, &directOffset)) {
+  Value *directAvailable = nullptr;
+  if (Value *pointer = provenMemoryPointer(instruction, address, width,
+                                           &directOffset, &directAvailable)) {
     clearReservation(address);
-    journal(directOffset, width);
+    if (instruction.address_domain == DOLIR_ADDRESS_MEM1)
+      journal(directOffset, width);
+    if (!isa<ConstantInt>(directAvailable)) {
+      materializeFPRF();
+      BasicBlock *directBlock =
+          BasicBlock::Create(context_, "store_proven_mem2", function_);
+      BasicBlock *slowBlock =
+          BasicBlock::Create(context_, "store_proven_mem2_slow", function_);
+      BasicBlock *join =
+          BasicBlock::Create(context_, "store_proven_mem2_join", function_);
+      builder_.CreateCondBr(directAvailable, directBlock, slowBlock,
+                            MDBuilder(context_).createBranchWeights(2000, 1));
+
+      builder_.SetInsertPoint(directBlock);
+      endianStore(pointer, value, width);
+      builder_.CreateBr(join);
+
+      builder_.SetInsertPoint(slowBlock);
+      Value *slowYield = externalWrite(address, value, width);
+      BasicBlock *slowEnd = builder_.GetInsertBlock();
+      builder_.CreateBr(join);
+
+      builder_.SetInsertPoint(join);
+      if (modern_runtime_) {
+        PHINode *yield = builder_.CreatePHI(Type::getInt1Ty(context_), 2);
+        yield->addIncoming(builder_.getFalse(), directBlock);
+        yield->addIncoming(slowYield, slowEnd);
+        Value *pending =
+            builder_.CreateLoad(Type::getInt1Ty(context_), service_yield_);
+        builder_.CreateStore(builder_.CreateOr(pending, yield), service_yield_);
+        service_yield_used_ = true;
+      }
+      return;
+    }
     endianStore(pointer, value, width);
     return;
   }
   materializeFPRF();
   clearReservation(address);
+  if (modern_runtime_ && instruction.address_domain == DOLIR_ADDRESS_FIFO) {
+    Value *yield = externalFifoWrite(address, value, width);
+    Value *pending =
+        builder_.CreateLoad(Type::getInt1Ty(context_), service_yield_);
+    builder_.CreateStore(builder_.CreateOr(pending, yield), service_yield_);
+    service_yield_used_ = true;
+    return;
+  }
   Value *normalized = normalizeAddress(address);
   BasicBlock *mem1Block = BasicBlock::Create(context_, "store_mem1", function_);
   BasicBlock *checkMem2 =
@@ -217,9 +274,20 @@ void FunctionEmitter::emitGuestStore(const DolIRInstruction &instruction,
   builder_.CreateBr(join);
 
   builder_.SetInsertPoint(slowBlock);
-  externalWrite(address, value, width);
+  Value *slowYield = externalWrite(address, value, width);
   builder_.CreateBr(join);
+  BasicBlock *slowEnd = builder_.GetInsertBlock();
   builder_.SetInsertPoint(join);
+  if (modern_runtime_) {
+    PHINode *yield = builder_.CreatePHI(Type::getInt1Ty(context_), 3);
+    yield->addIncoming(builder_.getFalse(), mem1Block);
+    yield->addIncoming(builder_.getFalse(), mem2Block);
+    yield->addIncoming(slowYield, slowEnd);
+    Value *pending =
+        builder_.CreateLoad(Type::getInt1Ty(context_), service_yield_);
+    builder_.CreateStore(builder_.CreateOr(pending, yield), service_yield_);
+    service_yield_used_ = true;
+  }
 }
 
 } // namespace dolllvm

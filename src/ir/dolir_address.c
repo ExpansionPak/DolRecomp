@@ -6,9 +6,10 @@
 #include <string.h>
 
 typedef struct {
-    u64 bits;
-    bool known;
-} ConstantValue;
+    u64 lower;
+    u64 upper;
+    bool bounded;
+} AbstractValue;
 
 static u32 type_width(DolIRType type) {
     switch (type) {
@@ -25,30 +26,47 @@ static u64 truncate_bits(u64 value, u32 width) {
     return width == 64 ? value : value & ((1ull << width) - 1ull);
 }
 
-static ConstantValue unknown_value(void) {
-    ConstantValue value = {0, false};
+static AbstractValue unknown_value(void) {
+    AbstractValue value = {0, 0, false};
     return value;
 }
 
-static ConstantValue known_value(u64 bits, u32 width) {
-    ConstantValue value = {truncate_bits(bits, width), true};
+static AbstractValue range_value(u64 lower, u64 upper, u32 width) {
+    const u64 maximum = width == 64 ? UINT64_MAX : ((1ull << width) - 1ull);
+    if (lower > upper || upper > maximum)
+        return unknown_value();
+    AbstractValue value = {lower, upper, true};
     return value;
 }
 
-static ConstantValue unary_value(const DolIRInstruction* instruction,
-                                 ConstantValue operand) {
+static AbstractValue known_value(u64 bits, u32 width) {
+    const u64 value = truncate_bits(bits, width);
+    return range_value(value, value, width);
+}
+
+static bool exact_value(AbstractValue value) {
+    return value.bounded && value.lower == value.upper;
+}
+
+static AbstractValue unary_value(const DolIRInstruction* instruction,
+                                 AbstractValue operand) {
     const u32 width = type_width(instruction->type);
-    if (!operand.known || !width)
+    if (!width)
         return unknown_value();
     switch (instruction->op) {
     case DOLIR_OP_NOT:
-        return known_value(~operand.bits, width);
+        return exact_value(operand) ? known_value(~operand.lower, width)
+                                    : unknown_value();
     case DOLIR_OP_TRUNC:
     case DOLIR_OP_ZEXT:
-        return known_value(operand.bits, width);
+        return operand.bounded ? range_value(operand.lower, operand.upper, width)
+                               : unknown_value();
     case DOLIR_OP_CLZ: {
+        if (!exact_value(operand))
+            return unknown_value();
         u32 count = 0;
-        while (count < width && !(operand.bits & (1ull << (width - count - 1u))))
+        while (count < width &&
+               !(operand.lower & (1ull << (width - count - 1u))))
             count++;
         return known_value(count, width);
     }
@@ -57,38 +75,75 @@ static ConstantValue unary_value(const DolIRInstruction* instruction,
     }
 }
 
-static ConstantValue binary_value(const DolIRInstruction* instruction,
-                                  ConstantValue left, ConstantValue right) {
+static AbstractValue binary_value(const DolIRInstruction* instruction,
+                                  AbstractValue left, AbstractValue right) {
     const u32 width = type_width(instruction->type);
-    if (!left.known || !right.known || !width)
+    if (!width)
+        return unknown_value();
+    const u64 maximum = width == 64 ? UINT64_MAX : ((1ull << width) - 1ull);
+    if (instruction->op == DOLIR_OP_AND &&
+        !(exact_value(left) && exact_value(right))) {
+        if (exact_value(left))
+            return range_value(0, left.lower & maximum, width);
+        if (exact_value(right))
+            return range_value(0, right.lower & maximum, width);
+    }
+    if (left.bounded && right.bounded) {
+        switch (instruction->op) {
+        case DOLIR_OP_ADD:
+            if (left.upper <= maximum - right.upper)
+                return range_value(left.lower + right.lower,
+                                   left.upper + right.upper, width);
+            break;
+        case DOLIR_OP_SUB:
+            if (left.lower >= right.upper)
+                return range_value(left.lower - right.upper,
+                                   left.upper - right.lower, width);
+            break;
+        case DOLIR_OP_LSHR:
+            if (exact_value(right) && right.lower < width)
+                return range_value(left.lower >> right.lower,
+                                   left.upper >> right.lower, width);
+            break;
+        case DOLIR_OP_SHL:
+            if (exact_value(right) && right.lower < width &&
+                left.upper <= (maximum >> right.lower))
+                return range_value(left.lower << right.lower,
+                                   left.upper << right.lower, width);
+            break;
+        default:
+            break;
+        }
+    }
+    if (!exact_value(left) || !exact_value(right))
         return unknown_value();
     switch (instruction->op) {
-    case DOLIR_OP_ADD: return known_value(left.bits + right.bits, width);
-    case DOLIR_OP_SUB: return known_value(left.bits - right.bits, width);
-    case DOLIR_OP_MUL: return known_value(left.bits * right.bits, width);
+    case DOLIR_OP_ADD: return known_value(left.lower + right.lower, width);
+    case DOLIR_OP_SUB: return known_value(left.lower - right.lower, width);
+    case DOLIR_OP_MUL: return known_value(left.lower * right.lower, width);
     case DOLIR_OP_UDIV:
-        return right.bits ? known_value(left.bits / right.bits, width)
-                          : unknown_value();
-    case DOLIR_OP_AND: return known_value(left.bits & right.bits, width);
-    case DOLIR_OP_OR: return known_value(left.bits | right.bits, width);
-    case DOLIR_OP_XOR: return known_value(left.bits ^ right.bits, width);
+        return right.lower ? known_value(left.lower / right.lower, width)
+                           : unknown_value();
+    case DOLIR_OP_AND: return known_value(left.lower & right.lower, width);
+    case DOLIR_OP_OR: return known_value(left.lower | right.lower, width);
+    case DOLIR_OP_XOR: return known_value(left.lower ^ right.lower, width);
     case DOLIR_OP_SHL:
-        return right.bits < width ? known_value(left.bits << right.bits, width)
-                                  : unknown_value();
+        return right.lower < width ? known_value(left.lower << right.lower, width)
+                                   : unknown_value();
     case DOLIR_OP_LSHR:
-        return right.bits < width ? known_value(left.bits >> right.bits, width)
-                                  : unknown_value();
+        return right.lower < width ? known_value(left.lower >> right.lower, width)
+                                   : unknown_value();
     case DOLIR_OP_ROTL: {
-        u32 shift = (u32)right.bits & (width - 1u);
+        u32 shift = (u32)right.lower & (width - 1u);
         if (!shift)
-            return known_value(left.bits, width);
-        return known_value((left.bits << shift) |
-                           (left.bits >> (width - shift)), width);
+            return known_value(left.lower, width);
+        return known_value((left.lower << shift) |
+                           (left.lower >> (width - shift)), width);
     }
-    case DOLIR_OP_ICMP_EQ: return known_value(left.bits == right.bits, 1);
-    case DOLIR_OP_ICMP_NE: return known_value(left.bits != right.bits, 1);
-    case DOLIR_OP_ICMP_ULT: return known_value(left.bits < right.bits, 1);
-    case DOLIR_OP_ICMP_ULE: return known_value(left.bits <= right.bits, 1);
+    case DOLIR_OP_ICMP_EQ: return known_value(left.lower == right.lower, 1);
+    case DOLIR_OP_ICMP_NE: return known_value(left.lower != right.lower, 1);
+    case DOLIR_OP_ICMP_ULT: return known_value(left.lower < right.lower, 1);
+    case DOLIR_OP_ICMP_ULE: return known_value(left.lower <= right.lower, 1);
     default: return unknown_value();
     }
 }
@@ -133,9 +188,9 @@ static void find_region_leaders(const DolIRFunction* function, bool* leaders) {
     }
 }
 
-static ConstantValue instruction_value(const DolIRInstruction* instruction,
-                                       const ConstantValue* values,
-                                       const ConstantValue* state) {
+static AbstractValue instruction_value(const DolIRInstruction* instruction,
+                                       const AbstractValue* values,
+                                       const AbstractValue* state) {
     const u32 width = type_width(instruction->type);
     if (instruction->op == DOLIR_OP_CONSTANT && width)
         return known_value(instruction->immediate, width);
@@ -147,29 +202,48 @@ static ConstantValue instruction_value(const DolIRInstruction* instruction,
         return binary_value(instruction, values[instruction->operands[0]],
                             values[instruction->operands[1]]);
     if (instruction->op == DOLIR_OP_SELECT && instruction->operand_count == 3) {
-        ConstantValue condition = values[instruction->operands[0]];
-        ConstantValue yes = values[instruction->operands[1]];
-        ConstantValue no = values[instruction->operands[2]];
-        if (condition.known)
-            return condition.bits ? yes : no;
-        if (yes.known && no.known && yes.bits == no.bits)
-            return yes;
+        AbstractValue condition = values[instruction->operands[0]];
+        AbstractValue yes = values[instruction->operands[1]];
+        AbstractValue no = values[instruction->operands[2]];
+        if (exact_value(condition))
+            return condition.lower ? yes : no;
+        if (yes.bounded && no.bounded)
+            return range_value(yes.lower < no.lower ? yes.lower : no.lower,
+                               yes.upper > no.upper ? yes.upper : no.upper,
+                               width);
     }
     return unknown_value();
+}
+
+static bool range_in_window(u32 lower, u32 upper, u32 base, u32 size) {
+    return size && lower >= base && upper >= lower &&
+           lower - base < size && upper - base < size;
+}
+
+static DolIRAddressDomain classify_range(u32 lower, u32 upper) {
+    if (lower == upper)
+        return classify_address(lower);
+    for (u32 alias = 0; alias <= 0x40000000u; alias += 0x40000000u) {
+        if (range_in_window(lower, upper, GC_RAM_BASE | alias, GC_MAIN_RAM_SIZE))
+            return DOLIR_ADDRESS_MEM1;
+        if (range_in_window(lower, upper, WII_MEM2_BASE | alias, WII_MEM2_SIZE))
+            return DOLIR_ADDRESS_MEM2;
+    }
+    return DOLIR_ADDRESS_UNKNOWN;
 }
 
 void dolir_analyze_addresses(DolIRFunction* function) {
     if (!function || !function->block_count || !function->value_count)
         return;
     bool* leaders = (bool*)calloc(function->block_count, sizeof(*leaders));
-    ConstantValue* values =
-        (ConstantValue*)calloc(function->value_count, sizeof(*values));
+    AbstractValue* values =
+        (AbstractValue*)calloc(function->value_count, sizeof(*values));
     if (!leaders || !values) {
         free(leaders);
         free(values);
         return;
     }
-    ConstantValue state[DOLIR_STATE_COUNT];
+    AbstractValue state[DOLIR_STATE_COUNT];
     memset(state, 0, sizeof(state));
     find_region_leaders(function, leaders);
     for (u32 block_index = 0; block_index < function->block_count; block_index++) {
@@ -183,13 +257,17 @@ void dolir_analyze_addresses(DolIRFunction* function) {
             instruction->address_upper = 0;
             if ((instruction->op == DOLIR_OP_GUEST_LOAD ||
                  instruction->op == DOLIR_OP_GUEST_STORE) &&
-                values[instruction->operands[0]].known) {
-                u32 address = (u32)values[instruction->operands[0]].bits;
-                instruction->address_domain = classify_address(address);
-                instruction->address_lower = address;
-                instruction->address_upper = address;
+                values[instruction->operands[0]].bounded &&
+                values[instruction->operands[0]].upper <= UINT32_MAX) {
+                u32 lower = (u32)values[instruction->operands[0]].lower;
+                u32 upper = (u32)values[instruction->operands[0]].upper;
+                instruction->address_domain = classify_range(lower, upper);
+                if (instruction->address_domain != DOLIR_ADDRESS_UNKNOWN) {
+                    instruction->address_lower = lower;
+                    instruction->address_upper = upper;
+                }
             }
-            ConstantValue result =
+            AbstractValue result =
                 instruction_value(instruction, values, state);
             if (instruction->result)
                 values[instruction->result] = result;

@@ -1,4 +1,4 @@
-#include "backend/llvm/llvm_backend.h"
+#include "backend/llvm/native_abi.h"
 
 #include "cpu/cpu.h"
 
@@ -11,13 +11,17 @@
 namespace {
 
 bool nativeMemoryAccess(const DolIRInstruction &instruction) {
-  if (instruction.address_domain != DOLIR_ADDRESS_MEM1 ||
-      instruction.address_lower != instruction.address_upper)
+  if (instruction.address_domain != DOLIR_ADDRESS_MEM1 &&
+      instruction.address_domain != DOLIR_ADDRESS_MEM2)
     return false;
   const u32 width = instruction.aux & 0xffu;
-  const u32 address = instruction.address_lower & ~0x40000000u;
-  return width && width <= GC_MAIN_RAM_SIZE && address >= GC_RAM_BASE &&
-         address - GC_RAM_BASE <= GC_MAIN_RAM_SIZE - width;
+  const u32 lower = instruction.address_lower & ~0x40000000u;
+  const u32 upper = instruction.address_upper & ~0x40000000u;
+  const bool mem2 = instruction.address_domain == DOLIR_ADDRESS_MEM2;
+  const u32 base = mem2 ? WII_MEM2_BASE : GC_RAM_BASE;
+  const u32 size = mem2 ? WII_MEM2_SIZE : GC_MAIN_RAM_SIZE;
+  return width && width <= size && lower >= base && upper >= lower &&
+         upper - base <= size - width;
 }
 
 bool nativeHelper(const DolIRInstruction &instruction) {
@@ -40,8 +44,13 @@ u32 nativeABIFlags(const DolIRFunction &function, u32 *blockers) {
   *blockers = 0;
   for (u32 blockIndex = 0; blockIndex < function.block_count; blockIndex++) {
     const DolIRBlock &block = function.blocks[blockIndex];
-    if (!block.cycle_cost || block.terminator.kind == DOLIR_TERM_FALLBACK)
+    if (!block.cycle_cost)
       *blockers |= DOLLLVM_ABI_BLOCK_CONTROL;
+    if (block.terminator.kind == DOLIR_TERM_FALLBACK) {
+      *blockers |= DOLLLVM_ABI_BLOCK_FALLBACK;
+      if (!dolllvm::canInlineFallback(block))
+        *blockers |= DOLLLVM_ABI_BLOCK_CONTROL;
+    }
     if (block.terminator.kind == DOLIR_TERM_SYSTEM_CALL)
       *blockers |= DOLLLVM_ABI_BLOCK_EXCEPTION;
     if (block.terminator.kind == DOLIR_TERM_RFI)
@@ -208,7 +217,8 @@ extern "C" void dolllvm_enable_native_services(DolLLVMFunctionRange *ranges,
   for (u32 index = 0; index < rangeCount; index++) {
     DolLLVMFunctionRange &range = ranges[index];
     range.abi_blockers &=
-        ~(DOLLLVM_ABI_BLOCK_EXCEPTION | DOLLLVM_ABI_BLOCK_MEMORY_SERVICE);
+        ~(DOLLLVM_ABI_BLOCK_EXCEPTION | DOLLLVM_ABI_BLOCK_MEMORY_SERVICE |
+          DOLLLVM_ABI_BLOCK_FALLBACK);
     if (range.abi_blockers)
       continue;
     range.abi_flags |= DOLLLVM_FUNCTION_ABI_NATIVE;

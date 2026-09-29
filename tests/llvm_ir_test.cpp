@@ -290,6 +290,34 @@ int main(int argc, char **argv) {
       if (auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction))
         CHECK(call->getCalledFunction() != nullptr);
     }
+
+  llvm::Function *constant_mem2 = module->getFunction("func_80004D00_budget");
+  llvm::Function *bounded_mem1 = module->getFunction("func_80004D20_budget");
+  llvm::Function *bounded_mem2 = module->getFunction("func_80004D40_budget");
+  CHECK(constant_mem2 != nullptr && bounded_mem1 != nullptr && bounded_mem2 != nullptr);
+  CHECK(constant_mem2->getFnAttribute("dolrecomp-native-memory")
+            .getValueAsString() == "mem2");
+  CHECK(bounded_mem1->getFnAttribute("dolrecomp-native-memory")
+            .getValueAsString() == "mem1");
+  CHECK(bounded_mem2->getFnAttribute("dolrecomp-native-memory")
+            .getValueAsString() == "mem2");
+  for (llvm::Function *function : {constant_mem2, bounded_mem1, bounded_mem2}) {
+    bool nativeLoad = false;
+    bool provenMem2Slow = false;
+    for (llvm::BasicBlock &block : *function) {
+      CHECK(!block.getName().starts_with("load_mem1"));
+      CHECK(!block.getName().starts_with("load_check_mem2"));
+      CHECK(!block.getName().starts_with("load_mem2"));
+      CHECK(!block.getName().starts_with("store_mem1"));
+      CHECK(!block.getName().starts_with("store_check_mem2"));
+      CHECK(!block.getName().starts_with("store_mem2"));
+      provenMem2Slow |= block.getName().starts_with("load_proven_mem2_slow");
+      for (llvm::Instruction &instruction : block)
+        nativeLoad |= instruction.getName() == "native.load";
+    }
+    CHECK(nativeLoad);
+    CHECK(provenMem2Slow == (function != bounded_mem1));
+  }
   std::unique_ptr<llvm::Module> instrumented =
       llvm::parseIRFile(argv[2], diagnostic, context);
   CHECK(instrumented != nullptr);

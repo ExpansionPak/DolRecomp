@@ -3,7 +3,8 @@
 
 #include "backend/dispatch.h"
 
-void emit_native_module(FILE* out, const FunctionList* functions,
-                        const char* game_id);
+int emit_native_module(FILE* out, const FunctionList* functions,
+                       const char* game_id, const u32* entries,
+                       u32 entry_count);
 
 #endif

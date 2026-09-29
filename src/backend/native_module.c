@@ -1,5 +1,6 @@
 #include "backend/native_module.h"
 #include "backend/native_state.h"
+#include <stdlib.h>
 
 static void emit_ranges(FILE* out, const FunctionList* functions) {
     fprintf(out,
@@ -60,6 +61,71 @@ static void emit_lookup(FILE* out, u32 count) {
             "    return UINT32_MAX;\n"
             "}\n\n",
             count);
+}
+
+static int emit_entry_map(FILE* out, const FunctionList* functions,
+                          const u32* entries, u32 entry_count) {
+    u64 total_slots = 0;
+    for (u32 i = 0; i < functions->count; i++)
+        total_slots +=
+            (functions->ranges[i].end - functions->ranges[i].start) / 4u;
+    if (total_slots > UINT32_MAX)
+        return 0;
+    u32 slot_count = (u32)total_slots;
+    u32 word_count = slot_count / 64u + ((slot_count & 63u) != 0u);
+    u64* bits = (u64*)calloc(word_count ? word_count : 1u, sizeof(*bits));
+    if (!bits)
+        return 0;
+    u32 entry_index = 0;
+    u32 base = 0;
+
+    fprintf(out, "static const uint32_t moderngekko_native_entry_offsets[] = {\n");
+    for (u32 range_index = 0; range_index < functions->count; range_index++) {
+        const FunctionRange* range = &functions->ranges[range_index];
+        if ((range_index & 7u) == 0)
+            fprintf(out, "    ");
+        fprintf(out, "%uu%s", base,
+                range_index + 1u == functions->count ? "" : ", ");
+        if ((range_index & 7u) == 7u || range_index + 1u == functions->count)
+            fprintf(out, "\n");
+        while (entry_index < entry_count && entries[entry_index] < range->end) {
+            u32 address = entries[entry_index++];
+            if (address >= range->start && ((address - range->start) & 3u) == 0) {
+                u32 bit = base + (address - range->start) / 4u;
+                bits[bit / 64u] |= UINT64_C(1) << (bit & 63u);
+            }
+        }
+        base += (range->end - range->start) / 4u;
+    }
+    if (!functions->count)
+        fprintf(out, "    0u,\n");
+    fprintf(out, "};\nstatic const uint64_t moderngekko_native_entry_bits[] = {\n");
+    if (!word_count) {
+        fprintf(out, "    UINT64_C(0),\n");
+    } else {
+        for (u32 i = 0; i < word_count; i++) {
+            if ((i & 3u) == 0)
+                fprintf(out, "    ");
+            fprintf(out, "UINT64_C(0x%016llX)%s",
+                    (unsigned long long)bits[i], i + 1u == word_count ? "" : ", ");
+            if ((i & 3u) == 3u || i + 1u == word_count)
+                fprintf(out, "\n");
+        }
+    }
+    free(bits);
+    fprintf(out,
+            "};\n"
+            "static int moderngekko_native_supports_entry(uint32_t address) {\n"
+            "    uint32_t index = moderngekko_native_find(address);\n"
+            "    if (index == UINT32_MAX) return 0;\n"
+            "    const ModernGekkoNativeRange* range = &moderngekko_native_ranges[index];\n"
+            "    if ((address - range->start) & 3u) return 0;\n"
+            "    uint32_t bit = moderngekko_native_entry_offsets[index] +\n"
+            "        (address - range->start) / 4u;\n"
+            "    return (moderngekko_native_entry_bits[bit / 64u] >>\n"
+            "            (bit & 63u)) & 1u;\n"
+            "}\n\n");
+    return 1;
 }
 
 static void emit_validation(FILE* out, u32 count) {
@@ -196,11 +262,14 @@ static void emit_invalidation(FILE* out, u32 count) {
             count, count, count, count);
 }
 
-void emit_native_module(FILE* out, const FunctionList* functions,
-                        const char* game_id) {
+int emit_native_module(FILE* out, const FunctionList* functions,
+                       const char* game_id, const u32* entries,
+                       u32 entry_count) {
     emit_native_state_commit(out);
     emit_ranges(out, functions);
     emit_lookup(out, functions->count);
+    if (!emit_entry_map(out, functions, entries, entry_count))
+        return 0;
     emit_validation(out, functions->count);
     emit_entry(out, functions->count);
     emit_invalidation(out, functions->count);
@@ -210,7 +279,7 @@ void emit_native_module(FILE* out, const FunctionList* functions,
             "    \"DolRecomp %s\", \"%s\",\n"
             "    moderngekko_native_contains, moderngekko_native_validate,\n"
             "    moderngekko_native_run, moderngekko_native_invalidate,\n"
-            "    moderngekko_native_reset,\n"
+            "    moderngekko_native_reset, moderngekko_native_supports_entry,\n"
             "};\n\n"
             "MG_NATIVE_EXPORT const MGNativeModule* moderngekko_get_native_module(\n"
             "    uint32_t runtime_abi_version) {\n"
@@ -218,4 +287,5 @@ void emit_native_module(FILE* out, const FunctionList* functions,
             "               ? &moderngekko_native_module : 0;\n"
             "}\n",
             game_id, game_id);
+    return 1;
 }

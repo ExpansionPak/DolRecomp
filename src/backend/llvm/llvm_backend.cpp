@@ -131,14 +131,17 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
   else
     options.optimization_level = 3;
   std::vector<DolLLVMFunctionRange> ranges;
+  std::vector<DolLLVMCallEdge> callEdges;
   if (options.function_ranges && options.function_range_count) {
     ranges.assign(options.function_ranges,
                   options.function_ranges + options.function_range_count);
-    dolllvm::prepareModuleABIs(*source, ranges, options.runtime);
+    dolllvm::prepareModuleABIs(*source, ranges, options.runtime, &callEdges);
     dolllvm_apply_native_abi_policy(ranges.data(),
                                     static_cast<u32>(ranges.size()),
                                     options.native_abi_policy);
     options.function_ranges = ranges.data();
+    options.call_edges = callEdges.data();
+    options.call_edge_count = static_cast<u32>(callEdges.size());
   }
   if (!readableProfile(options.profile_use_path, diagnostics))
     return false;
@@ -224,6 +227,39 @@ extern "C" bool dolllvm_object_matches_options(const char *path,
          dolllvm::objectMatchesProfile(path, profile);
 }
 
+extern "C" u32 dolllvm_collect_native_entries(const DolIRFunction *function,
+                                               const DolLLVMOptions *options,
+                                               u32 *entries, u32 capacity) {
+  if (!function || !options)
+    return 0;
+
+  bool nativeABI = false;
+  for (u32 index = 0; index < options->function_range_count; index++) {
+    const DolLLVMFunctionRange &range = options->function_ranges[index];
+    if (range.start != function->guest_start)
+      continue;
+    nativeABI = (range.abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE) != 0;
+    break;
+  }
+  if (options->runtime == DOLLLVM_RUNTIME_MODERNGEKKO && !nativeABI)
+    return 0;
+
+  std::vector<bool> leaders;
+  dolllvm::collectRegionLeaders(
+      *function, options->runtime == DOLLLVM_RUNTIME_MODERNGEKKO, nativeABI,
+      options->entry_points, options->entry_point_count, leaders);
+  u32 count = 0;
+  for (u32 index = 0; index < function->block_count; index++) {
+    if (!leaders[index] ||
+        function->blocks[index].terminator.kind == DOLIR_TERM_FALLBACK)
+      continue;
+    if (entries && count < capacity)
+      entries[count] = function->blocks[index].guest_address;
+    count++;
+  }
+  return count;
+}
+
 extern "C" bool dolllvm_codegen_fingerprint(const DolLLVMOptions *options,
                                             char *out, size_t size) {
   if (!out || !size)
@@ -238,7 +274,7 @@ extern "C" bool dolllvm_codegen_fingerprint(const DolLLVMOptions *options,
       "runtime=%u|"
       "mask-words=%u|"
       "state-count=%u|calling=fastcc|control=pc32x2|return=i64-lanes|"
-      "escape=sjlj|memory=proven-mem1-v1|cycles=return-or-chain|"
+      "escape=structured-cold-v2|memory=proven-ram-domain-v2|cycles=return-or-chain|"
       "x86-return-registers=3|"
       "aarch64-return-registers=8|reloc=pic|pipeline=default-per-module",
       LLVM_VERSION_STRING, profile.triple.c_str(), profile.cpu.c_str(),

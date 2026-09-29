@@ -3,7 +3,6 @@
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
-#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
@@ -17,14 +16,14 @@ bool FunctionEmitter::emitModernWrapper(raw_ostream &diagnostics) {
   Type *i32 = Type::getInt32Ty(context_);
   StructType *exitType =
       StructType::get(context_, {i32, i32, i32, i32, i32, i32, i32});
-  FunctionType *type =
+  FunctionType *wrapperType =
       FunctionType::get(exitType, {pointer, pointer, i32, i32}, false);
   const std::string wrapperName = symbolName(source_.name);
   Function *wrapper = module_.getFunction(wrapperName);
   if (!wrapper)
-    wrapper = Function::Create(type, GlobalValue::ExternalLinkage, wrapperName,
+    wrapper = Function::Create(wrapperType, GlobalValue::ExternalLinkage, wrapperName,
                                module_);
-  if (wrapper->getFunctionType() != type || !wrapper->empty()) {
+  if (wrapper->getFunctionType() != wrapperType || !wrapper->empty()) {
     diagnostics << "dolllvm: conflicting native entry " << source_.name << "\n";
     return false;
   }
@@ -67,46 +66,57 @@ bool FunctionEmitter::emitModernWrapper(raw_ostream &diagnostics) {
       builder_.CreateStructGEP(chainTy, chain, 6));
   builder_.CreateStore(builder_.getInt32(0),
                        builder_.CreateStructGEP(chainTy, chain, 7));
+  ArrayType *dirtyMaskTy =
+      ArrayType::get(Type::getInt64Ty(context_), DOLIR_STATE_MASK_WORDS);
+  ArrayType *stateValuesTy =
+      ArrayType::get(Type::getInt64Ty(context_), DOLIR_STATE_COUNT);
+  Value *stateValues = builder_.CreateStructGEP(chainTy, chain, 8);
+  Value *dirtyMask = builder_.CreateStructGEP(chainTy, chain, 9);
+  for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++)
+    builder_.CreateStore(
+        builder_.getInt64(0),
+        builder_.CreateInBoundsGEP(
+            dirtyMaskTy, dirtyMask,
+            {builder_.getInt64(0), builder_.getInt64(word)}));
 
+  Value *returnAddress = loadContext(DOLIR_STATE_LR);
   Value *returnPC =
-      builder_.CreateAnd(loadContext(DOLIR_STATE_LR), builder_.getInt32(~3u));
-  BasicBlock *escaped = nullptr;
-  const u32 bufferWords = intrinsic_escapes_ ? 5u : 64u;
-  ArrayType *bufferTy = ArrayType::get(pointer, bufferWords);
-  Value *buffer = builder_.CreateStructGEP(chainTy, chain, 0);
-  Value *jumped = nullptr;
-  if (intrinsic_escapes_) {
-    Value *frame = builder_.CreateCall(
-        Intrinsic::getDeclaration(&module_, Intrinsic::frameaddress, {pointer}),
-        {builder_.getInt32(0)});
-    builder_.CreateStore(
-        frame,
-        builder_.CreateInBoundsGEP(
-            bufferTy, buffer, {builder_.getInt64(0), builder_.getInt64(0)}));
-    Value *stack = builder_.CreateCall(
-        Intrinsic::getDeclaration(&module_, Intrinsic::stacksave, {pointer}));
-    builder_.CreateStore(
-        stack,
-        builder_.CreateInBoundsGEP(
-            bufferTy, buffer, {builder_.getInt64(0), builder_.getInt64(2)}));
-    jumped = builder_.CreateCall(
-        Intrinsic::getDeclaration(&module_, Intrinsic::eh_sjlj_setjmp),
-        {buffer});
-  } else {
-    auto setjmp = module_.getOrInsertFunction(
-        "_setjmp",
-        FunctionType::get(Type::getInt32Ty(context_), {pointer}, false));
-    if (auto *setjmpFunction = dyn_cast<Function>(setjmp.getCallee())) {
-      setjmpFunction->addFnAttr(Attribute::ReturnsTwice);
-      setjmpFunction->addFnAttr(Attribute::NoUnwind);
-    }
-    jumped = builder_.CreateCall(setjmp, {buffer});
+      builder_.CreateAnd(returnAddress, builder_.getInt32(~3u));
+  u64 registerInputMask[DOLIR_STATE_MASK_WORDS]{};
+  bool hasRegisterInputs = false;
+  for (u32 slot = DOLIR_STATE_GPR0; slot <= DOLIR_STATE_PS1_31; slot++) {
+    auto stateSlot = static_cast<DolIRStateSlot>(slot);
+    if (!stateInput(abi_range_, stateSlot))
+      continue;
+    registerInputMask[slot / 64u] |= u64(1) << (slot & 63u);
+    hasRegisterInputs = true;
   }
-  BasicBlock *invoke = BasicBlock::Create(context_, "invoke", wrapper);
-  escaped = BasicBlock::Create(context_, "escaped", wrapper);
-  builder_.CreateCondBr(builder_.CreateICmpEQ(jumped, builder_.getInt32(0)),
-                        invoke, escaped);
-  builder_.SetInsertPoint(invoke);
+  if (hasRegisterInputs) {
+    for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++)
+      builder_.CreateStore(
+          builder_.getInt64(registerInputMask[word]),
+          builder_.CreateInBoundsGEP(
+              dirtyMaskTy, dirtyMask,
+              {builder_.getInt64(0), builder_.getInt64(word)}));
+    FunctionCallee reload = module_.getOrInsertFunction(
+        "moderngekko_reload_state",
+        FunctionType::get(Type::getVoidTy(context_),
+                          {pointer, pointer, pointer}, false));
+    if (auto *function = dyn_cast<Function>(reload.getCallee())) {
+      function->addFnAttr(Attribute::Cold);
+      function->addFnAttr(Attribute::NoUnwind);
+    }
+    CallInst *reloadCall =
+        builder_.CreateCall(reload, {state_interface_, stateValues, dirtyMask});
+    reloadCall->addFnAttr(Attribute::Cold);
+    reloadCall->addFnAttr(Attribute::NoUnwind);
+    for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++)
+      builder_.CreateStore(
+          builder_.getInt64(0),
+          builder_.CreateInBoundsGEP(
+              dirtyMaskTy, dirtyMask,
+              {builder_.getInt64(0), builder_.getInt64(word)}));
+  }
 
   Value *control = builder_.CreateOr(
       builder_.CreateZExt(wrapper->getArg(2), Type::getInt64Ty(context_)),
@@ -119,15 +129,106 @@ bool FunctionEmitter::emitModernWrapper(raw_ostream &diagnostics) {
     arguments.push_back(builder_.getInt64(0));
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
-    if (stateInput(abi_range_, stateSlot))
+    if (!stateInput(abi_range_, stateSlot))
+      continue;
+    if (slot <= DOLIR_STATE_PS1_31) {
+      Value *value = builder_.CreateLoad(
+          Type::getInt64Ty(context_),
+          builder_.CreateInBoundsGEP(
+              stateValuesTy, stateValues,
+              {builder_.getInt64(0), builder_.getInt64(slot)}));
+      Type *target = type(dolir_state_type(stateSlot));
+      value = target->isDoubleTy() ? builder_.CreateBitCast(value, target)
+                                   : builder_.CreateZExtOrTrunc(value, target);
+      arguments.push_back(value);
+    } else if (stateSlot == DOLIR_STATE_LR) {
+      arguments.push_back(returnAddress);
+    } else {
       arguments.push_back(loadContext(stateSlot));
+    }
   }
   CallInst *body = builder_.CreateCall(function_, arguments);
   body->setCallingConv(bodyCallingConvention());
   body->addFnAttr(Attribute::NoInline);
 
+  Value *rawReason =
+      builder_.CreateLoad(i32, builder_.CreateStructGEP(chainTy, chain, 7));
+  Value *structuredExit = builder_.CreateICmpNE(
+      builder_.CreateAnd(rawReason, builder_.getInt32(0x80000000u)),
+      builder_.getInt32(0));
+  BasicBlock *structuredReturn =
+      BasicBlock::Create(context_, "structured_return", wrapper);
+  BasicBlock *normalReturn =
+      BasicBlock::Create(context_, "normal_return", wrapper);
+  builder_.CreateCondBr(structuredExit, structuredReturn, normalReturn);
+
+  builder_.SetInsertPoint(structuredReturn);
+  Value *structuredResult = UndefValue::get(exitType);
+  structuredResult = builder_.CreateInsertValue(
+      structuredResult,
+      builder_.CreateAnd(rawReason, builder_.getInt32(0x7fffffffu)), 0);
+  structuredResult = builder_.CreateInsertValue(
+      structuredResult,
+      builder_.CreateLoad(i32, builder_.CreateStructGEP(chainTy, chain, 5)), 1);
+  structuredResult = builder_.CreateInsertValue(
+      structuredResult,
+      builder_.CreateLoad(i32, builder_.CreateStructGEP(chainTy, chain, 6)), 2);
+  structuredResult = builder_.CreateInsertValue(
+      structuredResult,
+      builder_.CreateTrunc(
+          builder_.CreateLoad(Type::getInt64Ty(context_),
+                              builder_.CreateStructGEP(chainTy, chain, 3)),
+          i32),
+      3);
+  structuredResult = builder_.CreateInsertValue(structuredResult, builder_.getInt32(0), 4);
+  structuredResult = builder_.CreateInsertValue(structuredResult, builder_.getInt32(0), 5);
+  structuredResult = builder_.CreateInsertValue(structuredResult, builder_.getInt32(0), 6);
+  builder_.CreateRet(structuredResult);
+
+  builder_.SetInsertPoint(normalReturn);
+
   u32 resultField = 2;
-  for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
+  u64 registerOutputMask[DOLIR_STATE_MASK_WORDS]{};
+  bool hasRegisterOutputs = false;
+  for (u32 slot = DOLIR_STATE_GPR0; slot <= DOLIR_STATE_PS1_31; slot++) {
+    auto stateSlot = static_cast<DolIRStateSlot>(slot);
+    if (!stateOutput(abi_range_, stateSlot))
+      continue;
+    Value *value = cold_escapes_
+                       ? nativeOutputValue(body, abi_range_, stateSlot)
+                       : builder_.CreateExtractValue(body, resultField++);
+    if (value->getType()->isDoubleTy())
+      value = builder_.CreateBitCast(value, Type::getInt64Ty(context_));
+    else
+      value = builder_.CreateZExtOrTrunc(value, Type::getInt64Ty(context_));
+    builder_.CreateStore(
+        value, builder_.CreateInBoundsGEP(
+                   stateValuesTy, stateValues,
+                   {builder_.getInt64(0), builder_.getInt64(slot)}));
+    registerOutputMask[slot / 64u] |= u64(1) << (slot & 63u);
+    hasRegisterOutputs = true;
+  }
+  if (hasRegisterOutputs) {
+    for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++)
+      builder_.CreateStore(
+          builder_.getInt64(registerOutputMask[word]),
+          builder_.CreateInBoundsGEP(
+              dirtyMaskTy, dirtyMask,
+              {builder_.getInt64(0), builder_.getInt64(word)}));
+    FunctionCallee commit = module_.getOrInsertFunction(
+        "moderngekko_commit_state",
+        FunctionType::get(Type::getVoidTy(context_),
+                          {pointer, pointer, pointer}, false));
+    if (auto *function = dyn_cast<Function>(commit.getCallee())) {
+      function->addFnAttr(Attribute::Cold);
+      function->addFnAttr(Attribute::NoUnwind);
+    }
+    CallInst *commitCall =
+        builder_.CreateCall(commit, {state_interface_, stateValues, dirtyMask});
+    commitCall->addFnAttr(Attribute::Cold);
+    commitCall->addFnAttr(Attribute::NoUnwind);
+  }
+  for (u32 slot = DOLIR_STATE_PS1_31 + 1; slot < DOLIR_STATE_COUNT; slot++) {
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
     if (!stateOutput(abi_range_, stateSlot))
       continue;
@@ -153,29 +254,6 @@ bool FunctionEmitter::emitModernWrapper(raw_ostream &diagnostics) {
   normalExit = builder_.CreateInsertValue(normalExit, builder_.getInt32(0), 5);
   normalExit = builder_.CreateInsertValue(normalExit, builder_.getInt32(0), 6);
   builder_.CreateRet(normalExit);
-
-  builder_.SetInsertPoint(escaped);
-  Value *escapeExit = UndefValue::get(exitType);
-  escapeExit = builder_.CreateInsertValue(
-      escapeExit,
-      builder_.CreateLoad(i32, builder_.CreateStructGEP(chainTy, chain, 7)), 0);
-  escapeExit = builder_.CreateInsertValue(
-      escapeExit,
-      builder_.CreateLoad(i32, builder_.CreateStructGEP(chainTy, chain, 5)), 1);
-  escapeExit = builder_.CreateInsertValue(
-      escapeExit,
-      builder_.CreateLoad(i32, builder_.CreateStructGEP(chainTy, chain, 6)), 2);
-  escapeExit = builder_.CreateInsertValue(
-      escapeExit,
-      builder_.CreateTrunc(
-          builder_.CreateLoad(Type::getInt64Ty(context_),
-                              builder_.CreateStructGEP(chainTy, chain, 3)),
-          i32),
-      3);
-  escapeExit = builder_.CreateInsertValue(escapeExit, builder_.getInt32(0), 4);
-  escapeExit = builder_.CreateInsertValue(escapeExit, builder_.getInt32(0), 5);
-  escapeExit = builder_.CreateInsertValue(escapeExit, builder_.getInt32(0), 6);
-  builder_.CreateRet(escapeExit);
 
   ctx_ = savedContext;
   state_interface_ = savedStateInterface;

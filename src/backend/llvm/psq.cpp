@@ -44,6 +44,21 @@ Value *FunctionEmitter::emitPSQ(const DolIRInstruction &inst) {
     return emitKnownPSQ(inst, static_cast<u32>(knownType->getZExtValue()),
                         static_cast<s32>(knownScale->getSExtValue()));
 
+  if (modern_runtime_ && gqr == 0) {
+    Value *gqr0 = gqrValue(0);
+    BasicBlock *common =
+        BasicBlock::Create(context_, "psq_gqr0_common", function_);
+    BasicBlock *uncommon =
+        BasicBlock::Create(context_, "psq_gqr0_uncommon", function_);
+    builder_.CreateCondBr(builder_.CreateICmpEQ(gqr0, builder_.getInt32(0)),
+                          common, uncommon,
+                          MDBuilder(context_).createBranchWeights(2000, 1));
+    builder_.SetInsertPoint(uncommon);
+    sideExit(inst.guest_pc, 2);
+    builder_.SetInsertPoint(common);
+    return emitKnownPSQ(inst, 0, 0);
+  }
+
   if (load)
     return emitPSQLoad(inst, address, typeValue, scaleValue);
 

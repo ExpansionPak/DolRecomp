@@ -1,8 +1,10 @@
 #include "backend/llvm/emitter.h"
+#include "backend/llvm/native_abi.h"
 #include "cpu/cpu.h"
 
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/Format.h>
 #include <llvm/Support/raw_ostream.h>
@@ -13,15 +15,13 @@ using namespace llvm;
 
 void FunctionEmitter::emitColdEntry(BasicBlock *entryMiss) {
   builder_.SetInsertPoint(entryMiss);
-  Value *offset =
-      builder_.CreateSub(entry_pc_, builder_.getInt32(source_.guest_start));
+  Value *offset = builder_.CreateSub(entry_pc_, builder_.getInt32(source_.guest_start));
   Value *inRange = builder_.CreateICmpULT(
       offset, builder_.getInt32(source_.guest_end - source_.guest_start));
   Value *aligned = builder_.CreateICmpEQ(
       builder_.CreateAnd(offset, builder_.getInt32(3)), builder_.getInt32(0));
   BasicBlock *valid = BasicBlock::Create(context_, "cold_entry", function_);
-  BasicBlock *invalid =
-      BasicBlock::Create(context_, "invalid_entry", function_);
+  BasicBlock *invalid = BasicBlock::Create(context_, "invalid_entry", function_);
   builder_.CreateCondBr(builder_.CreateAnd(inRange, aligned), valid, invalid);
 
   builder_.SetInsertPoint(invalid);
@@ -47,6 +47,40 @@ void FunctionEmitter::emitFallbackHandler() {
   fp_available_checked_ = false;
   builder_.SetInsertPoint(fallback_block_);
   if (modern_runtime_) {
+    BasicBlock *fallbackExit = BasicBlock::Create(context_, "fallback_exit", function_);
+    u32 serviceable = 0;
+    for (u32 i = 0; i < source_.block_count; i++)
+      serviceable += canInlineFallback(source_.blocks[i]);
+    auto *dispatch = builder_.CreateSwitch(fallback_pc_, fallbackExit, serviceable);
+    for (u32 i = 0; i < source_.block_count; i++) {
+      const DolIRBlock &block = source_.blocks[i];
+      if (!canInlineFallback(block))
+        continue;
+
+      BasicBlock *service = BasicBlock::Create(context_, "fallback_service", function_);
+      dispatch->addCase(builder_.getInt32(block.guest_address), service);
+      builder_.SetInsertPoint(service);
+
+      Value *msr = state_[DOLIR_STATE_MSR]
+                       ? stateValue(DOLIR_STATE_MSR)
+                       : loadContext(DOLIR_STATE_MSR);
+      Value *fpEnabled = builder_.CreateICmpNE(
+          builder_.CreateAnd(msr, builder_.getInt32(1u << 13)),
+          builder_.getInt32(0));
+      BasicBlock *invoke = BasicBlock::Create(context_, "fallback_service_invoke", function_);
+      builder_.CreateCondBr(fpEnabled, invoke, fallbackExit,
+                            MDBuilder(context_).createBranchWeights(2000, 1));
+      builder_.SetInsertPoint(invoke);
+      if (loop_headers_[i])
+        emitBudgetGuard(block.guest_address);
+      emitInstructionService(block.guest_address, block.cycle_cost);
+      if (i + 1u < source_.block_count)
+        builder_.CreateBr(blocks_[i + 1u]);
+      else
+        sideExit(block.guest_address + 4u);
+    }
+
+    builder_.SetInsertPoint(fallbackExit);
     builder_.CreateStore(builder_.getInt32(2),
                          builder_.CreateStructGEP(chainType(), chain_, 7));
     materialize(fallback_pc_);
@@ -62,14 +96,12 @@ void FunctionEmitter::emitFallbackHandler() {
     rawValues.push_back(builder_.getInt32(block.raw));
     cycleValues.push_back(builder_.getInt32(block.cycle_cost));
   }
-  ArrayType *rawType =
-      ArrayType::get(Type::getInt32Ty(context_), source_.block_count);
+  ArrayType *rawType = ArrayType::get(Type::getInt32Ty(context_), source_.block_count);
   auto *rawTable =
       new GlobalVariable(module_, rawType, true, GlobalValue::PrivateLinkage,
                          ConstantArray::get(rawType, rawValues),
                          std::string(source_.name) + "_fallback_raw");
-  ArrayType *cycleType =
-      ArrayType::get(Type::getInt32Ty(context_), source_.block_count);
+  ArrayType *cycleType = ArrayType::get(Type::getInt32Ty(context_), source_.block_count);
   auto *cycleTable =
       new GlobalVariable(module_, cycleType, true, GlobalValue::PrivateLinkage,
                          ConstantArray::get(cycleType, cycleValues),
@@ -102,8 +134,7 @@ void FunctionEmitter::emitFallbackHandler() {
   builder_.CreateCall(callee, {ctx_, raw, fallback_pc_});
   Value *exception =
       loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exception));
-  BasicBlock *resume =
-      BasicBlock::Create(context_, "fallback_resume", function_);
+  BasicBlock *resume = BasicBlock::Create(context_, "fallback_resume", function_);
   BasicBlock *done = BasicBlock::Create(context_, "fallback_exit", function_);
   builder_.CreateCondBr(builder_.CreateICmpEQ(exception, builder_.getInt32(0)),
                         resume, done);

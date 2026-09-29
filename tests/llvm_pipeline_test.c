@@ -338,18 +338,34 @@ int main(int argc, char** argv) {
     text[length] = '\0';
     fclose(file);
     CHECK(strstr(text, "Core/PowerPC/Native/NativeModuleABI.h") != NULL);
+    CHECK(strstr(text, "#include <stddef.h>") != NULL);
     CHECK(strstr(text, "moderngekko_get_native_module") != NULL);
     CHECK(strstr(text, "moderngekko_native_region_available") != NULL);
     CHECK(strstr(text, "moderngekko_native_validate") != NULL);
     CHECK(strstr(text, "moderngekko_native_validate_all") != NULL);
     CHECK(strstr(text, "moderngekko_native_hash") != NULL);
     CHECK(strstr(text, "moderngekko_native_lookup") != NULL);
+    CHECK(strstr(text, "moderngekko_native_supports_entry") != NULL);
     CHECK(strstr(text, "moderngekko_native_needs_validation") != NULL);
     CHECK(strstr(text, "MODERNGEKKO_NATIVE_DIRTY, memory_order_relaxed") != NULL);
     CHECK(strstr(text, "\"TEST01\"") != NULL);
     CHECK(strstr(text, "CPUState") == NULL);
     CHECK(strstr(text, "moderngekko_commit_state") != NULL);
     CHECK(strstr(text, "moderngekko_reload_state") != NULL);
+    CHECK(strstr(text, "offsetof(MGNativeState, try_write_registers)") != NULL);
+    CHECK(strstr(text, "offsetof(MGNativeState, try_read_registers)") != NULL);
+    CHECK(strstr(text, "state->try_write_registers") != NULL);
+    CHECK(strstr(text, "state->try_read_registers") != NULL);
+    CHECK(strstr(text, "values + MG_STATE_GPR0, values + MG_STATE_FPR0") != NULL);
+    CHECK(strstr(text,
+                 "values + MG_STATE_PS1_0, gpr_mask, ps0_mask, ps1_mask") != NULL);
+    CHECK(strstr(text, "moderngekko_native_entry_offsets") != NULL);
+    CHECK(strstr(text, "0u, 4u, 64u, 65u, 577u") != NULL);
+    CHECK(strstr(text, "UINT64_C(0x000000000000003B)") != NULL);
+    CHECK(strstr(text, "if ((address - range->start) & 3u) return 0;") != NULL);
+    CHECK(strstr(text,
+                 "moderngekko_native_reset, moderngekko_native_supports_entry") !=
+          NULL);
     file = fopen(native_object, "rb");
     CHECK(file != NULL);
     CHECK(fread(magic, 1, 4, file) == 4);

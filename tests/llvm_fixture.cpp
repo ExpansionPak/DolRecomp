@@ -1,4 +1,5 @@
 #include "backend/llvm/llvm_backend.h"
+#include "backend/llvm/native_abi.h"
 #include "cpu/cpu.h"
 #include "ir/dolir_builder.h"
 
@@ -57,6 +58,29 @@ static bool add_chunk(DolIRModule *module, const u32 *words, u32 count,
   return result;
 }
 
+static bool force_first_block_fallback(DolIRModule *module, u32 cycleCost) {
+  if (!module || !module->function_count)
+    return false;
+  DolIRFunction &function = module->functions[module->function_count - 1u];
+  if (!function.block_count)
+    return false;
+  DolIRBlock &block = function.blocks[0];
+  block.cycle_cost = cycleCost;
+  block.terminator = {};
+  block.terminator.kind = DOLIR_TERM_FALLBACK;
+  block.terminator.guest_pc = block.guest_address;
+  block.terminator.raw = block.raw;
+  dolir_analyze_addresses(&function);
+  return true;
+}
+
+static DolIRFunction *find_function(DolIRModule *module, u32 address) {
+  for (u32 i = 0; module && i < module->function_count; i++)
+    if (module->functions[i].guest_start == address)
+      return &module->functions[i];
+  return nullptr;
+}
+
 static void mark_state(u64 *mask, DolIRStateSlot slot) {
   mask[static_cast<u32>(slot) / 64u] |= u64(1)
                                         << (static_cast<u32>(slot) & 63u);
@@ -91,7 +115,7 @@ int main(int argc, char **argv) {
   CHECK(dolllvm_codegen_fingerprint(&fingerprintOptions, armFingerprint,
                                     sizeof(armFingerprint)));
   CHECK(std::strcmp(x86Fingerprint, armFingerprint) != 0);
-  CHECK(std::strstr(x86Fingerprint, "native-abi=4") != nullptr);
+  CHECK(std::strstr(x86Fingerprint, "native-abi=5") != nullptr);
   CHECK(std::strstr(x86Fingerprint, "native-policy=0") != nullptr);
 
   DolIRModule overwrittenState;
@@ -169,18 +193,91 @@ int main(int argc, char **argv) {
   mark_state(functionOutputs, gpr_state(6));
   u64 liveAfter[DOLIR_STATE_MASK_WORDS]{};
   u64 definedBefore[DOLIR_STATE_MASK_WORDS]{};
-  CHECK(dolllvm_analyze_callsite_state(&callFunction, 0, functionOutputs,
-                                       liveAfter, definedBefore));
+  u64 mayDirtyBefore[DOLIR_STATE_MASK_WORDS]{};
+  CHECK(dolllvm_analyze_callsite_state(&callFunction, 0, functionOutputs, nullptr,
+                                       liveAfter, definedBefore,
+                                       mayDirtyBefore));
   CHECK(dolir_state_mask_test(liveAfter, gpr_state(3)));
   CHECK(!dolir_state_mask_test(liveAfter, gpr_state(5)));
   CHECK(dolir_state_mask_test(liveAfter, gpr_state(6)));
   CHECK(dolir_state_mask_test(definedBefore, gpr_state(4)));
+  CHECK(dolir_state_mask_test(mayDirtyBefore, gpr_state(4)));
+
+  DolIRInstruction conditionalBeforeInstructions[2]{};
+  mark_state(conditionalBeforeInstructions[0].state_defs, gpr_state(8));
+  mark_state(conditionalBeforeInstructions[1].state_defs, gpr_state(9));
+  DolIRBlock conditionalBeforeBlocks[5]{};
+  conditionalBeforeBlocks[0].terminator.kind = DOLIR_TERM_COND_BRANCH;
+  conditionalBeforeBlocks[0].terminator.targets[0] = 1;
+  conditionalBeforeBlocks[0].terminator.targets[1] = 2;
+  conditionalBeforeBlocks[1].instructions = &conditionalBeforeInstructions[0];
+  conditionalBeforeBlocks[1].instruction_count = 1;
+  conditionalBeforeBlocks[1].terminator.kind = DOLIR_TERM_BRANCH;
+  conditionalBeforeBlocks[1].terminator.targets[0] = 3;
+  conditionalBeforeBlocks[2].terminator.kind = DOLIR_TERM_BRANCH;
+  conditionalBeforeBlocks[2].terminator.targets[0] = 3;
+  conditionalBeforeBlocks[3].terminator.kind = DOLIR_TERM_BRANCH;
+  conditionalBeforeBlocks[3].terminator.linked = true;
+  conditionalBeforeBlocks[3].terminator.guest_pc = 0x8000040Cu;
+  conditionalBeforeBlocks[3].terminator.targets[0] = DOLIR_NO_BLOCK;
+  conditionalBeforeBlocks[4].instructions = &conditionalBeforeInstructions[1];
+  conditionalBeforeBlocks[4].instruction_count = 1;
+  conditionalBeforeBlocks[4].terminator.kind = DOLIR_TERM_RETURN;
+  DolIRFunction conditionalBeforeFunction{};
+  conditionalBeforeFunction.guest_start = 0x80000400u;
+  conditionalBeforeFunction.guest_end = 0x80000414u;
+  conditionalBeforeFunction.blocks = conditionalBeforeBlocks;
+  conditionalBeforeFunction.block_count = 5;
+  u64 conditionalLiveAfter[DOLIR_STATE_MASK_WORDS]{};
+  u64 conditionalDefinedBefore[DOLIR_STATE_MASK_WORDS]{};
+  u64 conditionalMayDirtyBefore[DOLIR_STATE_MASK_WORDS]{};
+  CHECK(dolllvm_analyze_callsite_state(
+      &conditionalBeforeFunction, 3, functionOutputs, nullptr,
+      conditionalLiveAfter, conditionalDefinedBefore,
+      conditionalMayDirtyBefore));
+  CHECK(!dolir_state_mask_test(conditionalDefinedBefore, gpr_state(8)));
+  CHECK(dolir_state_mask_test(conditionalMayDirtyBefore, gpr_state(8)));
+  CHECK(!dolir_state_mask_test(conditionalDefinedBefore, gpr_state(9)));
+  CHECK(!dolir_state_mask_test(conditionalMayDirtyBefore, gpr_state(9)));
+
+  DolIRBlock chainedCallBlocks[3]{};
+  chainedCallBlocks[0].terminator.kind = DOLIR_TERM_BRANCH;
+  chainedCallBlocks[0].terminator.linked = true;
+  chainedCallBlocks[0].terminator.guest_pc = 0x80000500u;
+  chainedCallBlocks[0].terminator.targets[0] = DOLIR_NO_BLOCK;
+  chainedCallBlocks[1].terminator.kind = DOLIR_TERM_BRANCH;
+  chainedCallBlocks[1].terminator.linked = true;
+  chainedCallBlocks[1].terminator.guest_pc = 0x80000504u;
+  chainedCallBlocks[1].terminator.targets[0] = DOLIR_NO_BLOCK;
+  chainedCallBlocks[2].terminator.kind = DOLIR_TERM_RETURN;
+  DolIRFunction chainedCallFunction{};
+  chainedCallFunction.guest_start = 0x80000500u;
+  chainedCallFunction.guest_end = 0x8000050Cu;
+  chainedCallFunction.blocks = chainedCallBlocks;
+  chainedCallFunction.block_count = 3;
+  u64 chainedPostCallDefs[3 * DOLIR_STATE_MASK_WORDS]{};
+  mark_state(chainedPostCallDefs, gpr_state(10));
+  mark_state(chainedPostCallDefs + DOLIR_STATE_MASK_WORDS, gpr_state(11));
+  u64 chainedLiveAfter[DOLIR_STATE_MASK_WORDS]{};
+  u64 chainedDefinedBefore[DOLIR_STATE_MASK_WORDS]{};
+  u64 chainedMayDirtyBefore[DOLIR_STATE_MASK_WORDS]{};
+  CHECK(dolllvm_analyze_callsite_state(
+      &chainedCallFunction, 0, functionOutputs, chainedPostCallDefs,
+      chainedLiveAfter, chainedDefinedBefore, chainedMayDirtyBefore));
+  CHECK(!dolir_state_mask_test(chainedMayDirtyBefore, gpr_state(10)));
+  CHECK(!dolir_state_mask_test(chainedMayDirtyBefore, gpr_state(11)));
+  CHECK(dolllvm_analyze_callsite_state(
+      &chainedCallFunction, 1, functionOutputs, chainedPostCallDefs,
+      chainedLiveAfter, chainedDefinedBefore, chainedMayDirtyBefore));
+  CHECK(dolir_state_mask_test(chainedMayDirtyBefore, gpr_state(10)));
+  CHECK(!dolir_state_mask_test(chainedMayDirtyBefore, gpr_state(11)));
 
   DolLLVMFunctionRange propagatedRanges[2]{};
   propagatedRanges[0].start = 0x80000200u;
   propagatedRanges[0].end = 0x80000208u;
   propagatedRanges[0].abi_flags = DOLLLVM_FUNCTION_ABI_NATIVE;
-  mark_state(propagatedRanges[0].escape_state, gpr_state(7));
+  mark_state(propagatedRanges[0].output_state, gpr_state(8));
+  mark_state(propagatedRanges[0].output_state, gpr_state(9));
   propagatedRanges[1].start = 0x80000300u;
   propagatedRanges[1].end = 0x80000308u;
   propagatedRanges[1].abi_flags = DOLLLVM_FUNCTION_ABI_NATIVE;
@@ -194,9 +291,11 @@ int main(int argc, char **argv) {
   mark_state(propagatedRanges[1].output_state, gpr_state(6));
   DolLLVMCallEdge propagatedEdge{};
   propagatedEdge.caller_start = 0x80000200u;
+  propagatedEdge.callsite_pc = 0x80000200u;
   propagatedEdge.callee_address = 0x80000300u;
   mark_state(propagatedEdge.live_after, gpr_state(3));
   mark_state(propagatedEdge.defined_before, gpr_state(4));
+  mark_state(propagatedEdge.may_dirty_before, gpr_state(8));
   CHECK(
       dolllvm_propagate_function_abis(propagatedRanges, 2, &propagatedEdge, 1));
   CHECK(!dolir_state_mask_test(propagatedRanges[0].semantic_input_state,
@@ -207,9 +306,58 @@ int main(int argc, char **argv) {
                               gpr_state(3)));
   CHECK(!dolir_state_mask_test(propagatedRanges[1].semantic_output_state,
                                gpr_state(6)));
-  CHECK(dolir_state_mask_test(propagatedRanges[1].escape_state, gpr_state(7)));
+  CHECK(dolir_state_mask_test(propagatedRanges[1].escape_state,
+                              gpr_state(8)));
+  CHECK(dolir_state_mask_test(propagatedRanges[1].escape_state,
+                              gpr_state(9)));
+  CHECK(!dolir_state_mask_test(propagatedRanges[1].input_state,
+                               gpr_state(8)));
   CHECK(propagatedRanges[0].native_call_targets == 1u);
   CHECK(propagatedRanges[0].native_call_depth == 2u);
+
+  DolIRModule chainedNativeModule;
+  dolir_module_init(&chainedNativeModule);
+  const u32 chained_native_caller_words[] = {
+      branch(true, 0x100u), branch(true, 0x1FCu), branch(true, 0x2F8u),
+      0x4E800020u,
+  };
+  const u32 chained_native_producer8_words[] = {0x39080001u, 0x4E800020u};
+  const u32 chained_native_target_words[] = {0x4E800020u};
+  const u32 chained_native_producer9_words[] = {0x39290001u, 0x4E800020u};
+  CHECK(add_chunk(&chainedNativeModule, chained_native_caller_words, 4,
+                  0x80000600u));
+  CHECK(add_chunk(&chainedNativeModule, chained_native_producer8_words, 2,
+                  0x80000700u));
+  CHECK(add_chunk(&chainedNativeModule, chained_native_target_words, 1,
+                  0x80000800u));
+  CHECK(add_chunk(&chainedNativeModule, chained_native_producer9_words, 2,
+                  0x80000900u));
+  std::vector<DolLLVMFunctionRange> chainedNativeRanges(4);
+  chainedNativeRanges[0].start = 0x80000600u;
+  chainedNativeRanges[0].end = 0x80000610u;
+  chainedNativeRanges[1].start = 0x80000700u;
+  chainedNativeRanges[1].end = 0x80000708u;
+  chainedNativeRanges[2].start = 0x80000800u;
+  chainedNativeRanges[2].end = 0x80000804u;
+  chainedNativeRanges[3].start = 0x80000900u;
+  chainedNativeRanges[3].end = 0x80000908u;
+  std::vector<DolLLVMCallEdge> chainedNativeEdges;
+  dolllvm::prepareModuleABIs(chainedNativeModule, chainedNativeRanges,
+                             DOLLLVM_RUNTIME_MODERNGEKKO,
+                             &chainedNativeEdges);
+  const DolLLVMCallEdge *targetEdge = nullptr;
+  for (const DolLLVMCallEdge &edge : chainedNativeEdges)
+    if (edge.caller_start == 0x80000600u &&
+        edge.callee_address == 0x80000800u)
+      targetEdge = &edge;
+  CHECK(targetEdge != nullptr);
+  CHECK(dolir_state_mask_test(targetEdge->may_dirty_before, gpr_state(8)));
+  CHECK(!dolir_state_mask_test(targetEdge->may_dirty_before, gpr_state(9)));
+  CHECK(!dolir_state_mask_test(chainedNativeRanges[2].escape_state,
+                               gpr_state(8)));
+  CHECK(!dolir_state_mask_test(chainedNativeRanges[2].input_state,
+                               gpr_state(8)));
+  dolir_module_free(&chainedNativeModule);
 
   DolLLVMFunctionRange policyRanges[2]{};
   for (DolLLVMFunctionRange &range : policyRanges)
@@ -337,6 +485,21 @@ int main(int argc, char **argv) {
       0x4E800020u,
   };
   CHECK(add_chunk(&module, memory_words, 4, 0x80003100u));
+
+  const u32 memory_service_boundary_words[] = {
+      0x84640004u,
+      0x4E800020u,
+  };
+  CHECK(add_chunk(&module, memory_service_boundary_words, 2, 0x80003120u));
+
+  const u32 fifo_service_words[] = {
+      0x3C80CC00u, // lis r4, 0xcc00
+      0x60848000u, // ori r4, r4, 0x8000
+      0x38630001u, // addi r3, r3, 1
+      0x90640000u, // stw r3, 0(r4)
+      0x4E800020u,
+  };
+  CHECK(add_chunk(&module, fifo_service_words, 5, 0x80003140u));
 
   const u32 reverse_words[] = {
       xform(534, 3, 0, 4),
@@ -540,6 +703,107 @@ int main(int argc, char **argv) {
   };
   CHECK(add_chunk(&module, exact_fallback_words, 3, 0x80003D80u));
 
+  const u32 inline_fallback_words[] = {
+      0x38840005u,
+      0x38840007u,
+      0x4E800020u,
+  };
+  CHECK(add_chunk(&module, inline_fallback_words, 3, 0x80003DA0u));
+  CHECK(force_first_block_fallback(&module, 1u));
+
+  const u32 control_fallback_words[] = {
+      0x48000004u,
+      0x4E800020u,
+  };
+  CHECK(add_chunk(&module, control_fallback_words, 2, 0x80003DB0u));
+  CHECK(force_first_block_fallback(&module, 1u));
+
+  DolLLVMFunctionRange inlineFallbackProbe{};
+  inlineFallbackProbe.start = 0x80003DA0u;
+  inlineFallbackProbe.end = 0x80003DACu;
+  CHECK(dolllvm_analyze_function_abi(find_function(&module, 0x80003DA0u),
+                                     &inlineFallbackProbe));
+  CHECK((inlineFallbackProbe.abi_blockers & DOLLLVM_ABI_BLOCK_FALLBACK) != 0u);
+  CHECK((inlineFallbackProbe.abi_blockers & DOLLLVM_ABI_BLOCK_CONTROL) == 0u);
+  dolllvm_enable_native_services(&inlineFallbackProbe, 1u);
+  CHECK((inlineFallbackProbe.abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE) != 0u);
+
+  DolLLVMFunctionRange controlFallbackProbe{};
+  controlFallbackProbe.start = 0x80003DB0u;
+  controlFallbackProbe.end = 0x80003DB8u;
+  CHECK(dolllvm_analyze_function_abi(find_function(&module, 0x80003DB0u),
+                                     &controlFallbackProbe));
+  CHECK((controlFallbackProbe.abi_blockers & DOLLLVM_ABI_BLOCK_FALLBACK) != 0u);
+  CHECK((controlFallbackProbe.abi_blockers & DOLLLVM_ABI_BLOCK_CONTROL) != 0u);
+  dolllvm_enable_native_services(&controlFallbackProbe, 1u);
+  CHECK((controlFallbackProbe.abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE) == 0u);
+
+  const u32 structured_outer_words[] = {
+      branch(true, 0x100u),
+      0x4E800020u,
+  };
+  const u32 structured_middle_words[] = {
+      0x38630001u,
+      branch(true, 0xFCu),
+      0x4E800020u,
+  };
+  const u32 structured_leaf_words[] = {
+      0x38840001u,
+      0x4E800020u,
+  };
+  CHECK(add_chunk(&module, structured_outer_words, 2, 0x80004A00u));
+  CHECK(add_chunk(&module, structured_middle_words, 3, 0x80004B00u));
+  CHECK(add_chunk(&module, structured_leaf_words, 2, 0x80004C00u));
+
+  const u32 exact_mem2_words[] = {
+      0x3C809000u, // lis r4, 0x9000
+      0x80640600u, // lwz r3, 0x600(r4)
+      0x90640604u, // stw r3, 0x604(r4)
+      0x4E800020u,
+  };
+  const u32 bounded_mem1_words[] = {
+      0x3C808000u, // lis r4, 0x8000
+      0x70A503FCu, // andi. r5, r5, 0x03fc
+      xform(266, 4, 4, 5),
+      0x80640000u, // lwz r3, 0(r4)
+      0x90640004u, // stw r3, 4(r4)
+      0x4E800020u,
+  };
+  const u32 bounded_mem2_words[] = {
+      0x3C809000u, // lis r4, 0x9000
+      0x70A503FCu, // andi. r5, r5, 0x03fc
+      xform(266, 4, 4, 5),
+      0x80640000u, // lwz r3, 0(r4)
+      0x90640004u, // stw r3, 4(r4)
+      0x4E800020u,
+  };
+  CHECK(add_chunk(&module, exact_mem2_words, 4, 0x80004D00u));
+  CHECK(add_chunk(&module, bounded_mem1_words, 6, 0x80004D20u));
+  CHECK(add_chunk(&module, bounded_mem2_words, 6, 0x80004D40u));
+
+  const u32 mismatch_outer_words[] = {
+      mfspr(0, 8), branch(true, 0xFCu), mtspr(0, 8), 0x4E800020u,
+  };
+  const u32 mismatch_callee_words[] = {
+      0x3C608123u, // lis r3, 0x8123
+      0x60634000u, // ori r3, r3, 0x4000
+      mtspr(3, 8),
+      0x4E800020u,
+  };
+  const u32 nested_fallback_outer_words[] = {
+      mfspr(0, 8), 0x38630001u, branch(true, 0xF8u), mtspr(0, 8),
+      0x4E800020u,
+  };
+  const u32 nested_fallback_callee_words[] = {
+      0x38840005u,
+      0x4E800020u,
+  };
+  CHECK(add_chunk(&module, mismatch_outer_words, 4, 0x80004E00u));
+  CHECK(add_chunk(&module, mismatch_callee_words, 4, 0x80004F00u));
+  CHECK(add_chunk(&module, nested_fallback_outer_words, 5, 0x80005000u));
+  CHECK(add_chunk(&module, nested_fallback_callee_words, 2, 0x80005100u));
+  CHECK(force_first_block_fallback(&module, 1u));
+
   CHECK(dolir_verify(&module, stderr));
   DolLLVMOptions options{};
   options.optimization_level = 2;
@@ -549,22 +813,34 @@ int main(int argc, char **argv) {
   options.fixed_memory_layout = 1;
   options.ram_size = GC_MAIN_RAM_SIZE;
   options.mem2_size = WII_MEM2_SIZE;
-  DolLLVMFunctionRange ranges[16]{};
-  const u32 range_bounds[16][2] = {
+  DolLLVMFunctionRange ranges[32]{};
+  const u32 range_bounds[32][2] = {
       {0x80002400u, 0x80002408u}, {0x80002600u, 0x80002604u},
       {0x80002700u, 0x80002704u}, {0x80002D00u, 0x80002D04u},
-      {0x80002E00u, 0x80002E04u}, {0x80003300u, 0x80003310u},
+      {0x80002E00u, 0x80002E04u}, {0x80003100u, 0x80003110u},
+      {0x80003120u, 0x80003128u}, {0x80003140u, 0x80003154u},
+      {0x80003300u, 0x80003310u},
       {0x80003500u, 0x80003514u}, {0x80003600u, 0x80003608u},
-      {0x80003B00u, 0x80003B08u}, {0x80003B08u, 0x80003B14u},
-      {0x80003C00u, 0x80003C08u}, {0x80003D20u, 0x80003D28u},
-      {0x80003D30u, 0x80003D3Cu}, {0x80003D40u, 0x80003D5Cu},
-      {0x80003D60u, 0x80003D70u}, {0x80003D80u, 0x80003D8Cu},
+      {0x80003A60u, 0x80003A74u}, {0x80003B00u, 0x80003B08u},
+      {0x80003B08u, 0x80003B14u}, {0x80003C00u, 0x80003C08u},
+      {0x80003D20u, 0x80003D28u}, {0x80003D30u, 0x80003D3Cu},
+      {0x80003D40u, 0x80003D5Cu}, {0x80003D60u, 0x80003D70u},
+      {0x80003D80u, 0x80003D8Cu},
+      {0x80003DA0u, 0x80003DACu},
+      {0x80003DB0u, 0x80003DB8u},
+      {0x80004A00u, 0x80004A08u}, {0x80004B00u, 0x80004B0Cu},
+      {0x80004C00u, 0x80004C08u},
+      {0x80004D00u, 0x80004D10u}, {0x80004D20u, 0x80004D38u},
+      {0x80004D40u, 0x80004D58u}, {0x80004E00u, 0x80004E10u},
+      {0x80004F00u, 0x80004F10u}, {0x80005000u, 0x80005014u},
+      {0x80005100u, 0x80005108u},
   };
   for (u32 index = 0; index < sizeof(range_bounds) / sizeof(range_bounds[0]);
        index++) {
     ranges[index].start = range_bounds[index][0];
     ranges[index].end = range_bounds[index][1];
   }
+  ranges[21].abi_flags = DOLLLVM_FUNCTION_ABI_NATIVE;
   options.function_ranges = ranges;
   options.function_range_count = (u32)(sizeof(ranges) / sizeof(ranges[0]));
   CHECK(dolllvm_emit_object(&module, argv[1], &options, stderr));

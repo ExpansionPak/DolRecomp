@@ -465,10 +465,57 @@ llvm_range_for(const DolLLVMFunctionRange* ranges, u32 count, u32 address) {
     return NULL;
 }
 
+static u32 llvm_call_target_count(const DolIRTerminator* term) {
+    return term->kind == DOLIR_TERM_COND_BRANCH ? 2u
+           : term->kind == DOLIR_TERM_FALLTHROUGH ||
+                     term->kind == DOLIR_TERM_BRANCH
+               ? 1u
+           : term->kind == DOLIR_TERM_INDIRECT ? 2u
+                                                : 0u;
+}
+
+static int build_llvm_range_module(const LoadedCodeSection* sections,
+                                   u32 section_count,
+                                   const DolLLVMFunctionRange* range,
+                                   DolIRModule* module) {
+    const LoadedCodeSection* section = NULL;
+    for (u32 s = 0; s < section_count; s++) {
+        u32 section_end = sections[s].address + sections[s].size;
+        if (range->start >= sections[s].address && range->end <= section_end) {
+            section = &sections[s];
+            break;
+        }
+    }
+    if (!section || !section->data)
+        return 0;
+    u32 start = (range->start - section->address) / 4u;
+    u32 count = (range->end - range->start) / 4u;
+    PPCInst* instructions =
+        (PPCInst*)malloc((size_t)count * sizeof(*instructions));
+    if (!instructions)
+        return 0;
+    for (u32 i = 0; i < count; i++) {
+        u32 raw = read_be32(section->data + (start + i) * 4u);
+        instructions[i] =
+            ppc_decode(raw, section->address + (start + i) * 4u);
+        if (instructions[i].op == PPC_OP_UNKNOWN &&
+            embedded_data_word(section->embedded_data_mode, raw))
+            instructions[i].embedded_data = true;
+    }
+    dolir_module_init(module);
+    int ok = dolir_build_chunk(module, instructions, count,
+                               section->address + start * 4u);
+    free(instructions);
+    if (!ok)
+        dolir_module_free(module);
+    return ok;
+}
+
 static int append_llvm_abi_edge(DolLLVMCallEdge** edges, u32* count,
-                                u32* capacity, u32 caller, u32 callee,
-                                const u64* live_after,
-                                const u64* defined_before) {
+                                u32* capacity, u32 caller, u32 callsite_pc,
+                                u32 callee, const u64* live_after,
+                                const u64* defined_before,
+                                const u64* may_dirty_before) {
     if (*count == *capacity) {
         u32 next = *capacity ? *capacity * 2u : 256u;
         DolLLVMCallEdge* resized =
@@ -479,11 +526,14 @@ static int append_llvm_abi_edge(DolLLVMCallEdge** edges, u32* count,
         *capacity = next;
     }
     (*edges)[*count].caller_start = caller;
+    (*edges)[*count].callsite_pc = callsite_pc;
     (*edges)[*count].callee_address = callee;
     memcpy((*edges)[*count].live_after, live_after,
            sizeof((*edges)[*count].live_after));
     memcpy((*edges)[*count].defined_before, defined_before,
            sizeof((*edges)[*count].defined_before));
+    memcpy((*edges)[*count].may_dirty_before, may_dirty_before,
+           sizeof((*edges)[*count].may_dirty_before));
     (*count)++;
     return 1;
 }
@@ -495,79 +545,129 @@ static int prepare_llvm_function_abis(const LoadedCodeSection* sections,
     DolLLVMCallEdge* edges = NULL;
     u32 edge_count = 0;
     u32 edge_capacity = 0;
+
     for (u32 range_index = 0; range_index < range_count; range_index++) {
-        const LoadedCodeSection* section = NULL;
-    for (u32 s = 0; s < section_count; s++) {
-            u32 section_end = sections[s].address + sections[s].size;
-            if (ranges[range_index].start >= sections[s].address &&
-                ranges[range_index].end <= section_end) {
-                section = &sections[s];
-                break;
-            }
-        }
-        if (!section || !section->data)
+        DolIRModule module;
+        if (!build_llvm_range_module(sections, section_count,
+                                     &ranges[range_index], &module))
             goto fail;
-        u32 start = (ranges[range_index].start - section->address) / 4u;
-        u32 count = (ranges[range_index].end - ranges[range_index].start) / 4u;
-            PPCInst* instructions =
-                (PPCInst*)malloc((size_t)count * sizeof(*instructions));
-            if (!instructions)
-                goto fail;
-            for (u32 i = 0; i < count; i++) {
-                u32 raw = read_be32(section->data + (start + i) * 4u);
-            instructions[i] =
-                ppc_decode(raw, section->address + (start + i) * 4u);
-                if (instructions[i].op == PPC_OP_UNKNOWN &&
-                    embedded_data_word(section->embedded_data_mode, raw))
-                    instructions[i].embedded_data = true;
-            }
-            DolIRModule module;
-            dolir_module_init(&module);
-            int ok = dolir_build_chunk(&module, instructions, count,
-                                       section->address + start * 4u);
-            free(instructions);
-        if (!ok || !dolllvm_analyze_function_abi(&module.functions[0],
-                                              &ranges[range_index])) {
-                dolir_module_free(&module);
-                goto fail;
-            }
-            const DolIRFunction* function = &module.functions[0];
-            for (u32 block = 0; block < function->block_count; block++) {
+        if (!dolllvm_analyze_function_abi(&module.functions[0],
+                                          &ranges[range_index])) {
+            dolir_module_free(&module);
+            goto fail;
+        }
+        const DolIRFunction* function = &module.functions[0];
+        for (u32 block = 0; block < function->block_count; block++) {
             const DolIRTerminator* term = &function->blocks[block].terminator;
             u64 live_after[DOLIR_STATE_MASK_WORDS] = {0};
             u64 defined_before[DOLIR_STATE_MASK_WORDS] = {0};
+            u64 may_dirty_before[DOLIR_STATE_MASK_WORDS] = {0};
             if (!dolllvm_analyze_callsite_state(
-                    function, block, ranges[range_index].may_def_state,
-                    live_after, defined_before)) {
+                    function, block, ranges[range_index].may_def_state, NULL,
+                    live_after, defined_before, may_dirty_before)) {
                 dolir_module_free(&module);
                 goto fail;
             }
-            u32 targets = term->kind == DOLIR_TERM_COND_BRANCH ? 2u
-                          : term->kind == DOLIR_TERM_FALLTHROUGH ||
-                                  term->kind == DOLIR_TERM_BRANCH
-                              ? 1u
-                          : term->kind == DOLIR_TERM_INDIRECT ? 2u
-                                                              : 0u;
-                for (u32 slot = 0; slot < targets; slot++) {
-                    const DolLLVMFunctionRange* target = llvm_range_for(
-                        ranges, range_count, term->target_addresses[slot]);
-                    if (target && target->start != ranges[range_index].start &&
-                    !append_llvm_abi_edge(&edges, &edge_count, &edge_capacity,
-                            ranges[range_index].start,
-                                          term->target_addresses[slot],
-                                          live_after, defined_before)) {
-                        dolir_module_free(&module);
-                        goto fail;
-                    }
+            u32 targets = llvm_call_target_count(term);
+            for (u32 slot = 0; slot < targets; slot++) {
+                const DolLLVMFunctionRange* target = llvm_range_for(
+                    ranges, range_count, term->target_addresses[slot]);
+                if (target && target->start != ranges[range_index].start &&
+                    !append_llvm_abi_edge(
+                        &edges, &edge_count, &edge_capacity,
+                        ranges[range_index].start, term->guest_pc,
+                        term->target_addresses[slot], live_after,
+                        defined_before, may_dirty_before)) {
+                    dolir_module_free(&module);
+                    goto fail;
                 }
             }
-            dolir_module_free(&module);
         }
+        dolir_module_free(&module);
+    }
+
     if (runtime == DOLLLVM_RUNTIME_MODERNGEKKO)
         dolllvm_enable_native_services(ranges, range_count);
     if (!dolllvm_propagate_function_abis(ranges, range_count, edges,
                                          edge_count))
         goto fail;
+
+    u32 edge_index = 0;
+    for (u32 range_index = 0; range_index < range_count; range_index++) {
+        DolIRModule module;
+        if (!build_llvm_range_module(sections, section_count,
+                                     &ranges[range_index], &module))
+            goto fail;
+        const DolIRFunction* function = &module.functions[0];
+        size_t post_word_count =
+            (size_t)function->block_count * DOLIR_STATE_MASK_WORDS;
+        u64* post_call_defs =
+            (u64*)calloc(post_word_count ? post_word_count : 1u, sizeof(u64));
+        if (!post_call_defs) {
+            dolir_module_free(&module);
+            goto fail;
+        }
+        for (u32 block = 0; block < function->block_count; block++) {
+            const DolIRTerminator* term = &function->blocks[block].terminator;
+            if (!term->linked)
+                continue;
+            u32 targets = llvm_call_target_count(term);
+            for (u32 slot = 0; slot < targets; slot++) {
+                const DolLLVMFunctionRange* target = llvm_range_for(
+                    ranges, range_count, term->target_addresses[slot]);
+                if (!target || target->start == ranges[range_index].start ||
+                    !(target->abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE))
+                    continue;
+                for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++)
+                    post_call_defs[(size_t)block * DOLIR_STATE_MASK_WORDS +
+                                   word] |= target->output_state[word];
+            }
+        }
+        for (u32 block = 0; block < function->block_count; block++) {
+            const DolIRTerminator* term = &function->blocks[block].terminator;
+            u64 ignored_live_after[DOLIR_STATE_MASK_WORDS] = {0};
+            u64 ignored_defined_before[DOLIR_STATE_MASK_WORDS] = {0};
+            u64 may_dirty_before[DOLIR_STATE_MASK_WORDS] = {0};
+            if (!dolllvm_analyze_callsite_state(
+                    function, block, ranges[range_index].may_def_state,
+                    post_call_defs, ignored_live_after, ignored_defined_before,
+                    may_dirty_before)) {
+                free(post_call_defs);
+                dolir_module_free(&module);
+                goto fail;
+            }
+            u32 targets = llvm_call_target_count(term);
+            for (u32 slot = 0; slot < targets; slot++) {
+                const DolLLVMFunctionRange* target = llvm_range_for(
+                    ranges, range_count, term->target_addresses[slot]);
+                if (!target || target->start == ranges[range_index].start)
+                    continue;
+                if (edge_index >= edge_count ||
+                    edges[edge_index].caller_start != ranges[range_index].start ||
+                    edges[edge_index].callsite_pc != term->guest_pc ||
+                    edges[edge_index].callee_address !=
+                        term->target_addresses[slot]) {
+                    free(post_call_defs);
+                    dolir_module_free(&module);
+                    goto fail;
+                }
+                memcpy(edges[edge_index].may_dirty_before, may_dirty_before,
+                       sizeof(edges[edge_index].may_dirty_before));
+                edge_index++;
+            }
+        }
+        free(post_call_defs);
+        dolir_module_free(&module);
+    }
+    if (edge_index != edge_count ||
+        !dolllvm_propagate_function_abis(ranges, range_count, edges,
+                                         edge_count))
+        goto fail;
+    if (runtime == DOLLLVM_RUNTIME_MODERNGEKKO)
+        for (u32 range_index = 0; range_index < range_count; range_index++)
+            memset(ranges[range_index].escape_state, 0,
+                   sizeof(ranges[range_index].escape_state));
+
     free(edges);
     return 1;
 fail:
@@ -1003,6 +1103,7 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
         fprintf(header, "#ifndef RECOMP_GENERATED_H\n"
                         "#define RECOMP_GENERATED_H\n\n"
                         "#include <stdbool.h>\n"
+                        "#include <stddef.h>\n"
                         "#include <stdatomic.h>\n"
                         "#include <stdint.h>\n"
                         "#include \"Core/PowerPC/Native/NativeModuleABI.h\"\n\n"
@@ -1043,7 +1144,10 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
     DolLLVMFunctionRange* ranges = NULL;
     u32* entry_points = NULL;
     u32* partition_points = NULL;
+    u32* native_entries = NULL;
     u32 entry_point_count = 0;
+    u32 native_entry_count = 0;
+    u32 native_entry_capacity = 0;
     entry_points = collect_llvm_entry_points(
         sections, section_count, entry_point, symbols, &entry_point_count);
     if (!entry_points)
@@ -1072,6 +1176,21 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
         goto fail;
     dolllvm_apply_native_abi_policy(
         ranges, range_count, (DolLLVMNativeABIPolicy)options->llvm_native_abi);
+    if (modern_runtime) {
+        for (u32 i = 0; i < range_count; i++) {
+            if (!(ranges[i].abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE))
+                continue;
+            u32 slots = (ranges[i].end - ranges[i].start) / 4u;
+            if (UINT32_MAX - native_entry_capacity < slots)
+                goto fail;
+            native_entry_capacity += slots;
+        }
+        native_entries = (u32*)malloc(
+            (size_t)(native_entry_capacity ? native_entry_capacity : 1u) *
+            sizeof(*native_entries));
+        if (!native_entries)
+            goto fail;
+    }
     if (getenv("DOLRECOMP_LLVM_ABI_STATS")) {
         for (u32 variant = 0; variant < profile_count; variant++) {
             DolLLVMOptions stats_options = {0};
@@ -1293,6 +1412,26 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                 goto fail;
             }
             const DolIRFunction* audit_function = &audit.functions[0];
+            if (modern_runtime &&
+                (range->abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE)) {
+                DolLLVMOptions entry_options = {0};
+                entry_options.runtime = DOLLLVM_RUNTIME_MODERNGEKKO;
+                entry_options.function_ranges = range;
+                entry_options.function_range_count = 1u;
+                entry_options.entry_points = entry_points;
+                entry_options.entry_point_count = entry_point_count;
+                u32 available = native_entry_capacity - native_entry_count;
+                u32 added = dolllvm_collect_native_entries(
+                    audit_function, &entry_options,
+                    native_entries + native_entry_count, available);
+                if (added > available) {
+                    dolir_module_free(&audit);
+                    free(chunk_jobs);
+                    free(insts);
+                    goto fail;
+                }
+                native_entry_count += added;
+            }
             for (u32 i = 0; i < audit_function->block_count; i++) {
                 if (audit_function->blocks[i].terminator.kind !=
                     DOLIR_TERM_FALLBACK)
@@ -1383,6 +1522,17 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
     if (emitted_range_count != range_count)
         goto fail;
 
+    if (native_entry_count) {
+        qsort(native_entries, native_entry_count, sizeof(*native_entries),
+              compare_u32);
+        u32 unique = 0;
+        for (u32 i = 0; i < native_entry_count; i++) {
+            if (!unique || native_entries[i] != native_entries[unique - 1u])
+                native_entries[unique++] = native_entries[i];
+        }
+        native_entry_count = unique;
+    }
+
     {
         char report[1100];
         if (snprintf(report, sizeof(report), "%s_smc.txt", stem) >=
@@ -1394,7 +1544,9 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                    report);
     }
     if (modern_runtime) {
-        emit_native_module(header, &funcs, options->game_id);
+        if (!emit_native_module(header, &funcs, options->game_id,
+                                native_entries, native_entry_count))
+            goto fail;
     } else {
     emit_dispatch_helpers(header, &funcs, entry_point);
     emit_llvm_variant_table(header, &funcs, profiles, profile_count,
@@ -1410,6 +1562,7 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
     free(ranges);
     free(entry_points);
     free(partition_points);
+    free(native_entries);
     printf("done!\n  header: %s\n  objects: %s (%u files)\n", header_path,
            chunks_dir, file_count);
     return 1;
@@ -1420,6 +1573,7 @@ fail:
     free(ranges);
     free(entry_points);
     free(partition_points);
+    free(native_entries);
     fclose(header);
     fclose(manifest);
     fclose(fallback_report);

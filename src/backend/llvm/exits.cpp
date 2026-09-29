@@ -10,6 +10,12 @@ namespace dolllvm {
 
 using namespace llvm;
 
+namespace {
+
+constexpr u32 StructuredExitFlag = 0x80000000u;
+
+} // namespace
+
 void FunctionEmitter::emitEntry() {
   builder_.SetInsertPoint(entry_);
   StructType *chainTy = chainType();
@@ -61,6 +67,33 @@ void FunctionEmitter::emitEntry() {
     Value *initial = native_abi_ && native_inputs_[slot]
                          ? static_cast<Value *>(native_inputs_[slot])
                          : loadContext(stateSlot);
+    if (modern_runtime_ && native_abi_ && !native_inputs_[slot] &&
+        stateSlot != DOLIR_STATE_PC && stateSlot != DOLIR_STATE_TIMEBASE &&
+        stateSlot != DOLIR_STATE_PROGRAM_EXCEPTION &&
+        stateSlot != DOLIR_STATE_DOWNCOUNT) {
+      Type *i64 = Type::getInt64Ty(context_);
+      ArrayType *valuesType = ArrayType::get(i64, DOLIR_STATE_COUNT);
+      ArrayType *maskType = ArrayType::get(i64, DOLIR_STATE_MASK_WORDS);
+      Value *values = builder_.CreateStructGEP(chainTy, chain_, 8);
+      Value *dirtyMask = builder_.CreateStructGEP(chainTy, chain_, 9);
+      const u32 word = slot / 64u;
+      const u32 bit = slot & 63u;
+      Value *maskWord = builder_.CreateLoad(
+          i64, builder_.CreateInBoundsGEP(
+                   maskType, dirtyMask,
+                   {builder_.getInt64(0), builder_.getInt64(word)}));
+      Value *dirty = builder_.CreateICmpNE(
+          builder_.CreateAnd(maskWord, builder_.getInt64(u64(1) << bit)),
+          builder_.getInt64(0));
+      Value *chained = builder_.CreateLoad(
+          i64, builder_.CreateInBoundsGEP(
+                   valuesType, values,
+                   {builder_.getInt64(0), builder_.getInt64(slot)}));
+      Type *target = type(dolir_state_type(stateSlot));
+      chained = target->isDoubleTy() ? builder_.CreateBitCast(chained, target)
+                                     : builder_.CreateZExtOrTrunc(chained, target);
+      initial = builder_.CreateSelect(dirty, chained, initial);
+    }
     builder_.CreateStore(initial, state_[slot]);
   }
   BasicBlock *nativeEntry =
@@ -163,30 +196,13 @@ void FunctionEmitter::emitEntry() {
 
 void FunctionEmitter::syncDirtyState() {
   if (modern_runtime_) {
-    ArrayType *valuesType =
-        ArrayType::get(Type::getInt64Ty(context_), DOLIR_STATE_COUNT);
-    Value *values = builder_.CreateStructGEP(chainType(), chain_, 8);
-    auto stage = [&](DolIRStateSlot slot, Value *value) {
-      if (value->getType()->isDoubleTy())
-        value = builder_.CreateBitCast(value, Type::getInt64Ty(context_));
-      else
-        value = builder_.CreateZExtOrTrunc(value,
-                                           Type::getInt64Ty(context_));
-      builder_.CreateStore(
-          value, builder_.CreateInBoundsGEP(
-                     valuesType, values,
-                     {builder_.getInt64(0), builder_.getInt64(slot)}));
-    };
+    u64 localDirty[DOLIR_STATE_MASK_WORDS]{};
     for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
-      if (!dirty_[slot] || slot == DOLIR_STATE_FPSCR)
+      if (!dirty_[slot])
         continue;
-      auto stateSlot = static_cast<DolIRStateSlot>(slot);
-      if (!slotInMemory(stateSlot))
-        stage(stateSlot, stateValue(stateSlot));
+      localDirty[slot / 64u] |= u64(1) << (slot & 63u);
     }
-    materializeFPRF();
-    if (dirty_[DOLIR_STATE_FPSCR])
-      stage(DOLIR_STATE_FPSCR, stateValue(DOLIR_STATE_FPSCR));
+    stageStateMask(localDirty);
     return;
   }
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
@@ -204,44 +220,18 @@ void FunctionEmitter::syncDirtyState() {
     storeContext(DOLIR_STATE_FPSCR, stateValue(DOLIR_STATE_FPSCR));
 }
 
-void FunctionEmitter::commitModernState() {
-  if (!modern_runtime_)
-    return;
-  ArrayType *maskType =
-      ArrayType::get(Type::getInt64Ty(context_), DOLIR_STATE_MASK_WORDS);
-  const std::string name = source_.name + std::string(".dirty");
-  GlobalVariable *mask = module_.getGlobalVariable(name, true);
-  if (!mask) {
-    std::vector<Constant *> words;
-    for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++) {
-      u64 bits = 0;
-      for (u32 bit = 0; bit < 64; bit++) {
-        const u32 slot = word * 64u + bit;
-        if (slot < DOLIR_STATE_COUNT && dirty_[slot])
-          bits |= 1ull << bit;
-      }
-      words.push_back(builder_.getInt64(bits));
-    }
-    mask = new GlobalVariable(module_, maskType, true,
-                              GlobalValue::PrivateLinkage,
-                              ConstantArray::get(maskType, words), name);
-  }
-  Type *pointer = PointerType::getUnqual(context_);
-  FunctionCallee commit = module_.getOrInsertFunction(
-      "moderngekko_commit_state",
-      FunctionType::get(Type::getVoidTy(context_),
-                        {pointer, pointer, pointer}, false));
-  if (auto *function = dyn_cast<Function>(commit.getCallee())) {
-    function->addFnAttr(Attribute::Cold);
-    function->addFnAttr(Attribute::NoUnwind);
-  }
-  Value *values = builder_.CreateStructGEP(chainType(), chain_, 8);
-  CallInst *call = builder_.CreateCall(commit, {state_interface_, values, mask});
-  call->addFnAttr(Attribute::Cold);
-  call->addFnAttr(Attribute::NoUnwind);
-}
-
 void FunctionEmitter::returnFromBody() {
+  if (modern_runtime_ && native_abi_ && cold_escapes_) {
+    Value *reasonPtr =
+        builder_.CreateStructGEP(chainType(), chain_, 7);
+    Value *reason =
+        builder_.CreateLoad(Type::getInt32Ty(context_), reasonPtr);
+    builder_.CreateStore(
+        builder_.CreateOr(reason, builder_.getInt32(StructuredExitFlag)),
+        reasonPtr);
+    returnStructuredExit();
+    return;
+  }
   if (!cold_escapes_)
     flushCallCounters();
   if (native_abi_) {
@@ -273,28 +263,26 @@ void FunctionEmitter::returnFromBody() {
   }
 }
 
-void FunctionEmitter::materialize(u32 pc) {
-  materialize(ConstantInt::get(Type::getInt32Ty(context_), pc));
+Value *FunctionEmitter::structuredExitPending() {
+  if (!modern_runtime_ || !native_abi_ || !cold_escapes_)
+    return builder_.getFalse();
+  Value *reason = builder_.CreateLoad(
+      Type::getInt32Ty(context_), builder_.CreateStructGEP(chainType(), chain_, 7));
+  return builder_.CreateICmpNE(
+      builder_.CreateAnd(reason, builder_.getInt32(StructuredExitFlag)),
+      builder_.getInt32(0));
 }
 
-void FunctionEmitter::materialize(Value *pc) {
-  syncDirtyState();
-  if (modern_runtime_) {
-    builder_.CreateStore(pc, builder_.CreateStructGEP(chainType(), chain_, 5));
-    builder_.CreateStore(builder_.CreateAdd(pc, builder_.getInt32(4)),
-                         builder_.CreateStructGEP(chainType(), chain_, 6));
-  } else {
-    storeContext(DOLIR_STATE_PC, pc);
+void FunctionEmitter::returnStructuredExit() {
+  if (!modern_runtime_ || !native_abi_ || !cold_escapes_) {
+    returnFromBody();
+    return;
   }
-  settleCycles();
-  commitModernState();
-}
-void FunctionEmitter::sideExit(u32 pc, u32 reason) {
-  if (modern_runtime_)
-    builder_.CreateStore(builder_.getInt32(reason),
-                         builder_.CreateStructGEP(chainType(), chain_, 7));
-  materialize(pc);
-  returnFromBody();
+  Type *resultType = nativeResultType(abi_range_);
+  if (!resultType->isVoidTy())
+    builder_.CreateRet(UndefValue::get(resultType));
+  else
+    builder_.CreateRetVoid();
 }
 
 } // namespace dolllvm
