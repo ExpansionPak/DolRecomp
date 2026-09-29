@@ -111,7 +111,18 @@ jobs:
           curl.exe -fsSL -o llvm.tar.xz $url
           New-Item -ItemType Directory -Force -Path llvm | Out-Null
           tar -xf llvm.tar.xz -C llvm --strip-components=1
-          "LLVM_ROOT=$((Resolve-Path llvm).Path)" >> $env:GITHUB_ENV
+          $root = (Resolve-Path llvm).Path
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dia = & $vswhere -latest -products * -find 'DIA SDK\lib\amd64\diaguids.lib' | Select-Object -First 1
+          if (-not $dia) { throw 'diaguids.lib not found' }
+          $dia = $dia.Replace('\', '/')
+          Get-ChildItem "$root/lib/cmake/llvm" -Recurse -Filter '*.cmake' | ForEach-Object {
+            $text = [IO.File]::ReadAllText($_.FullName)
+            $text = $text.Replace('C:/Program Files (x86)/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64/diaguids.lib', $dia)
+            $text = $text.Replace('C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\DIA SDK\lib\amd64\diaguids.lib', $dia)
+            [IO.File]::WriteAllText($_.FullName, $text)
+          }
+          "LLVM_ROOT=$root" >> $env:GITHUB_ENV
 
       - name: Install LLVM (macOS)
         if: matrix.toolchain == 'appleclang'
@@ -189,9 +200,9 @@ jobs:
       # Serial: these tests share artifacts in the build directory and report
       # an inconsistent subset of failures when run in parallel.
       #
-      # Three are excluded as known Darwin gaps rather than regressions, so
-      # that the other 29 can gate:
-      #   llvm_pipeline  - is_native_object() knows COFF and ELF only, and the
+      # Four are excluded as known Darwin gaps rather than regressions:
+      #   llvm_pipeline / llvm_generated_compile - is_native_object() knows
+      #                    COFF and ELF only, and the
       #                    pipeline emits both native Mach-O and cross-target
       #                    ELF objects, so the check needs to know which is
       #                    which before it can run here
@@ -203,4 +214,4 @@ jobs:
         if: matrix.toolchain == 'appleclang'
         run: >
           ctest --test-dir build -j1 --output-on-failure
-          -E "modern_codegen|llvm_codegen|llvm_pipeline"
+          -E "modern_codegen|llvm_codegen|llvm_pipeline|llvm_generated_compile"

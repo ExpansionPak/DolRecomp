@@ -10,6 +10,52 @@ namespace dolllvm {
 
 using namespace llvm;
 
+void collectRegionLeaders(const DolIRFunction &function, bool modernRuntime,
+                          bool nativeABI, const u32 *entryPoints,
+                          u32 entryPointCount, std::vector<bool> &leaders) {
+  leaders.assign(function.block_count, false);
+  if (!function.block_count)
+    return;
+  leaders[0] = true;
+  for (u32 i = 0; i < function.block_count; i++) {
+    if (modernRuntime && nativeABI && needsInterpreter(function.blocks[i])) {
+      leaders[i] = true;
+      if (i + 1u < function.block_count)
+        leaders[i + 1u] = true;
+    }
+    const DolIRTerminator &term = function.blocks[i].terminator;
+    if (term.kind == DOLIR_TERM_FALLBACK)
+      leaders[i] = true;
+    if (i + 1u < function.block_count && term.kind != DOLIR_TERM_FALLTHROUGH)
+      leaders[i + 1u] = true;
+    if (i + 1u < function.block_count) {
+      const DolIRBlock &body = function.blocks[i];
+      for (u32 n = 0; n < body.instruction_count; n++) {
+        if (dolir_state_mask_test(body.instructions[n].state_defs,
+                                  DOLIR_STATE_MSR)) {
+          leaders[i + 1u] = true;
+          break;
+        }
+      }
+    }
+    u32 count = term.kind == DOLIR_TERM_COND_BRANCH ? 2u
+                : term.kind == DOLIR_TERM_BRANCH    ? 1u
+                : term.kind == DOLIR_TERM_INDIRECT  ? 2u
+                                                    : 0u;
+    for (u32 edge = 0; edge < count; edge++) {
+      if (term.targets[edge] != DOLIR_NO_BLOCK)
+        leaders[term.targets[edge]] = true;
+    }
+  }
+  for (u32 i = 0; i < entryPointCount; i++) {
+    u32 address = entryPoints[i];
+    if (address < function.guest_start || address >= function.guest_end ||
+        ((address - function.guest_start) & 3u) != 0)
+      continue;
+    leaders[(address - function.guest_start) / 4u] = true;
+  }
+}
+
 bool FunctionEmitter::emitRegion(u32 index, raw_ostream &diagnostics) {
   resetFPRepresentations();
   known_state_.fill(nullptr);

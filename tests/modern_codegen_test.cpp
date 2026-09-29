@@ -88,10 +88,12 @@ int main(int argc, char **argv) {
   CHECK(cache != nullptr);
   CHECK(systemCall != nullptr);
   CHECK(rfi == nullptr);
-  CHECK(wrapper->arg_size() == 4);
-  CHECK(wrapper->getReturnType()->isStructTy());
-  CHECK(llvm::cast<llvm::StructType>(wrapper->getReturnType())
-            ->getNumElements() == 7);
+  CHECK(wrapper->arg_size() == 5);
+  CHECK(wrapper->getReturnType()->isVoidTy());
+  CHECK(wrapper->getArg(0)->hasStructRetAttr());
+  auto *wrapperExitType = llvm::dyn_cast<llvm::StructType>(
+      wrapper->getParamStructRetType(0));
+  CHECK(wrapperExitType != nullptr && wrapperExitType->getNumElements() == 7);
   CHECK(body->arg_size() >= 5);
   CHECK(body->getReturnType()->isStructTy());
   for (llvm::Type *field :

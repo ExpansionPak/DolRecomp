@@ -16,8 +16,8 @@ bool FunctionEmitter::emitModernWrapper(raw_ostream &diagnostics) {
   Type *i32 = Type::getInt32Ty(context_);
   StructType *exitType =
       StructType::get(context_, {i32, i32, i32, i32, i32, i32, i32});
-  FunctionType *wrapperType =
-      FunctionType::get(exitType, {pointer, pointer, i32, i32}, false);
+  FunctionType *wrapperType = FunctionType::get(
+      Type::getVoidTy(context_), {pointer, pointer, pointer, i32, i32}, false);
   const std::string wrapperName = symbolName(source_.name);
   Function *wrapper = module_.getFunction(wrapperName);
   if (!wrapper)
@@ -30,12 +30,15 @@ bool FunctionEmitter::emitModernWrapper(raw_ostream &diagnostics) {
   wrapper->setCallingConv(CallingConv::C);
   wrapper->setVisibility(GlobalValue::HiddenVisibility);
   wrapper->setDSOLocal(true);
-  wrapper->getArg(0)->setName("runtime");
-  wrapper->getArg(1)->setName("state");
-  wrapper->getArg(2)->setName("entry_pc");
-  wrapper->getArg(3)->setName("cycle_budget");
-  wrapper->getArg(0)->addAttr(Attribute::NonNull);
+  wrapper->getArg(0)->setName("result");
+  wrapper->getArg(0)->addAttr(Attribute::getWithStructRetType(context_, exitType));
+  wrapper->getArg(0)->addAttr(Attribute::NoAlias);
+  wrapper->getArg(1)->setName("runtime");
+  wrapper->getArg(2)->setName("state");
+  wrapper->getArg(3)->setName("entry_pc");
+  wrapper->getArg(4)->setName("cycle_budget");
   wrapper->getArg(1)->addAttr(Attribute::NonNull);
+  wrapper->getArg(2)->addAttr(Attribute::NonNull);
 
   BasicBlock *entry = BasicBlock::Create(context_, "entry", wrapper);
   IRBuilderBase::InsertPoint saved = builder_.saveIP();
@@ -43,9 +46,10 @@ bool FunctionEmitter::emitModernWrapper(raw_ostream &diagnostics) {
   Argument *savedStateInterface = state_interface_;
   Value *savedEntryPC = entry_pc_;
   builder_.SetInsertPoint(entry);
-  ctx_ = wrapper->getArg(0);
-  state_interface_ = wrapper->getArg(1);
-  entry_pc_ = wrapper->getArg(2);
+  Value *result = wrapper->getArg(0);
+  ctx_ = wrapper->getArg(1);
+  state_interface_ = wrapper->getArg(2);
+  entry_pc_ = wrapper->getArg(3);
 
   StructType *chainTy = chainType();
   AllocaInst *chain = builder_.CreateAlloca(chainTy, nullptr, "chain");
@@ -57,12 +61,12 @@ bool FunctionEmitter::emitModernWrapper(raw_ostream &diagnostics) {
   builder_.CreateStore(builder_.getInt64(0),
                        builder_.CreateStructGEP(chainTy, chain, 3));
   builder_.CreateStore(
-      builder_.CreateZExt(wrapper->getArg(3), Type::getInt64Ty(context_)),
+      builder_.CreateZExt(wrapper->getArg(4), Type::getInt64Ty(context_)),
       builder_.CreateStructGEP(chainTy, chain, 4));
-  builder_.CreateStore(wrapper->getArg(2),
+  builder_.CreateStore(wrapper->getArg(3),
                        builder_.CreateStructGEP(chainTy, chain, 5));
   builder_.CreateStore(
-      builder_.CreateAdd(wrapper->getArg(2), builder_.getInt32(4)),
+      builder_.CreateAdd(wrapper->getArg(3), builder_.getInt32(4)),
       builder_.CreateStructGEP(chainTy, chain, 6));
   builder_.CreateStore(builder_.getInt32(0),
                        builder_.CreateStructGEP(chainTy, chain, 7));
@@ -119,11 +123,11 @@ bool FunctionEmitter::emitModernWrapper(raw_ostream &diagnostics) {
   }
 
   Value *control = builder_.CreateOr(
-      builder_.CreateZExt(wrapper->getArg(2), Type::getInt64Ty(context_)),
+      builder_.CreateZExt(wrapper->getArg(3), Type::getInt64Ty(context_)),
       builder_.CreateShl(
           builder_.CreateZExt(returnPC, Type::getInt64Ty(context_)),
           builder_.getInt64(32)));
-  SmallVector<Value *, 32> arguments = {wrapper->getArg(0), wrapper->getArg(1),
+  SmallVector<Value *, 32> arguments = {wrapper->getArg(1), wrapper->getArg(2),
                                         chain, control};
   if (nativeCyclesInResult(abi_range_))
     arguments.push_back(builder_.getInt64(0));
@@ -163,27 +167,25 @@ bool FunctionEmitter::emitModernWrapper(raw_ostream &diagnostics) {
   builder_.CreateCondBr(structuredExit, structuredReturn, normalReturn);
 
   builder_.SetInsertPoint(structuredReturn);
-  Value *structuredResult = UndefValue::get(exitType);
-  structuredResult = builder_.CreateInsertValue(
-      structuredResult,
-      builder_.CreateAnd(rawReason, builder_.getInt32(0x7fffffffu)), 0);
-  structuredResult = builder_.CreateInsertValue(
-      structuredResult,
-      builder_.CreateLoad(i32, builder_.CreateStructGEP(chainTy, chain, 5)), 1);
-  structuredResult = builder_.CreateInsertValue(
-      structuredResult,
-      builder_.CreateLoad(i32, builder_.CreateStructGEP(chainTy, chain, 6)), 2);
-  structuredResult = builder_.CreateInsertValue(
-      structuredResult,
+  builder_.CreateStore(
+      builder_.CreateAnd(rawReason, builder_.getInt32(0x7fffffffu)),
+      builder_.CreateStructGEP(exitType, result, 0));
+  builder_.CreateStore(
+      builder_.CreateLoad(i32, builder_.CreateStructGEP(chainTy, chain, 5)),
+      builder_.CreateStructGEP(exitType, result, 1));
+  builder_.CreateStore(
+      builder_.CreateLoad(i32, builder_.CreateStructGEP(chainTy, chain, 6)),
+      builder_.CreateStructGEP(exitType, result, 2));
+  builder_.CreateStore(
       builder_.CreateTrunc(
           builder_.CreateLoad(Type::getInt64Ty(context_),
                               builder_.CreateStructGEP(chainTy, chain, 3)),
           i32),
-      3);
-  structuredResult = builder_.CreateInsertValue(structuredResult, builder_.getInt32(0), 4);
-  structuredResult = builder_.CreateInsertValue(structuredResult, builder_.getInt32(0), 5);
-  structuredResult = builder_.CreateInsertValue(structuredResult, builder_.getInt32(0), 6);
-  builder_.CreateRet(structuredResult);
+      builder_.CreateStructGEP(exitType, result, 3));
+  for (unsigned field = 4; field < 7; field++)
+    builder_.CreateStore(builder_.getInt32(0),
+                         builder_.CreateStructGEP(exitType, result, field));
+  builder_.CreateRetVoid();
 
   builder_.SetInsertPoint(normalReturn);
 
@@ -242,18 +244,18 @@ bool FunctionEmitter::emitModernWrapper(raw_ostream &diagnostics) {
           ? nativeCycleValue(body, abi_range_)
           : builder_.CreateLoad(Type::getInt64Ty(context_),
                                 builder_.CreateStructGEP(chainTy, chain, 3));
-  Value *normalExit = UndefValue::get(exitType);
-  normalExit = builder_.CreateInsertValue(normalExit, builder_.getInt32(0), 0);
-  normalExit = builder_.CreateInsertValue(normalExit, returnPC, 1);
-  normalExit = builder_.CreateInsertValue(
-      normalExit, builder_.CreateAdd(returnPC, builder_.getInt32(4)), 2);
-  normalExit = builder_.CreateInsertValue(
-      normalExit,
-      builder_.CreateTrunc(normalCycles, Type::getInt32Ty(context_)), 3);
-  normalExit = builder_.CreateInsertValue(normalExit, builder_.getInt32(0), 4);
-  normalExit = builder_.CreateInsertValue(normalExit, builder_.getInt32(0), 5);
-  normalExit = builder_.CreateInsertValue(normalExit, builder_.getInt32(0), 6);
-  builder_.CreateRet(normalExit);
+  builder_.CreateStore(builder_.getInt32(0),
+                       builder_.CreateStructGEP(exitType, result, 0));
+  builder_.CreateStore(returnPC, builder_.CreateStructGEP(exitType, result, 1));
+  builder_.CreateStore(builder_.CreateAdd(returnPC, builder_.getInt32(4)),
+                       builder_.CreateStructGEP(exitType, result, 2));
+  builder_.CreateStore(
+      builder_.CreateTrunc(normalCycles, Type::getInt32Ty(context_)),
+      builder_.CreateStructGEP(exitType, result, 3));
+  for (unsigned field = 4; field < 7; field++)
+    builder_.CreateStore(builder_.getInt32(0),
+                         builder_.CreateStructGEP(exitType, result, field));
+  builder_.CreateRetVoid();
 
   ctx_ = savedContext;
   state_interface_ = savedStateInterface;

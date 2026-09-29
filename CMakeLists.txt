@@ -464,6 +464,8 @@ if(DOLRECOMP_ENABLE_LLVM)
         DEPENDS llvm_fixture
         VERBATIM
     )
+    add_custom_target(llvm_fixture_outputs
+        DEPENDS ${DOLRECOMP_TEST_OBJECT} ${DOLRECOMP_TEST_IR})
     set_source_files_properties(${DOLRECOMP_TEST_OBJECT}
         PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
     set_source_files_properties(
@@ -485,6 +487,7 @@ if(DOLRECOMP_ENABLE_LLVM)
         PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
     add_executable(modern_memory_service_test
         tests/modern_memory_service_test.c ${DOLRECOMP_TEST_OBJECT}.native)
+    add_dependencies(modern_memory_service_test llvm_fixture_outputs)
     if(NOT WIN32)
         target_link_libraries(modern_memory_service_test PRIVATE m)
     endif()
@@ -505,18 +508,21 @@ if(DOLRECOMP_ENABLE_LLVM)
         tests/llvm_abi_execute_test.c
         ${DOLRECOMP_ABI_CALLER_OBJECT}
         ${DOLRECOMP_ABI_CALLEE_OBJECT})
+    add_dependencies(llvm_abi_execute_test llvm_fixture_outputs)
     target_link_libraries(llvm_abi_execute_test PRIVATE dr_cpu)
     add_test(NAME llvm_abi_execute COMMAND llvm_abi_execute_test)
     add_executable(llvm_abi_execute_compact_test
         tests/llvm_abi_execute_test.c
         ${DOLRECOMP_ABI_CALLER_OBJECT}.compact
         ${DOLRECOMP_ABI_CALLEE_OBJECT}.compact)
+    add_dependencies(llvm_abi_execute_compact_test llvm_fixture_outputs)
     target_link_libraries(llvm_abi_execute_compact_test PRIVATE dr_cpu)
     add_test(NAME llvm_abi_execute_compact COMMAND llvm_abi_execute_compact_test)
     add_executable(llvm_abi_execute_context_test
         tests/llvm_abi_execute_test.c
         ${DOLRECOMP_ABI_CALLER_OBJECT}.context
         ${DOLRECOMP_ABI_CALLEE_OBJECT}.context)
+    add_dependencies(llvm_abi_execute_context_test llvm_fixture_outputs)
     target_link_libraries(llvm_abi_execute_context_test PRIVATE dr_cpu)
     add_test(NAME llvm_abi_execute_context COMMAND llvm_abi_execute_context_test)
     add_executable(paired_single_test
@@ -530,6 +536,7 @@ if(DOLRECOMP_ENABLE_LLVM)
         ${DOLRECOMP_ABI_CALLEE_OBJECT}
         ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}
         ${DOLRECOMP_ABI_LOOP_CALLEE_OBJECT})
+    add_dependencies(llvm_backend_bench llvm_fixture_outputs)
     target_link_libraries(llvm_backend_bench PRIVATE dr_cpu)
     add_executable(llvm_backend_bench_compact
         benchmarks/llvm_backend_bench.c
@@ -538,6 +545,7 @@ if(DOLRECOMP_ENABLE_LLVM)
         ${DOLRECOMP_ABI_CALLEE_OBJECT}.compact
         ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}.compact
         ${DOLRECOMP_ABI_LOOP_CALLEE_OBJECT}.compact)
+    add_dependencies(llvm_backend_bench_compact llvm_fixture_outputs)
     target_link_libraries(llvm_backend_bench_compact PRIVATE dr_cpu)
     add_executable(llvm_backend_bench_context
         benchmarks/llvm_backend_bench.c
@@ -546,6 +554,7 @@ if(DOLRECOMP_ENABLE_LLVM)
         ${DOLRECOMP_ABI_CALLEE_OBJECT}.context
         ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}.context
         ${DOLRECOMP_ABI_LOOP_CALLEE_OBJECT}.context)
+    add_dependencies(llvm_backend_bench_context llvm_fixture_outputs)
     target_link_libraries(llvm_backend_bench_context PRIVATE dr_cpu)
     find_program(DOLRECOMP_LLVM_OBJDUMP
         NAMES llvm-objdump-${LLVM_VERSION_MAJOR} llvm-objdump
