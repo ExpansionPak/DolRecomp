@@ -117,6 +117,28 @@ You cannot specify --gamecube while using espresso.
 
 ### Additional Info
 
+LLVM/ModernGekko hot-range profiles can use separate thresholds for normal
+`native_cycles` samples and NativeCore `module_miss` samples. By default,
+`--range-profile-miss-min-samples` inherits `--range-profile-min-samples`, so
+existing direct CLI behavior is unchanged. Set it explicitly when module-miss
+promotion should be more selective, for example:
+
+```sh
+./dolrecomp --backend=llvm --runtime=moderngekko \
+  --range-profile runtime.csv \
+  --range-profile-min-samples 1 \
+  --range-profile-miss-min-samples 256 \
+  --range-profile-neighbors 0 \
+  --range-profile-call-closure-depth 3 \
+  main.dol SUKE01 build
+```
+
+`--range-profile-call-closure-depth` bounds how many direct-call levels are pulled
+in after the profiled seeds. The direct DolRecomp default remains unlimited for
+compatibility. A depth of 0 is safe: omitted callees leave through the normal
+ModernGekko structured side-exit/fallback path instead of creating unresolved
+native calls.
+
 Function maps are optional. Existing address-only generation remains the default:
 
 ```sh

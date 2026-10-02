@@ -45,7 +45,7 @@ void emit_native_state_commit(FILE* out) {
         "#if defined(_MSC_VER)\n"
         "#define DOLRECOMP_COLD __declspec(noinline)\n"
         "#else\n"
-        "#define DOLRECOMP_COLD __attribute__((cold,noinline,visibility(\"hidden\")))\n"
+        "#define DOLRECOMP_COLD __attribute__((cold,noinline))\n"
         "#endif\n"
         "DOLRECOMP_COLD void moderngekko_commit_state(\n"
         "    const MGNativeState* state, const uint64_t* values,\n"

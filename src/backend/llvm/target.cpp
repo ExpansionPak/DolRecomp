@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include <llvm/MC/TargetRegistry.h>
+#include <llvm/IR/Module.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
@@ -119,6 +120,35 @@ static CodeGenOptLevel codegenLevel(int level) {
   if (level == 2)
     return CodeGenOptLevel::Default;
   return CodeGenOptLevel::Aggressive;
+}
+
+int defaultCodegenLevel(int ir_optimization_level) {
+  if (ir_optimization_level <= 0)
+    return 0;
+  return 2;
+}
+
+int fastIterationCodegenLevel(int ir_optimization_level,
+                              uint64_t module_instruction_count) {
+  if (module_instruction_count >= kFastIterationCodegenInstructionThreshold)
+    return 0;
+  return defaultCodegenLevel(ir_optimization_level);
+}
+
+uint64_t moduleInstructionCount(const Module &module) {
+  uint64_t instructions = 0;
+  for (const Function &function : module)
+    for (const BasicBlock &block : function)
+      instructions += block.size();
+  return instructions;
+}
+
+int emissionCodegenLevel(int ir_optimization_level, bool fast_iteration,
+                         const Module &module) {
+  if (!fast_iteration)
+    return defaultCodegenLevel(ir_optimization_level);
+  return fastIterationCodegenLevel(ir_optimization_level,
+                                   moduleInstructionCount(module));
 }
 
 std::unique_ptr<TargetMachine> createTargetMachine(const TargetProfile &profile,

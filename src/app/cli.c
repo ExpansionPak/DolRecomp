@@ -25,6 +25,12 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  --instrumentation none|lockstep  Compile release or state-journal objects\n");
     fprintf(stderr, "  --profile-generate <path>      Emit counters for a later profile run\n");
     fprintf(stderr, "  --profile-use <path>           Optimize with an existing profile\n");
+    fprintf(stderr, "  --range-profile <path>         Emit only hot LLVM ranges from runtime CSV\n");
+    fprintf(stderr, "  --range-profile-coverage <pct> Native-cycle coverage target (default: 99)\n");
+    fprintf(stderr, "  --range-profile-min-samples <n> Ignore colder ranges below N samples\n");
+    fprintf(stderr, "  --range-profile-miss-min-samples <n> Ignore colder module misses below N samples (default: range min)\n");
+    fprintf(stderr, "  --range-profile-neighbors <n>  Include N adjacent ranges on each side\n");
+    fprintf(stderr, "  --range-profile-call-closure-depth <n>  Follow direct calls to depth N (default: unlimited)\n");
     fprintf(stderr, "  --partition-instructions <n>   Reproducible object partition size\n");
     fprintf(stderr, "  --partition-seed <n>           Stable partition naming seed\n");
     fprintf(stderr, "  --gamecube                     GameCube mode (no title ID required)\n");
@@ -170,12 +176,18 @@ static int parse_u64_value(const char* text, const char* name, u64* result) {
 int parse_cli(int argc, char** argv, CliOptions* opts) {
     const char* positional[3];
     int positional_count = 0;
+    int range_profile_miss_min_samples_explicit = 0;
 
     memset(opts, 0, sizeof(*opts));
     opts->cpu = DOLRECOMP_CPU_GEKKO;
     opts->backend = DOLRECOMP_BACKEND_C;
     opts->jobs = 1;
     opts->llvm_targets = "host";
+    opts->range_profile_coverage = 99.0;
+    opts->range_profile_min_samples = 1u;
+    opts->range_profile_miss_min_samples = 1u;
+    opts->range_profile_neighbors = 1u;
+    opts->range_profile_call_closure_depth = UINT32_MAX;
 
     for (int i = 1; i < argc; i++) {
         const char* arg = argv[i];
@@ -368,6 +380,91 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             continue;
         }
 
+        if (strcmp(arg, "--range-profile") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --range-profile needs a path\n");
+                return 0;
+            }
+            opts->range_profile_path = argv[++i];
+            continue;
+        }
+
+        if (strncmp(arg, "--range-profile=", 16) == 0) {
+            if (!arg[16]) {
+                fprintf(stderr, "error: --range-profile needs a path\n");
+                return 0;
+            }
+            opts->range_profile_path = arg + 16;
+            continue;
+        }
+
+        if (strcmp(arg, "--range-profile-coverage") == 0 ||
+            strncmp(arg, "--range-profile-coverage=", 25) == 0) {
+            const char* value = arg[24] == '=' ? arg + 25
+                                                : (i + 1 < argc ? argv[++i] : NULL);
+            char* end = NULL;
+            if (!value) {
+                fprintf(stderr, "error: --range-profile-coverage needs 0..100\n");
+                return 0;
+            }
+            errno = 0;
+            double coverage = strtod(value, &end);
+            if (errno || !end || *end || coverage <= 0.0 || coverage > 100.0) {
+                fprintf(stderr, "error: --range-profile-coverage needs 0..100\n");
+                return 0;
+            }
+            opts->range_profile_coverage = coverage;
+            continue;
+        }
+
+        if (strcmp(arg, "--range-profile-min-samples") == 0 ||
+            strncmp(arg, "--range-profile-min-samples=", 28) == 0) {
+            const char* value = arg[27] == '=' ? arg + 28
+                                                : (i + 1 < argc ? argv[++i] : NULL);
+            if (!value ||
+                !parse_u32_arg(value, "--range-profile-min-samples",
+                               &opts->range_profile_min_samples))
+                return 0;
+            continue;
+        }
+
+        if (strcmp(arg, "--range-profile-miss-min-samples") == 0 ||
+            strncmp(arg, "--range-profile-miss-min-samples=", 33) == 0) {
+            const char* value = arg[32] == '=' ? arg + 33
+                                                : (i + 1 < argc ? argv[++i] : NULL);
+            if (!value ||
+                !parse_u32_arg(value, "--range-profile-miss-min-samples",
+                               &opts->range_profile_miss_min_samples))
+                return 0;
+            range_profile_miss_min_samples_explicit = 1;
+            continue;
+        }
+
+        if (strcmp(arg, "--range-profile-neighbors") == 0 ||
+            strncmp(arg, "--range-profile-neighbors=", 26) == 0) {
+            const char* value = arg[25] == '=' ? arg + 26
+                                                : (i + 1 < argc ? argv[++i] : NULL);
+            if (!value ||
+                !parse_u32_arg(value, "--range-profile-neighbors",
+                               &opts->range_profile_neighbors) ||
+                opts->range_profile_neighbors > 64u) {
+                fprintf(stderr, "error: --range-profile-neighbors must be 0..64\n");
+                return 0;
+            }
+            continue;
+        }
+
+        if (strcmp(arg, "--range-profile-call-closure-depth") == 0 ||
+            strncmp(arg, "--range-profile-call-closure-depth=", 35) == 0) {
+            const char* value = arg[34] == '=' ? arg + 35
+                                                : (i + 1 < argc ? argv[++i] : NULL);
+            if (!value ||
+                !parse_u32_arg(value, "--range-profile-call-closure-depth",
+                               &opts->range_profile_call_closure_depth))
+                return 0;
+            continue;
+        }
+
         if (strcmp(arg, "--partition-instructions") == 0) {
             if (i + 1 >= argc ||
                 !parse_u32_arg(argv[++i], "--partition-instructions",
@@ -533,6 +630,9 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
         positional[positional_count++] = arg;
     }
 
+    if (!range_profile_miss_min_samples_explicit)
+        opts->range_profile_miss_min_samples = opts->range_profile_min_samples;
+
     if (positional_count == 0) {
         if (opts->setup_mode)
             return 1;
@@ -556,6 +656,15 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
         return 0;
     }
 #endif
+
+    if (opts->range_profile_path &&
+        (opts->backend != DOLRECOMP_BACKEND_LLVM ||
+         opts->llvm_runtime != DOLLLVM_RUNTIME_MODERNGEKKO)) {
+        fprintf(stderr,
+                "error: --range-profile requires --backend=llvm "
+                "--runtime=moderngekko\n");
+        return 0;
+    }
 
     if (opts->profile_generate_path && opts->profile_use_path) {
         fprintf(stderr, "error: profile generation and use are mutually exclusive\n");

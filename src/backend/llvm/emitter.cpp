@@ -40,12 +40,18 @@ FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
   intrinsic_escapes_ = triple.isX86() && !modern_runtime_;
   cold_escapes_ = modern_runtime_ || intrinsic_escapes_ ||
                   (triple.isAArch64() && !triple.isOSWindows());
-  for (u32 index = 0; index < range_count_; index++) {
-    if (ranges_[index].start != source_.guest_start)
-      continue;
-    abi_range_ = &ranges_[index];
+  u32 first = 0;
+  u32 last = range_count_;
+  while (first < last) {
+    const u32 middle = first + (last - first) / 2u;
+    if (ranges_[middle].start < source_.guest_start)
+      first = middle + 1u;
+    else
+      last = middle;
+  }
+  if (first < range_count_ && ranges_[first].start == source_.guest_start) {
+    abi_range_ = &ranges_[first];
     native_abi_ = (abi_range_->abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE) != 0;
-    break;
   }
 }
 
@@ -64,8 +70,15 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
     return false;
   }
   function_->setCallingConv(bodyCallingConvention());
-  function_->setVisibility(GlobalValue::HiddenVisibility);
-  function_->setDSOLocal(true);
+  if (modern_runtime_ && native_abi_)
+    function_->addFnAttr(Attribute::NoInline);
+  if (modern_runtime_) {
+    function_->setVisibility(GlobalValue::DefaultVisibility);
+    function_->setDSOLocal(false);
+  } else {
+    function_->setVisibility(GlobalValue::HiddenVisibility);
+    function_->setDSOLocal(true);
+  }
   u32 fixedArgument = 0;
   ctx_ = function_->getArg(fixedArgument++);
   ctx_->setName("ctx");

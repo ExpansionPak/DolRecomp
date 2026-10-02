@@ -50,6 +50,12 @@ int main(int argc, char **argv) {
   llvm::Function *systemCall = module->getFunction("func_80002600_budget");
   llvm::Function *rfi = module->getFunction("func_80002700_budget");
   CHECK(wrapper != nullptr && body != nullptr && callee != nullptr);
+  CHECK(wrapper->getVisibility() == llvm::GlobalValue::DefaultVisibility);
+  CHECK(body->getVisibility() == llvm::GlobalValue::DefaultVisibility);
+  CHECK(callee->getVisibility() == llvm::GlobalValue::DefaultVisibility);
+  CHECK(!wrapper->isDSOLocal());
+  CHECK(!body->isDSOLocal());
+  CHECK(!callee->isDSOLocal());
   CHECK(body->arg_size() == 8);
   CHECK(callee->arg_size() == 7);
   for (const llvm::GlobalVariable &global : module->globals())

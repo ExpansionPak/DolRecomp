@@ -68,6 +68,27 @@ static int write_dol(const char* path) {
     return fclose(file) == 0 && ok;
 }
 
+static int write_profile_hole_dol(const char* path) {
+    u8 bytes[0x200];
+    memset(bytes, 0, sizeof(bytes));
+    write_be32(bytes + 0x00, 0x100);
+    write_be32(bytes + 0x48, 0x80003100u);
+    write_be32(bytes + 0x90, 0x100);
+    write_be32(bytes + 0xE0, 0x80003100u);
+    for (size_t offset = 0x100; offset < sizeof(bytes); offset += 4)
+        write_be32(bytes + offset, 0x60000000u);
+    write_be32(bytes + 0x100, 0x38600000u);
+    write_be32(bytes + 0x104, 0x4E800020u);
+    write_be32(bytes + 0x108, 0x00000000u);
+    write_be32(bytes + 0x10C, 0x38600001u);
+    write_be32(bytes + 0x110, 0x4E800020u);
+    FILE* file = fopen(path, "wb");
+    if (!file)
+        return 0;
+    int ok = fwrite(bytes, 1, sizeof(bytes), file) == sizeof(bytes);
+    return fclose(file) == 0 && ok;
+}
+
 static int run_generator(const char* executable, const char* dol,
                          const char* output, const char* targets,
                          const char* cache) {
@@ -164,6 +185,78 @@ static int run_native_generator_batched(const char* executable,
 #endif
 }
 
+static int run_native_generator_fast(const char* executable, const char* dol,
+                                     const char* output) {
+#if defined(_WIN32)
+    if (_putenv_s("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512") != 0 ||
+        _putenv_s("DOLRECOMP_LLVM_CACHE", "off") != 0 ||
+        _putenv_s("DOLRECOMP_LLVM_RANGES_PER_OBJECT", "3") != 0 ||
+        _putenv_s("DOLRECOMP_LLVM_FAST_ITERATION", "1") != 0 ||
+        _putenv_s("DOLRECOMP_LLVM_RESUME", "1") != 0)
+        return 0;
+    int ok = _spawnl(_P_WAIT, executable, executable, "--gamecube",
+                     "--backend=llvm", "--runtime=moderngekko",
+                     "--game-id=TEST01", "--targets=host", "-j2", dol, output,
+                     NULL) == 0;
+    _putenv_s("DOLRECOMP_LLVM_FAST_ITERATION", "");
+    _putenv_s("DOLRECOMP_LLVM_RESUME", "");
+    return ok;
+#else
+    pid_t child = fork();
+    if (child < 0)
+        return 0;
+    if (child == 0) {
+        setenv("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512", 1);
+        setenv("DOLRECOMP_LLVM_CACHE", "off", 1);
+        setenv("DOLRECOMP_LLVM_RANGES_PER_OBJECT", "3", 1);
+        setenv("DOLRECOMP_LLVM_FAST_ITERATION", "1", 1);
+        setenv("DOLRECOMP_LLVM_RESUME", "1", 1);
+        execl(executable, executable, "--gamecube", "--backend=llvm",
+              "--runtime=moderngekko", "--game-id=TEST01", "--targets=host",
+              "-j2", dol, output, NULL);
+        _exit(127);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+           WEXITSTATUS(status) == 0;
+#endif
+}
+
+static int run_native_generator_hot(const char* executable, const char* dol,
+                                    const char* output, const char* profile,
+                                    const char* miss_min_samples) {
+#if defined(_WIN32)
+    if (_putenv_s("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512") != 0 ||
+        _putenv_s("DOLRECOMP_LLVM_CACHE", "off") != 0 ||
+        _putenv_s("DOLRECOMP_LLVM_RANGES_PER_OBJECT", "") != 0)
+        return 0;
+    return _spawnl(_P_WAIT, executable, executable, "--gamecube",
+                   "--backend=llvm", "--runtime=moderngekko",
+                   "--game-id=TEST01", "--targets=host", "--range-profile",
+                   profile, "--range-profile-coverage=100",
+                   "--range-profile-miss-min-samples", miss_min_samples,
+                   "--range-profile-neighbors=1", "-j2", dol, output, NULL) == 0;
+#else
+    pid_t child = fork();
+    if (child < 0)
+        return 0;
+    if (child == 0) {
+        setenv("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512", 1);
+        setenv("DOLRECOMP_LLVM_CACHE", "off", 1);
+        unsetenv("DOLRECOMP_LLVM_RANGES_PER_OBJECT");
+        execl(executable, executable, "--gamecube", "--backend=llvm",
+              "--runtime=moderngekko", "--game-id=TEST01", "--targets=host",
+              "--range-profile", profile, "--range-profile-coverage=100",
+              "--range-profile-miss-min-samples", miss_min_samples,
+              "--range-profile-neighbors=1", "-j2", dol, output, NULL);
+        _exit(127);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+           WEXITSTATUS(status) == 0;
+#endif
+}
+
 static int run_c_generator(const char* executable, const char* dol,
                            const char* output) {
 #if defined(_WIN32)
@@ -251,9 +344,26 @@ int main(int argc, char** argv) {
     char native_batch_bitcode[1200];
     char native_batch_fallback[1200];
     char native_batch_manifest[1200];
+    char native_fast_output[1200];
+    char native_fast_object[1200];
+    char native_fast_bitcode[1200];
+    char native_fast_manifest[1200];
+    char native_hot_output[1200];
+    char native_hot_header[1200];
+    char native_hot_manifest[1200];
+    char native_hot_profile[1200];
+    char profile_hole_dol[1200];
+    char profile_hole_output[1200];
+    char profile_hole_header[1200];
+    char profile_hole_hot_output[1200];
+    char profile_hole_hot_header[1200];
+    char profile_hole_cold_output[1200];
+    char profile_hole_cold_header[1200];
+    char profile_hole_profile[1200];
     char output_copy[1200];
     char header_copy[1200];
     char object_copy[1200];
+    FILE* file = NULL;
     u8 magic[4];
     snprintf(dol, sizeof(dol), "%s/sample.dol", argv[2]);
     snprintf(output, sizeof(output), "%s/out", argv[2]);
@@ -301,6 +411,40 @@ int main(int argc, char** argv) {
              argv[2]);
     snprintf(native_batch_manifest, sizeof(native_batch_manifest),
              "%s/out-native-batch/generated/generated.c", argv[2]);
+    snprintf(native_fast_output, sizeof(native_fast_output), "%s/out-native-fast",
+             argv[2]);
+    snprintf(native_fast_object, sizeof(native_fast_object),
+             "%s/out-native-fast/generated/chunks/"
+             "chunk_0000_text0_80003100_r3.o", argv[2]);
+    snprintf(native_fast_bitcode, sizeof(native_fast_bitcode),
+             "%s/out-native-fast/generated/chunks/"
+             "chunk_0000_text0_80003100_r3.o.bc", argv[2]);
+    snprintf(native_fast_manifest, sizeof(native_fast_manifest),
+             "%s/out-native-fast/generated/generated.c", argv[2]);
+    snprintf(native_hot_output, sizeof(native_hot_output), "%s/out-native-hot",
+             argv[2]);
+    snprintf(native_hot_header, sizeof(native_hot_header),
+             "%s/out-native-hot/generated/generated.h", argv[2]);
+    snprintf(native_hot_manifest, sizeof(native_hot_manifest),
+             "%s/out-native-hot/generated/generated.c", argv[2]);
+    snprintf(native_hot_profile, sizeof(native_hot_profile), "%s/hot.csv",
+             argv[2]);
+    snprintf(profile_hole_dol, sizeof(profile_hole_dol), "%s/profile-hole.dol",
+             argv[2]);
+    snprintf(profile_hole_output, sizeof(profile_hole_output),
+             "%s/out-profile-hole", argv[2]);
+    snprintf(profile_hole_header, sizeof(profile_hole_header),
+             "%s/out-profile-hole/generated/generated.h", argv[2]);
+    snprintf(profile_hole_hot_output, sizeof(profile_hole_hot_output),
+             "%s/out-profile-hole-hot", argv[2]);
+    snprintf(profile_hole_hot_header, sizeof(profile_hole_hot_header),
+             "%s/out-profile-hole-hot/generated/generated.h", argv[2]);
+    snprintf(profile_hole_cold_output, sizeof(profile_hole_cold_output),
+             "%s/out-profile-hole-cold", argv[2]);
+    snprintf(profile_hole_cold_header, sizeof(profile_hole_cold_header),
+             "%s/out-profile-hole-cold/generated/generated.h", argv[2]);
+    snprintf(profile_hole_profile, sizeof(profile_hole_profile),
+             "%s/profile-hole.csv", argv[2]);
     snprintf(output_copy, sizeof(output_copy), "%s/out-copy", argv[2]);
     snprintf(header_copy, sizeof(header_copy),
              "%s/out-copy/generated/generated.h", argv[2]);
@@ -308,18 +452,42 @@ int main(int argc, char** argv) {
              "%s/out-copy/generated/chunks/chunk_0000_text0_80003100.o",
              argv[2]);
     CHECK(write_dol(dol));
+    CHECK(write_profile_hole_dol(profile_hole_dol));
     CHECK(make_dir(cache));
+    file = fopen(native_hot_profile, "wb");
+    CHECK(file != NULL);
+    CHECK(fputs("kind,pc,samples\nnative_cycles,80003100,100\n", file) >= 0);
+    CHECK(fclose(file) == 0);
+    file = fopen(profile_hole_profile, "wb");
+    CHECK(file != NULL);
+    CHECK(fputs("kind,pc,samples\n"
+                "native_cycles,80003100,100\n"
+                "module_miss,8000310c,100\n",
+                file) >= 0);
+    CHECK(fclose(file) == 0);
     CHECK(run_generator(argv[1], dol, single_output, "--targets=x86-64-v3",
                         cache));
     CHECK(run_native_generator(argv[1], dol, native_output, cache));
     CHECK(run_native_generator_batched(argv[1], dol, native_batch_output,
                                        cache, "3"));
+    CHECK(run_native_generator_fast(argv[1], dol, native_fast_output));
+    CHECK(run_native_generator_fast(argv[1], dol, native_fast_output));
+    CHECK(run_native_generator_hot(argv[1], dol, native_hot_output,
+                                   native_hot_profile, "1"));
+    CHECK(run_native_generator(argv[1], profile_hole_dol, profile_hole_output,
+                               cache));
+    CHECK(run_native_generator_hot(argv[1], profile_hole_dol,
+                                   profile_hole_hot_output,
+                                   profile_hole_profile, "1"));
+    CHECK(run_native_generator_hot(argv[1], profile_hole_dol,
+                                   profile_hole_cold_output,
+                                   profile_hole_profile, "101"));
     CHECK(run_generator(argv[1], dol, output, "--targets=x86-64-v2,x86-64-v3",
                         cache));
     CHECK(run_generator(argv[1], dol, output_copy,
                         "--targets=x86-64-v2,x86-64-v3", cache));
     CHECK(run_c_generator(argv[1], dol, c_output));
-    FILE* file = fopen(c_smc, "rb");
+    file = fopen(c_smc, "rb");
     CHECK(file != NULL);
     fclose(file);
     file = fopen(header, "rb");
@@ -360,6 +528,9 @@ int main(int argc, char** argv) {
     CHECK(strstr(text,
                  "values + MG_STATE_PS1_0, gpr_mask, ps0_mask, ps1_mask") != NULL);
     CHECK(strstr(text, "moderngekko_native_entry_offsets") != NULL);
+    CHECK(strstr(text, "offsetof(MGNativeServices, begin_native_segment)") != NULL);
+    CHECK(strstr(text, "services->begin_native_segment") != NULL);
+    CHECK(strstr(text, "local_cycles < remaining") != NULL);
     CHECK(strstr(text, "0u, 4u, 64u, 65u, 577u") != NULL);
     CHECK(strstr(text, "UINT64_C(0x000000000000003B)") != NULL);
     CHECK(strstr(text, "if ((address - range->start) & 3u) return 0;") != NULL);
@@ -375,9 +546,38 @@ int main(int argc, char** argv) {
     CHECK(files_equal(native_fallback, native_batch_fallback));
     u32 native_object_count = count_manifest_objects(native_manifest);
     u32 native_batch_object_count = count_manifest_objects(native_batch_manifest);
+    u32 native_hot_object_count = count_manifest_objects(native_hot_manifest);
     CHECK(native_object_count != 0);
     CHECK(native_batch_object_count == (native_object_count + 2u) / 3u);
     CHECK(native_batch_object_count < native_object_count);
+    CHECK(native_hot_object_count >= 3u);
+    CHECK(native_hot_object_count < native_object_count);
+    file = fopen(native_hot_header, "rb");
+    CHECK(file != NULL);
+    length = fread(text, 1, sizeof(text) - 1, file);
+    text[length] = '\0';
+    fclose(file);
+    CHECK(strstr(text, "func_80003100") != NULL);
+    CHECK(strstr(text, "func_80003200") != NULL);
+    CHECK(strstr(text, "func_80003A04") == NULL);
+    file = fopen(profile_hole_header, "rb");
+    CHECK(file != NULL);
+    length = fread(text, 1, sizeof(text) - 1, file);
+    text[length] = '\0';
+    fclose(file);
+    CHECK(strstr(text, "{0x8000310Cu, 0x80003114u,") == NULL);
+    file = fopen(profile_hole_hot_header, "rb");
+    CHECK(file != NULL);
+    length = fread(text, 1, sizeof(text) - 1, file);
+    text[length] = '\0';
+    fclose(file);
+    CHECK(strstr(text, "{0x8000310Cu, 0x80003114u,") != NULL);
+    file = fopen(profile_hole_cold_header, "rb");
+    CHECK(file != NULL);
+    length = fread(text, 1, sizeof(text) - 1, file);
+    text[length] = '\0';
+    fclose(file);
+    CHECK(strstr(text, "{0x8000310Cu, 0x80003114u,") == NULL);
     file = fopen(native_batch_object, "rb");
     CHECK(file != NULL);
     CHECK(fread(magic, 1, 4, file) == 4);
@@ -386,6 +586,19 @@ int main(int argc, char** argv) {
     file = fopen(native_batch_bitcode, "rb");
     CHECK(file != NULL);
     fclose(file);
+    file = fopen(native_fast_object, "rb");
+    CHECK(file != NULL);
+    CHECK(fread(magic, 1, 4, file) == 4);
+    fclose(file);
+    CHECK(is_native_object(magic));
+    file = fopen(native_fast_bitcode, "rb");
+    CHECK(file == NULL);
+    file = fopen(native_fast_manifest, "rb");
+    CHECK(file != NULL);
+    length = fread(text, 1, sizeof(text) - 1, file);
+    text[length] = '\0';
+    fclose(file);
+    CHECK(strstr(text, "ThinLTO summaries") == NULL);
     file = fopen(manifest, "rb");
     CHECK(file != NULL);
     length = fread(text, 1, sizeof(text) - 1, file);

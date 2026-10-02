@@ -3,12 +3,14 @@
 
 #include "backend/llvm/llvm_backend.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
 #include <llvm/Support/CodeGen.h>
 
 namespace llvm {
+class Module;
 class TargetMachine;
 }
 
@@ -22,6 +24,15 @@ struct TargetProfile {
   const char *suffix;
   bool aarch64;
 };
+
+constexpr uint64_t kFastIterationCodegenInstructionThreshold = 500000ull;
+
+int defaultCodegenLevel(int ir_optimization_level);
+int fastIterationCodegenLevel(int ir_optimization_level,
+                              uint64_t module_instruction_count);
+uint64_t moduleInstructionCount(const llvm::Module &module);
+int emissionCodegenLevel(int ir_optimization_level, bool fast_iteration,
+                         const llvm::Module &module);
 
 bool resolveTargetProfile(const DolLLVMOptions *options, TargetProfile &result,
                           std::string &error);

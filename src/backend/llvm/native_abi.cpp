@@ -6,6 +6,12 @@
 namespace {
 DolLLVMFunctionRange *exactRange(std::vector<DolLLVMFunctionRange> &ranges,
                                  u32 start) {
+  auto it = std::lower_bound(ranges.begin(), ranges.end(), start,
+                             [](const DolLLVMFunctionRange &range, u32 value) {
+                               return range.start < value;
+                             });
+  if (it != ranges.end() && it->start == start)
+    return &*it;
   for (DolLLVMFunctionRange &range : ranges)
     if (range.start == start)
       return &range;
@@ -13,6 +19,15 @@ DolLLVMFunctionRange *exactRange(std::vector<DolLLVMFunctionRange> &ranges,
 }
 const DolLLVMFunctionRange *
 addressRange(const std::vector<DolLLVMFunctionRange> &ranges, u32 address) {
+  auto it = std::upper_bound(ranges.begin(), ranges.end(), address,
+                             [](u32 value, const DolLLVMFunctionRange &range) {
+                               return value < range.start;
+                             });
+  if (it != ranges.begin()) {
+    --it;
+    if (address < it->end)
+      return &*it;
+  }
   for (const DolLLVMFunctionRange &range : ranges)
     if (address >= range.start && address < range.end)
       return &range;
@@ -64,7 +79,8 @@ void buildPostCallDefs(const DolIRFunction &function,
 bool collectCallEdges(const DolIRModule &source,
                       const std::vector<DolLLVMFunctionRange> &ranges,
                       bool includePostCallDefs,
-                      std::vector<DolLLVMCallEdge> &edges, bool updateOnly) {
+                      std::vector<DolLLVMCallEdge> &edges, bool updateOnly,
+                      bool dirtyOnly = false) {
   size_t edgeIndex = 0;
   for (u32 index = 0; index < source.function_count; index++) {
     const DolIRFunction &function = source.functions[index];
@@ -77,15 +93,25 @@ bool collectCallEdges(const DolIRModule &source,
       buildPostCallDefs(function, ranges, postCallDefs);
       postDefs = postCallDefs.data();
     }
+    const size_t stateWords =
+        static_cast<size_t>(function.block_count) * DOLIR_STATE_MASK_WORDS;
+    std::vector<u64> allLive, allDefined, allDirty(stateWords);
+    if (dirtyOnly || updateOnly) {
+      if (!dolllvm_analyze_callsite_dirty(&function, postDefs, allDirty.data()))
+        return false;
+    } else {
+      allLive.resize(stateWords);
+      allDefined.resize(stateWords);
+      if (!dolllvm_analyze_callsite_states(
+              &function, range->may_def_state, postDefs, allLive.data(),
+              allDefined.data(), allDirty.data()))
+        return false;
+    }
     for (u32 blockIndex = 0; blockIndex < function.block_count; blockIndex++) {
       const DolIRTerminator &term = function.blocks[blockIndex].terminator;
-      u64 liveAfter[DOLIR_STATE_MASK_WORDS]{};
-      u64 definedBefore[DOLIR_STATE_MASK_WORDS]{};
-      u64 mayDirtyBefore[DOLIR_STATE_MASK_WORDS]{};
-      if (!dolllvm_analyze_callsite_state(
-              &function, blockIndex, range->may_def_state, postDefs, liveAfter,
-              definedBefore, mayDirtyBefore))
-        return false;
+      const size_t offset =
+          static_cast<size_t>(blockIndex) * DOLIR_STATE_MASK_WORDS;
+      const u64 *mayDirtyBefore = allDirty.data() + offset;
       for (u32 slot = 0; slot < targetCount(term); slot++) {
         const DolLLVMFunctionRange *target =
             addressRange(ranges, term.target_addresses[slot]);
@@ -105,10 +131,14 @@ bool collectCallEdges(const DolIRModule &source,
           edge.caller_start = range->start;
           edge.callsite_pc = term.guest_pc;
           edge.callee_address = term.target_addresses[slot];
-          std::copy(liveAfter, liveAfter + DOLIR_STATE_MASK_WORDS,
-                    edge.live_after);
-          std::copy(definedBefore, definedBefore + DOLIR_STATE_MASK_WORDS,
-                    edge.defined_before);
+          if (!dirtyOnly) {
+            std::copy(allLive.data() + offset,
+                      allLive.data() + offset + DOLIR_STATE_MASK_WORDS,
+                      edge.live_after);
+            std::copy(allDefined.data() + offset,
+                      allDefined.data() + offset + DOLIR_STATE_MASK_WORDS,
+                      edge.defined_before);
+          }
           std::copy(mayDirtyBefore,
                     mayDirtyBefore + DOLIR_STATE_MASK_WORDS,
                     edge.may_dirty_before);
@@ -174,6 +204,16 @@ void prepareModuleABIs(const DolIRModule &source,
       std::fill(std::begin(range.escape_state), std::end(range.escape_state), 0u);
   if (callEdges)
     *callEdges = std::move(edges);
+}
+
+bool collectPreparedModuleCallEdges(const DolIRModule &source,
+                                    const DolLLVMFunctionRange *ranges,
+                                    u32 rangeCount,
+                                    std::vector<DolLLVMCallEdge> &callEdges) {
+  if (!ranges && rangeCount) return false;
+  std::vector<DolLLVMFunctionRange> prepared(ranges, ranges + rangeCount);
+  callEdges.clear();
+  return collectCallEdges(source, prepared, true, callEdges, false, true);
 }
 
 bool FunctionEmitter::stateInput(const DolLLVMFunctionRange *range,

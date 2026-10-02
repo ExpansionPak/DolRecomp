@@ -1,8 +1,6 @@
 #include "backend/llvm/emitter.h"
 #include "cpu/cpu.h"
-
 #include <cstdio>
-
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
@@ -11,9 +9,7 @@
 #include <llvm/Support/raw_ostream.h>
 
 namespace dolllvm {
-
 using namespace llvm;
-
 BasicBlock *FunctionEmitter::directDestination(const DolIRTerminator &term,
                                                u32 slot) {
   if (term.targets[slot] != DOLIR_NO_BLOCK) {
@@ -24,14 +20,21 @@ BasicBlock *FunctionEmitter::directDestination(const DolIRTerminator &term,
   }
   return externalDestination(term, slot);
 }
-
 const DolLLVMFunctionRange *FunctionEmitter::rangeFor(u32 address) const {
-  for (u32 i = 0; i < range_count_; i++)
-    if (address >= ranges_[i].start && address < ranges_[i].end)
-      return &ranges_[i];
+  u32 first = 0;
+  u32 last = range_count_;
+  while (first < last) {
+    const u32 middle = first + (last - first) / 2u;
+    const DolLLVMFunctionRange &range = ranges_[middle];
+    if (address < range.start)
+      last = middle;
+    else if (address >= range.end)
+      first = middle + 1u;
+    else
+      return &range;
+  }
   return nullptr;
 }
-
 const DolLLVMCallEdge *FunctionEmitter::callEdge(const DolIRTerminator &term,
                                                 u32 slot) const {
   for (u32 index = 0; index < call_edge_count_; index++) {
@@ -43,7 +46,6 @@ const DolLLVMCallEdge *FunctionEmitter::callEdge(const DolIRTerminator &term,
   }
   return nullptr;
 }
-
 BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
                                                  u32 slot) {
   u32 target = term.target_addresses[slot];
@@ -116,8 +118,9 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   auto callee = module_.getOrInsertFunction(targetName, bodyFunctionType(range));
   if (auto *calleeFunction = dyn_cast<Function>(callee.getCallee())) {
     calleeFunction->setCallingConv(bodyCallingConvention());
-    calleeFunction->setVisibility(GlobalValue::HiddenVisibility);
-    calleeFunction->setDSOLocal(true);
+    calleeFunction->setVisibility(modern_runtime_ ? GlobalValue::DefaultVisibility
+                                                  : GlobalValue::HiddenVisibility);
+    calleeFunction->setDSOLocal(!modern_runtime_);
   }
   Value *calleeReturnPC =
       term.linked ? static_cast<Value *>(builder_.getInt32(term.guest_pc + 4u))

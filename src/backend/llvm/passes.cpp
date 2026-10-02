@@ -4,6 +4,7 @@
 #include <llvm/Analysis/LoopAnalysisManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Support/Error.h>
 #include <llvm/Support/VirtualFileSystem.h>
 #include <llvm/Target/TargetMachine.h>
 
@@ -46,6 +47,20 @@ bool optimizeModule(Module &module, TargetMachine &machine,
   builder.registerFunctionAnalyses(functions);
   builder.registerLoopAnalyses(loops);
   builder.crossRegisterProxies(loops, functions, call_graph, modules);
+  if (options.fast_iteration) {
+    ModulePassManager pipeline;
+    constexpr const char *fastPipeline =
+        "function(mem2reg,early-cse<memssa>,"
+        "instcombine<no-verify-fixpoint>,simplifycfg,sccp,gvn,dse,adce),"
+        "globaldce";
+    if (Error error = builder.parsePassPipeline(pipeline, fastPipeline)) {
+      diagnostics << "dolllvm: cannot construct fast optimization pipeline: "
+                  << toString(std::move(error)) << '\n';
+      return false;
+    }
+    pipeline.run(module, modules);
+    return true;
+  }
   ModulePassManager pipeline = builder.buildPerModuleDefaultPipeline(
       optimizationLevel(options.optimization_level));
   pipeline.run(module, modules);

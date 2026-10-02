@@ -97,10 +97,26 @@ target_include_directories(dr_ir PUBLIC ${DOLRECOMP_SRC})
 target_link_libraries(dr_ir PUBLIC dr_frontend)
 
 if(DOLRECOMP_ENABLE_LLVM)
+    set(DOLRECOMP_PREOPT_POLICY_SOURCES
+        src/backend/llvm/llvm_backend.cpp
+        src/backend/llvm/llvm_backend.h
+        src/backend/llvm/object_cache.cpp
+        src/backend/llvm/object_cache.h
+        src/backend/llvm/passes.cpp
+        src/backend/llvm/passes.h
+        src/backend/llvm/target.cpp
+        src/backend/llvm/target.h)
+    set(DOLRECOMP_PREOPT_POLICY_DIGEST "")
+    foreach(_policy_source IN LISTS DOLRECOMP_PREOPT_POLICY_SOURCES)
+        file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${_policy_source}" _policy_hash)
+        string(APPEND DOLRECOMP_PREOPT_POLICY_DIGEST "${_policy_hash}")
+    endforeach()
+    string(SHA256 DOLRECOMP_PREOPT_POLICY_HASH "${DOLRECOMP_PREOPT_POLICY_DIGEST}")
     add_library(dr_llvm STATIC
         src/backend/llvm/llvm_backend.cpp
         src/backend/llvm/target.cpp
         src/backend/llvm/passes.cpp
+        src/backend/llvm/object_cache.cpp
         src/backend/llvm/branch_targets.cpp
         src/backend/llvm/control_flow.cpp
         src/backend/llvm/emitter.cpp
@@ -141,10 +157,26 @@ if(DOLRECOMP_ENABLE_LLVM)
         src/backend/llvm/psq_static.cpp
         src/backend/llvm/special_instructions.cpp
     )
+    target_compile_definitions(dr_llvm PRIVATE
+        DOLRECOMP_PREOPT_POLICY_HASH="${DOLRECOMP_PREOPT_POLICY_HASH}")
     target_include_directories(dr_llvm PUBLIC ${DOLRECOMP_SRC})
     target_include_directories(dr_llvm SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
     target_compile_definitions(dr_llvm PUBLIC DOLRECOMP_ENABLE_LLVM=1)
     target_compile_definitions(dr_llvm PRIVATE ${LLVM_DEFINITIONS})
+    set(DOLRECOMP_LLVM_POSTOPT_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/llvm/llvm_backend.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/llvm/object_cache.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/llvm/passes.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/llvm/target.cpp")
+    set(DOLRECOMP_LLVM_POSTOPT_DIGEST "")
+    foreach(_postopt_source IN LISTS DOLRECOMP_LLVM_POSTOPT_SOURCES)
+        file(SHA256 "${_postopt_source}" _postopt_hash)
+        string(APPEND DOLRECOMP_LLVM_POSTOPT_DIGEST "${_postopt_hash}")
+    endforeach()
+    string(SHA256 DOLRECOMP_LLVM_POSTOPT_SOURCE_HASH
+        "${DOLRECOMP_LLVM_POSTOPT_DIGEST}")
+    target_compile_definitions(dr_llvm PRIVATE
+        DOLRECOMP_LLVM_POSTOPT_SOURCE_HASH="${DOLRECOMP_LLVM_POSTOPT_SOURCE_HASH}")
     target_link_libraries(dr_llvm PUBLIC dr_ir)
     
     set(DOLRECOMP_LLVM_COMPONENTS
@@ -237,6 +269,10 @@ target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
 # CONFIGURE_DEPENDS so a newly added emitter file is covered automatically
 # rather than needing to be added to a list that can rot.
 file(GLOB DOLRECOMP_CODEGEN_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app/cli.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app/cli.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app/pipeline.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app/pipeline.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/*.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/llvm/*.cpp"
@@ -384,6 +420,12 @@ target_link_libraries(test_dolir PRIVATE dr_ir)
 add_test(NAME dolir COMMAND test_dolir)
 
 if(DOLRECOMP_ENABLE_LLVM)
+    add_executable(llvm_codegen_policy_test tests/llvm_codegen_policy_test.cpp)
+    target_include_directories(llvm_codegen_policy_test SYSTEM PRIVATE
+        ${LLVM_INCLUDE_DIRS})
+    target_compile_definitions(llvm_codegen_policy_test PRIVATE ${LLVM_DEFINITIONS})
+    target_link_libraries(llvm_codegen_policy_test PRIVATE dr_llvm)
+    add_test(NAME llvm_codegen_policy COMMAND llvm_codegen_policy_test)
     add_executable(llvm_fixture tests/llvm_fixture.cpp)
     target_link_libraries(llvm_fixture PRIVATE dr_llvm)
     add_test(NAME llvm_fixture COMMAND llvm_fixture

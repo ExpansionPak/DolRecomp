@@ -87,6 +87,7 @@ typedef struct {
   DolLLVMSemantics semantics;
   DolLLVMInstrumentation instrumentation;
   int optimization_level;
+  int fast_iteration;
   int verify;
   int emit_ir;
   const char *ir_path;
@@ -102,6 +103,7 @@ typedef struct {
   u32 mem2_size;
   u64 partition_seed;
   int state_in_memory;
+  int function_ranges_prepared;
   const DolLLVMFunctionRange *function_ranges;
   u32 function_range_count;
   const DolLLVMCallEdge *call_edges;
@@ -131,6 +133,14 @@ bool dolllvm_analyze_callsite_state(const DolIRFunction *function,
                                     const u64 *function_outputs,
                                     const u64 *post_call_defs,
                                     u64 *live_after, u64 *defined_before,
+                                    u64 *may_dirty_before);
+bool dolllvm_analyze_callsite_states(const DolIRFunction *function,
+                                     const u64 *function_outputs,
+                                     const u64 *post_call_defs,
+                                     u64 *live_after, u64 *defined_before,
+                                     u64 *may_dirty_before);
+bool dolllvm_analyze_callsite_dirty(const DolIRFunction *function,
+                                    const u64 *post_call_defs,
                                     u64 *may_dirty_before);
 bool dolllvm_propagate_function_abis(DolLLVMFunctionRange *ranges,
                                      u32 range_count,

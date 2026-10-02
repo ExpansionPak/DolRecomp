@@ -28,8 +28,8 @@ bool FunctionEmitter::emitModernWrapper(raw_ostream &diagnostics) {
     return false;
   }
   wrapper->setCallingConv(CallingConv::C);
-  wrapper->setVisibility(GlobalValue::HiddenVisibility);
-  wrapper->setDSOLocal(true);
+  wrapper->setVisibility(GlobalValue::DefaultVisibility);
+  wrapper->setDSOLocal(false);
   wrapper->getArg(0)->setName("result");
   wrapper->getArg(0)->addAttr(Attribute::getWithStructRetType(context_, exitType));
   wrapper->getArg(0)->addAttr(Attribute::NoAlias);

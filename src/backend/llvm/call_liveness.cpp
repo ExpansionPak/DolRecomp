@@ -41,15 +41,64 @@ void addSuccessors(const DolIRFunction &function, u32 blockIndex,
 
 } // namespace
 
-extern "C" bool dolllvm_analyze_callsite_state(const DolIRFunction *function,
-                                               u32 blockIndex,
-                                               const u64 *functionOutputs,
-                                               const u64 *postCallDefs,
-                                               u64 *liveAfter,
-                                               u64 *definedBefore,
-                                               u64 *mayDirtyBefore) {
-  if (!function || blockIndex >= function->block_count || !functionOutputs ||
-      !liveAfter || !definedBefore || !mayDirtyBefore)
+extern "C" bool dolllvm_analyze_callsite_dirty(const DolIRFunction *function,
+                                                const u64 *postCallDefs,
+                                                u64 *mayDirtyBefore) {
+  if (!function || !mayDirtyBefore)
+    return false;
+  const u32 count = function->block_count;
+  std::vector<std::vector<u32>> predecessors(count);
+  std::vector<Mask> defs(count);
+  for (u32 block = 0; block < count; block++) {
+    std::vector<u32> successors;
+    const DolIRBlock &source = function->blocks[block];
+    for (u32 index = 0; index < source.instruction_count; index++)
+      for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++)
+        defs[block][word] |= source.instructions[index].state_defs[word];
+    addSuccessors(*function, block, successors);
+    for (u32 target : successors)
+      predecessors[target].push_back(block);
+  }
+
+  std::vector<Mask> dirtyIn(count);
+  std::vector<Mask> dirtyOut(count);
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (u32 block = 0; block < count; block++) {
+      Mask incoming{};
+      for (u32 predecessor : predecessors[block])
+        for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++)
+          incoming[word] |= dirtyOut[predecessor][word];
+      Mask outgoing{};
+      for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++) {
+        outgoing[word] = incoming[word] | defs[block][word];
+        if (postCallDefs)
+          outgoing[word] |=
+              postCallDefs[(size_t)block * DOLIR_STATE_MASK_WORDS + word];
+      }
+      if (incoming != dirtyIn[block] || outgoing != dirtyOut[block]) {
+        dirtyIn[block] = incoming;
+        dirtyOut[block] = outgoing;
+        changed = true;
+      }
+    }
+  }
+  for (u32 block = 0; block < count; block++)
+    for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++)
+      mayDirtyBefore[(size_t)block * DOLIR_STATE_MASK_WORDS + word] =
+          dirtyIn[block][word] | defs[block][word];
+  return true;
+}
+
+extern "C" bool dolllvm_analyze_callsite_states(const DolIRFunction *function,
+                                                const u64 *functionOutputs,
+                                                const u64 *postCallDefs,
+                                                u64 *liveAfter,
+                                                u64 *definedBefore,
+                                                u64 *mayDirtyBefore) {
+  if (!function || !functionOutputs || !liveAfter || !definedBefore ||
+      !mayDirtyBefore)
     return false;
   const u32 count = function->block_count;
   std::vector<std::vector<u32>> successors(count);
@@ -148,22 +197,50 @@ extern "C" bool dolllvm_analyze_callsite_state(const DolIRFunction *function,
     }
   }
 
-  const DolIRTerminator &term = function->blocks[blockIndex].terminator;
-  const u32 continuation = term.guest_pc + 4u;
-  const bool localContinuation =
-      term.linked && continuation >= function->guest_start &&
-      continuation < function->guest_end &&
-      ((continuation - function->guest_start) & 3u) == 0;
-  const u32 continuationBlock =
-      localContinuation ? (continuation - function->guest_start) / 4u : 0u;
-  const Mask &after = localContinuation && continuationBlock < count
-                          ? liveIn[continuationBlock]
-                          : liveOut[blockIndex];
-  for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++) {
-    liveAfter[word] = after[word];
-    definedBefore[word] = definiteOut[blockIndex][word];
-    mayDirtyBefore[word] =
-        mayDirtyIn[blockIndex][word] | defs[blockIndex][word];
+  for (u32 blockIndex = 0; blockIndex < count; blockIndex++) {
+    const DolIRTerminator &term = function->blocks[blockIndex].terminator;
+    const u32 continuation = term.guest_pc + 4u;
+    const bool localContinuation =
+        term.linked && continuation >= function->guest_start &&
+        continuation < function->guest_end &&
+        ((continuation - function->guest_start) & 3u) == 0;
+    const u32 continuationBlock =
+        localContinuation ? (continuation - function->guest_start) / 4u : 0u;
+    const Mask &after = localContinuation && continuationBlock < count
+                            ? liveIn[continuationBlock]
+                            : liveOut[blockIndex];
+    for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++) {
+      const size_t index = static_cast<size_t>(blockIndex) *
+                               DOLIR_STATE_MASK_WORDS +
+                           word;
+      liveAfter[index] = after[word];
+      definedBefore[index] = definiteOut[blockIndex][word];
+      mayDirtyBefore[index] = mayDirtyIn[blockIndex][word] | defs[blockIndex][word];
+    }
   }
+  return true;
+}
+
+extern "C" bool dolllvm_analyze_callsite_state(const DolIRFunction *function,
+                                               u32 blockIndex,
+                                               const u64 *functionOutputs,
+                                               const u64 *postCallDefs,
+                                               u64 *liveAfter,
+                                               u64 *definedBefore,
+                                               u64 *mayDirtyBefore) {
+  if (!function || blockIndex >= function->block_count || !functionOutputs ||
+      !liveAfter || !definedBefore || !mayDirtyBefore)
+    return false;
+  const size_t words = static_cast<size_t>(function->block_count) *
+                       DOLIR_STATE_MASK_WORDS;
+  std::vector<u64> allLive(words), allDefined(words), allDirty(words);
+  if (!dolllvm_analyze_callsite_states(function, functionOutputs, postCallDefs,
+                                       allLive.data(), allDefined.data(),
+                                       allDirty.data()))
+    return false;
+  const size_t offset = static_cast<size_t>(blockIndex) * DOLIR_STATE_MASK_WORDS;
+  std::copy_n(allLive.data() + offset, DOLIR_STATE_MASK_WORDS, liveAfter);
+  std::copy_n(allDefined.data() + offset, DOLIR_STATE_MASK_WORDS, definedBefore);
+  std::copy_n(allDirty.data() + offset, DOLIR_STATE_MASK_WORDS, mayDirtyBefore);
   return true;
 }

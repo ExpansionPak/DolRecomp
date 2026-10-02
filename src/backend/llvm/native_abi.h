@@ -26,6 +26,10 @@ void prepareModuleABIs(const DolIRModule &source,
                        std::vector<DolLLVMFunctionRange> &ranges,
                        DolLLVMRuntime runtime,
                        std::vector<DolLLVMCallEdge> *callEdges = nullptr);
+bool collectPreparedModuleCallEdges(const DolIRModule &source,
+                                    const DolLLVMFunctionRange *ranges,
+                                    u32 rangeCount,
+                                    std::vector<DolLLVMCallEdge> &callEdges);
 bool needsInterpreter(const DolIRBlock &block);
 void collectRegionLeaders(const DolIRFunction &function, bool modernRuntime,
                           bool nativeABI, const u32 *entryPoints,
