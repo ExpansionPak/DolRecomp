@@ -15,9 +15,12 @@ int main(void) {
         "--native-abi=compact",
         "--runtime=moderngekko", "--game-id", "GMSE8P",
         "--range-profile=runtime.csv", "--range-profile-coverage=98.5",
+        "--native-entry-points=mod-entries.txt",
+        "--config=config.toml",
         "--range-profile-min-samples=7", "--range-profile-miss-min-samples=11",
         "--range-profile-neighbors=2",
         "--range-profile-call-closure-depth=3",
+        "--range-profile-successor-closure-depth=2",
         "--partition-instructions", "512", "--partition-seed", "42",
         "input.dol", "output",
     };
@@ -33,11 +36,14 @@ int main(void) {
     CHECK(strcmp(options.game_id, "GMSE8P") == 0);
     CHECK(strcmp(options.profile_use_path, "profile.profdata") == 0);
     CHECK(strcmp(options.range_profile_path, "runtime.csv") == 0);
+    CHECK(strcmp(options.native_entry_points_path, "mod-entries.txt") == 0);
+    CHECK(strcmp(options.config_path, "config.toml") == 0);
     CHECK(options.range_profile_coverage == 98.5);
     CHECK(options.range_profile_min_samples == 7u);
     CHECK(options.range_profile_miss_min_samples == 11u);
     CHECK(options.range_profile_neighbors == 2u);
     CHECK(options.range_profile_call_closure_depth == 3u);
+    CHECK(options.range_profile_successor_closure_depth == 2u);
     CHECK(options.partition_instructions == 512u);
     CHECK(options.partition_seed == 42u);
 

@@ -52,6 +52,12 @@ typedef struct {
   u64 may_dirty_before[DOLIR_STATE_MASK_WORDS];
 } DolLLVMCallEdge;
 
+typedef struct {
+  u32 start;
+  u32 end;
+  const char *symbol;
+} DolLLVMPatch;
+
 typedef enum {
   DOLLLVM_TARGET_HOST,
   DOLLLVM_TARGET_X86_64_V2,
@@ -110,6 +116,8 @@ typedef struct {
   u32 call_edge_count;
   const u32 *entry_points;
   u32 entry_point_count;
+  const DolLLVMPatch *patches;
+  u32 patch_count;
 } DolLLVMOptions;
 
 bool dolllvm_emit_object(const DolIRModule *module, const char *object_path,

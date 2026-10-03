@@ -1,21 +1,12 @@
 #include "backend/llvm/emitter.h"
 #include "cpu/cpu.h"
-
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Module.h>
-
 namespace dolllvm {
-
 using namespace llvm;
-
-namespace {
-
-constexpr u32 StructuredExitFlag = 0x80000000u;
-
-} // namespace
-
+namespace { constexpr u32 StructuredExitFlag = 0x80000000u; }
 void FunctionEmitter::emitEntry() {
   builder_.SetInsertPoint(entry_);
   StructType *chainTy = chainType();
@@ -37,9 +28,7 @@ void FunctionEmitter::emitEntry() {
           : builder_.CreateLoad(Type::getInt64Ty(context_), pending_cycles_);
   builder_.CreateStore(initialCycles, cycles_);
   Value *initialGuard =
-      native_abi_ && cold_escapes_
-          ? static_cast<Value *>(builder_.getInt64(0))
-          : builder_.CreateLoad(Type::getInt64Ty(context_), guard_cycles_);
+      builder_.CreateLoad(Type::getInt64Ty(context_), guard_cycles_);
   builder_.CreateStore(initialGuard, guard_cycles_local_);
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (!used_[slot])
@@ -64,31 +53,30 @@ void FunctionEmitter::emitEntry() {
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
     if (slotInMemory(stateSlot))
       continue;
-    Value *initial = native_abi_ && native_inputs_[slot]
-                         ? static_cast<Value *>(native_inputs_[slot])
-                         : loadContext(stateSlot);
+    Value *initial = nullptr;
+    if (native_abi_ && native_inputs_[slot]) {
+      initial = native_inputs_[slot];
+    } else {
+      initial = loadContext(stateSlot);
+    }
     if (modern_runtime_ && native_abi_ && !native_inputs_[slot] &&
         stateSlot != DOLIR_STATE_PC && stateSlot != DOLIR_STATE_TIMEBASE &&
         stateSlot != DOLIR_STATE_PROGRAM_EXCEPTION &&
         stateSlot != DOLIR_STATE_DOWNCOUNT) {
       Type *i64 = Type::getInt64Ty(context_);
-      ArrayType *valuesType = ArrayType::get(i64, DOLIR_STATE_COUNT);
-      ArrayType *maskType = ArrayType::get(i64, DOLIR_STATE_MASK_WORDS);
-      Value *values = builder_.CreateStructGEP(chainTy, chain_, 8);
-      Value *dirtyMask = builder_.CreateStructGEP(chainTy, chain_, 9);
+      Value *values = modernStateValues();
+      Value *dirtyMask = modernStateDirtyMask();
       const u32 word = slot / 64u;
       const u32 bit = slot & 63u;
       Value *maskWord = builder_.CreateLoad(
           i64, builder_.CreateInBoundsGEP(
-                   maskType, dirtyMask,
-                   {builder_.getInt64(0), builder_.getInt64(word)}));
+                   i64, dirtyMask, builder_.getInt64(word)));
       Value *dirty = builder_.CreateICmpNE(
           builder_.CreateAnd(maskWord, builder_.getInt64(u64(1) << bit)),
           builder_.getInt64(0));
       Value *chained = builder_.CreateLoad(
           i64, builder_.CreateInBoundsGEP(
-                   valuesType, values,
-                   {builder_.getInt64(0), builder_.getInt64(slot)}));
+                   i64, values, builder_.getInt64(slot)));
       Type *target = type(dolir_state_type(stateSlot));
       chained = target->isDoubleTy() ? builder_.CreateBitCast(chained, target)
                                      : builder_.CreateZExtOrTrunc(chained, target);
@@ -143,7 +131,6 @@ void FunctionEmitter::emitEntry() {
                          builder_.CreateStructGEP(chainType(), chain_, 7));
   materialize(entry_pc_);
   returnFromBody();
-
   builder_.SetInsertPoint(nativeEntry);
   if (modern_runtime_) {
     ram_ = runtimeField(3);
@@ -193,7 +180,6 @@ void FunctionEmitter::emitEntry() {
   }
   emitColdEntry(bad);
 }
-
 void FunctionEmitter::syncDirtyState() {
   if (modern_runtime_) {
     u64 localDirty[DOLIR_STATE_MASK_WORDS]{};
@@ -219,7 +205,6 @@ void FunctionEmitter::syncDirtyState() {
   if (dirty_[DOLIR_STATE_FPSCR])
     storeContext(DOLIR_STATE_FPSCR, stateValue(DOLIR_STATE_FPSCR));
 }
-
 void FunctionEmitter::returnFromBody() {
   if (modern_runtime_ && native_abi_ && cold_escapes_) {
     Value *reasonPtr =
@@ -262,7 +247,6 @@ void FunctionEmitter::returnFromBody() {
     builder_.CreateRetVoid();
   }
 }
-
 Value *FunctionEmitter::structuredExitPending() {
   if (!modern_runtime_ || !native_abi_ || !cold_escapes_)
     return builder_.getFalse();
@@ -272,7 +256,6 @@ Value *FunctionEmitter::structuredExitPending() {
       builder_.CreateAnd(reason, builder_.getInt32(StructuredExitFlag)),
       builder_.getInt32(0));
 }
-
 void FunctionEmitter::returnStructuredExit() {
   if (!modern_runtime_ || !native_abi_ || !cold_escapes_) {
     returnFromBody();
@@ -284,5 +267,4 @@ void FunctionEmitter::returnStructuredExit() {
   else
     builder_.CreateRetVoid();
 }
-
 } // namespace dolllvm

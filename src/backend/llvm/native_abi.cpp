@@ -261,11 +261,7 @@ llvm::StructType *FunctionEmitter::chainType() {
        llvm::Type::getInt64Ty(context_), llvm::Type::getInt64Ty(context_),
        llvm::Type::getInt64Ty(context_), llvm::Type::getInt64Ty(context_),
        llvm::Type::getInt32Ty(context_), llvm::Type::getInt32Ty(context_),
-       llvm::Type::getInt32Ty(context_),
-       llvm::ArrayType::get(llvm::Type::getInt64Ty(context_),
-                            DOLIR_STATE_COUNT),
-       llvm::ArrayType::get(llvm::Type::getInt64Ty(context_),
-                            DOLIR_STATE_MASK_WORDS)});
+       llvm::Type::getInt32Ty(context_), pointer, pointer, pointer});
 }
 
 llvm::FunctionType *

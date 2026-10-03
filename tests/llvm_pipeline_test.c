@@ -89,6 +89,29 @@ static int write_profile_hole_dol(const char* path) {
     return fclose(file) == 0 && ok;
 }
 
+static int write_successor_hole_dol(const char* path) {
+    u8 bytes[0x400];
+    memset(bytes, 0, sizeof(bytes));
+    write_be32(bytes + 0x00, 0x100);
+    write_be32(bytes + 0x48, 0x80003100u);
+    write_be32(bytes + 0x90, 0x300);
+    write_be32(bytes + 0xE0, 0x80003100u);
+    for (size_t offset = 0x100; offset < sizeof(bytes); offset += 4)
+        write_be32(bytes + offset, 0x60000000u);
+    write_be32(bytes + 0x100, 0x48000200u);
+    write_be32(bytes + 0x108, 0x480000F9u);
+    write_be32(bytes + 0x10C, 0x480001F5u);
+    write_be32(bytes + 0x200, 0x38600001u);
+    write_be32(bytes + 0x204, 0x4E800020u);
+    write_be32(bytes + 0x300, 0x38600002u);
+    write_be32(bytes + 0x304, 0x4E800020u);
+    FILE* file = fopen(path, "wb");
+    if (!file)
+        return 0;
+    int ok = fwrite(bytes, 1, sizeof(bytes), file) == sizeof(bytes);
+    return fclose(file) == 0 && ok;
+}
+
 static int run_generator(const char* executable, const char* dol,
                          const char* output, const char* targets,
                          const char* cache) {
@@ -257,6 +280,123 @@ static int run_native_generator_hot(const char* executable, const char* dol,
 #endif
 }
 
+static int run_native_generator_forced_hot(const char* executable,
+                                           const char* dol,
+                                           const char* output,
+                                           const char* profile,
+                                           const char* entries) {
+#if defined(_WIN32)
+    if (_putenv_s("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512") != 0 ||
+        _putenv_s("DOLRECOMP_LLVM_CACHE", "off") != 0 ||
+        _putenv_s("DOLRECOMP_LLVM_RANGES_PER_OBJECT", "") != 0)
+        return 0;
+    return _spawnl(_P_WAIT, executable, executable, "--gamecube",
+                   "--backend=llvm", "--runtime=moderngekko",
+                   "--game-id=TEST01", "--targets=host", "--range-profile",
+                   profile, "--range-profile-coverage=100",
+                   "--range-profile-miss-min-samples=101",
+                   "--range-profile-neighbors=0",
+                   "--range-profile-call-closure-depth=0",
+                   "--range-profile-successor-closure-depth=0",
+                   "--native-entry-points", entries,
+                   "-j2", dol, output, NULL) == 0;
+#else
+    pid_t child = fork();
+    if (child < 0)
+        return 0;
+    if (child == 0) {
+        setenv("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512", 1);
+        setenv("DOLRECOMP_LLVM_CACHE", "off", 1);
+        unsetenv("DOLRECOMP_LLVM_RANGES_PER_OBJECT");
+        execl(executable, executable, "--gamecube", "--backend=llvm",
+              "--runtime=moderngekko", "--game-id=TEST01", "--targets=host",
+              "--range-profile", profile, "--range-profile-coverage=100",
+              "--range-profile-miss-min-samples=101",
+              "--range-profile-neighbors=0",
+              "--range-profile-call-closure-depth=0",
+              "--range-profile-successor-closure-depth=0",
+              "--native-entry-points", entries,
+              "-j2", dol, output, NULL);
+        _exit(127);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+           WEXITSTATUS(status) == 0;
+#endif
+}
+
+static int run_generator_patched(const char* executable, const char* dol,
+                                 const char* output, const char* config) {
+#if defined(_WIN32)
+    if (_putenv_s("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512") != 0 ||
+        _putenv_s("DOLRECOMP_LLVM_CACHE", "off") != 0 ||
+        _putenv_s("DOLRECOMP_LLVM_RANGES_PER_OBJECT", "") != 0)
+        return 0;
+    return _spawnl(_P_WAIT, executable, executable, "--gamecube",
+                   "--backend=llvm", "--runtime=moderngekko",
+                   "--game-id=TEST01", "--targets=host", "--native-abi=off",
+                   "--config", config, "-j2", dol, output, NULL) == 0;
+#else
+    pid_t child = fork();
+    if (child < 0)
+        return 0;
+    if (child == 0) {
+        setenv("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512", 1);
+        setenv("DOLRECOMP_LLVM_CACHE", "off", 1);
+        unsetenv("DOLRECOMP_LLVM_RANGES_PER_OBJECT");
+        execl(executable, executable, "--gamecube", "--backend=llvm",
+              "--runtime=moderngekko", "--game-id=TEST01", "--targets=host",
+              "--native-abi=off", "--config", config, "-j2", dol,
+              output, NULL);
+        _exit(127);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+           WEXITSTATUS(status) == 0;
+#endif
+}
+
+static int run_native_generator_successor_hot(const char* executable,
+                                              const char* dol,
+                                              const char* output,
+                                              const char* profile,
+                                              const char* successor_depth) {
+#if defined(_WIN32)
+    if (_putenv_s("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512") != 0 ||
+        _putenv_s("DOLRECOMP_LLVM_CACHE", "off") != 0 ||
+        _putenv_s("DOLRECOMP_LLVM_RANGES_PER_OBJECT", "") != 0)
+        return 0;
+    return _spawnl(_P_WAIT, executable, executable, "--gamecube",
+                   "--backend=llvm", "--runtime=moderngekko",
+                   "--game-id=TEST01", "--targets=host", "--range-profile",
+                   profile, "--range-profile-coverage=100",
+                   "--range-profile-neighbors=0",
+                   "--range-profile-call-closure-depth=0",
+                   "--range-profile-successor-closure-depth", successor_depth,
+                   "-j2", dol, output, NULL) == 0;
+#else
+    pid_t child = fork();
+    if (child < 0)
+        return 0;
+    if (child == 0) {
+        setenv("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512", 1);
+        setenv("DOLRECOMP_LLVM_CACHE", "off", 1);
+        unsetenv("DOLRECOMP_LLVM_RANGES_PER_OBJECT");
+        execl(executable, executable, "--gamecube", "--backend=llvm",
+              "--runtime=moderngekko", "--game-id=TEST01", "--targets=host",
+              "--range-profile", profile, "--range-profile-coverage=100",
+              "--range-profile-neighbors=0",
+              "--range-profile-call-closure-depth=0",
+              "--range-profile-successor-closure-depth", successor_depth,
+              "-j2", dol, output, NULL);
+        _exit(127);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+           WEXITSTATUS(status) == 0;
+#endif
+}
+
 static int run_c_generator(const char* executable, const char* dol,
                            const char* output) {
 #if defined(_WIN32)
@@ -352,6 +492,9 @@ int main(int argc, char** argv) {
     char native_hot_header[1200];
     char native_hot_manifest[1200];
     char native_hot_profile[1200];
+    char patch_output[1200];
+    char patch_header[1200];
+    char patch_config[1200];
     char profile_hole_dol[1200];
     char profile_hole_output[1200];
     char profile_hole_header[1200];
@@ -360,6 +503,15 @@ int main(int argc, char** argv) {
     char profile_hole_cold_output[1200];
     char profile_hole_cold_header[1200];
     char profile_hole_profile[1200];
+    char profile_hole_forced_output[1200];
+    char profile_hole_forced_header[1200];
+    char forced_entries[1200];
+    char successor_hole_dol[1200];
+    char successor_profile[1200];
+    char successor_cold_output[1200];
+    char successor_cold_header[1200];
+    char successor_hot_output[1200];
+    char successor_hot_header[1200];
     char output_copy[1200];
     char header_copy[1200];
     char object_copy[1200];
@@ -429,6 +581,12 @@ int main(int argc, char** argv) {
              "%s/out-native-hot/generated/generated.c", argv[2]);
     snprintf(native_hot_profile, sizeof(native_hot_profile), "%s/hot.csv",
              argv[2]);
+    snprintf(patch_output, sizeof(patch_output),
+             "%s/out-patch", argv[2]);
+    snprintf(patch_header, sizeof(patch_header),
+             "%s/out-patch/generated/generated.h", argv[2]);
+    snprintf(patch_config, sizeof(patch_config),
+             "%s/config.toml", argv[2]);
     snprintf(profile_hole_dol, sizeof(profile_hole_dol), "%s/profile-hole.dol",
              argv[2]);
     snprintf(profile_hole_output, sizeof(profile_hole_output),
@@ -445,6 +603,24 @@ int main(int argc, char** argv) {
              "%s/out-profile-hole-cold/generated/generated.h", argv[2]);
     snprintf(profile_hole_profile, sizeof(profile_hole_profile),
              "%s/profile-hole.csv", argv[2]);
+    snprintf(profile_hole_forced_output, sizeof(profile_hole_forced_output),
+             "%s/out-profile-hole-forced", argv[2]);
+    snprintf(profile_hole_forced_header, sizeof(profile_hole_forced_header),
+             "%s/out-profile-hole-forced/generated/generated.h", argv[2]);
+    snprintf(forced_entries, sizeof(forced_entries),
+             "%s/native-entry-points.txt", argv[2]);
+    snprintf(successor_hole_dol, sizeof(successor_hole_dol),
+             "%s/successor-hole.dol", argv[2]);
+    snprintf(successor_profile, sizeof(successor_profile),
+             "%s/successor-hot.csv", argv[2]);
+    snprintf(successor_cold_output, sizeof(successor_cold_output),
+             "%s/out-successor-cold", argv[2]);
+    snprintf(successor_cold_header, sizeof(successor_cold_header),
+             "%s/out-successor-cold/generated/generated.h", argv[2]);
+    snprintf(successor_hot_output, sizeof(successor_hot_output),
+             "%s/out-successor-hot", argv[2]);
+    snprintf(successor_hot_header, sizeof(successor_hot_header),
+             "%s/out-successor-hot/generated/generated.h", argv[2]);
     snprintf(output_copy, sizeof(output_copy), "%s/out-copy", argv[2]);
     snprintf(header_copy, sizeof(header_copy),
              "%s/out-copy/generated/generated.h", argv[2]);
@@ -453,16 +629,39 @@ int main(int argc, char** argv) {
              argv[2]);
     CHECK(write_dol(dol));
     CHECK(write_profile_hole_dol(profile_hole_dol));
+    CHECK(write_successor_hole_dol(successor_hole_dol));
     CHECK(make_dir(cache));
     file = fopen(native_hot_profile, "wb");
     CHECK(file != NULL);
     CHECK(fputs("kind,pc,samples\nnative_cycles,80003100,100\n", file) >= 0);
+    CHECK(fclose(file) == 0);
+    file = fopen(successor_profile, "wb");
+    CHECK(file != NULL);
+    CHECK(fputs("kind,pc,samples\n"
+                "native_cycles,80003100,100\n",
+                file) >= 0);
     CHECK(fclose(file) == 0);
     file = fopen(profile_hole_profile, "wb");
     CHECK(file != NULL);
     CHECK(fputs("kind,pc,samples\n"
                 "native_cycles,80003100,100\n"
                 "module_miss,8000310c,100\n",
+                file) >= 0);
+    CHECK(fclose(file) == 0);
+    file = fopen(forced_entries, "wb");
+    CHECK(file != NULL);
+    CHECK(fputs("# explicit mod hook entry\n0x8000310c\n", file) >= 0);
+    CHECK(fclose(file) == 0);
+    file = fopen(patch_config, "wb");
+    CHECK(file != NULL);
+    CHECK(fputs("[patches]\n"
+                "abi_version = 1\n\n"
+                "[[patches.func]]\n"
+                "start = 0x80003110\n"
+                "end = 0x80003204\n"
+                "symbol = \"test_patch\"\n"
+                "source = \"dummy.c\"\n"
+                "expected_fnv64 = \"3D6E239CE93042B4\"\n",
                 file) >= 0);
     CHECK(fclose(file) == 0);
     CHECK(run_generator(argv[1], dol, single_output, "--targets=x86-64-v3",
@@ -474,6 +673,7 @@ int main(int argc, char** argv) {
     CHECK(run_native_generator_fast(argv[1], dol, native_fast_output));
     CHECK(run_native_generator_hot(argv[1], dol, native_hot_output,
                                    native_hot_profile, "1"));
+    CHECK(run_generator_patched(argv[1], dol, patch_output, patch_config));
     CHECK(run_native_generator(argv[1], profile_hole_dol, profile_hole_output,
                                cache));
     CHECK(run_native_generator_hot(argv[1], profile_hole_dol,
@@ -482,6 +682,16 @@ int main(int argc, char** argv) {
     CHECK(run_native_generator_hot(argv[1], profile_hole_dol,
                                    profile_hole_cold_output,
                                    profile_hole_profile, "101"));
+    CHECK(run_native_generator_forced_hot(argv[1], profile_hole_dol,
+                                          profile_hole_forced_output,
+                                          profile_hole_profile,
+                                          forced_entries));
+    CHECK(run_native_generator_successor_hot(argv[1], successor_hole_dol,
+                                             successor_cold_output,
+                                             successor_profile, "0"));
+    CHECK(run_native_generator_successor_hot(argv[1], successor_hole_dol,
+                                             successor_hot_output,
+                                             successor_profile, "1"));
     CHECK(run_generator(argv[1], dol, output, "--targets=x86-64-v2,x86-64-v3",
                         cache));
     CHECK(run_generator(argv[1], dol, output_copy,
@@ -528,8 +738,21 @@ int main(int argc, char** argv) {
     CHECK(strstr(text,
                  "values + MG_STATE_PS1_0, gpr_mask, ps0_mask, ps1_mask") != NULL);
     CHECK(strstr(text, "moderngekko_native_entry_offsets") != NULL);
-    CHECK(strstr(text, "offsetof(MGNativeServices, begin_native_segment)") != NULL);
-    CHECK(strstr(text, "services->begin_native_segment") != NULL);
+    CHECK(strstr(text, "services->begin_native_segment") == NULL);
+    CHECK(strstr(text,
+                 "uint64_t state_values[MODERNGEKKO_NATIVE_STATE_COUNT] = {0};") !=
+          NULL);
+    CHECK(strstr(text,
+                 "uint64_t dirty_mask[MODERNGEKKO_NATIVE_STATE_MASK_WORDS] = {0};") !=
+          NULL);
+    CHECK(strstr(text,
+                 "uint64_t valid_mask[MODERNGEKKO_NATIVE_STATE_MASK_WORDS] = {0};") !=
+          NULL);
+    CHECK(strstr(text,
+                 "runtime, state, state_values, dirty_mask, valid_mask") != NULL);
+    CHECK(strstr(text,
+                 "moderngekko_commit_state(state, state_values, dirty_mask)") !=
+          NULL);
     CHECK(strstr(text, "local_cycles < remaining") != NULL);
     CHECK(strstr(text, "0u, 4u, 64u, 65u, 577u") != NULL);
     CHECK(strstr(text, "UINT64_C(0x000000000000003B)") != NULL);
@@ -560,12 +783,43 @@ int main(int argc, char** argv) {
     CHECK(strstr(text, "func_80003100") != NULL);
     CHECK(strstr(text, "func_80003200") != NULL);
     CHECK(strstr(text, "func_80003A04") == NULL);
+    file = fopen(patch_header, "rb");
+    CHECK(file != NULL);
+    length = fread(text, 1, sizeof(text) - 1, file);
+    text[length] = '\0';
+    fclose(file);
+    CHECK(strstr(text, "extern MGNativeExit test_patch") != NULL);
+    CHECK(strstr(text, "MGNativeExit func_80003110(") != NULL);
+    CHECK(strstr(text, "return test_patch(runtime, state, entry_pc, "
+                       "cycle_budget, cycle_base);") != NULL);
+    CHECK(strstr(text, "{0x80003110u, 0x80003204u,") != NULL);
+    CHECK(strstr(text, "func_80003200") == NULL);
     file = fopen(profile_hole_header, "rb");
     CHECK(file != NULL);
     length = fread(text, 1, sizeof(text) - 1, file);
     text[length] = '\0';
     fclose(file);
     CHECK(strstr(text, "{0x8000310Cu, 0x80003114u,") == NULL);
+    file = fopen(profile_hole_forced_header, "rb");
+    CHECK(file != NULL);
+    length = fread(text, 1, sizeof(text) - 1, file);
+    text[length] = '\0';
+    fclose(file);
+    CHECK(strstr(text, "{0x8000310Cu, 0x80003114u,") != NULL);
+    file = fopen(successor_cold_header, "rb");
+    CHECK(file != NULL);
+    length = fread(text, 1, sizeof(text) - 1, file);
+    text[length] = '\0';
+    fclose(file);
+    CHECK(strstr(text, "func_80003200") == NULL);
+    CHECK(strstr(text, "func_80003300") == NULL);
+    file = fopen(successor_hot_header, "rb");
+    CHECK(file != NULL);
+    length = fread(text, 1, sizeof(text) - 1, file);
+    text[length] = '\0';
+    fclose(file);
+    CHECK(strstr(text, "func_80003200") != NULL);
+    CHECK(strstr(text, "func_80003300") != NULL);
     file = fopen(profile_hole_hot_header, "rb");
     CHECK(file != NULL);
     length = fread(text, 1, sizeof(text) - 1, file);

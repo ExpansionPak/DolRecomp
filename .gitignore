@@ -33,6 +33,7 @@ desktop.ini
 
 # Dependencies (if we vendor anything)
 extern/*/
+!extern/tomlc17/
 
 # Test artifacts
 tests/data/*.dol

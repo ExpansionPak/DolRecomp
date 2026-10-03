@@ -132,6 +132,21 @@ By default, `--range-profile-miss-min-samples` uses the same value as `--range-p
 
 `--range-profile-call-closure-depth` controls how many levels of direct calls are pulled in from the selected ranges. A value of `0` is valid; calls into ranges that were not selected leave through the normal ModernGekko fallback path.
 
+### Patches
+
+Use `--config config.toml`:
+
+```toml
+[[patches.func]]
+start = 0x80012340
+end = 0x80012380
+symbol = "patch_example"
+source = "patches/example.c"
+expected_fnv64 = "0123456789ABCDEF"
+```
+
+Patch callbacks use `backend/patch_abi.h` and `DOLRECOMP_PATCH(name)`.
+
 ## Function maps and replacements
 
 Passing a linker MAP file gives generated functions readable names:

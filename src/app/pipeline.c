@@ -2,6 +2,7 @@
 #include "analysis/code_section.h"
 #include "analysis/embedded_data.h"
 #include "analysis/smc.h"
+#include "app/patch_config.h"
 #include "app/paths.h"
 #include "backend/codegen.h"
 #include "backend/dispatch.h"
@@ -74,6 +75,8 @@ typedef struct {
     u32 range_count;
     const u32* entry_points;
     u32 entry_point_count;
+    const DolLLVMPatch* patches;
+    u32 patch_count;
     DolLLVMTargetProfile target_profile;
     DolLLVMSemantics semantics;
     DolLLVMInstrumentation instrumentation;
@@ -393,6 +396,12 @@ static u64 llvm_job_hash(const LLVMChunkJob* job) {
             address < job->function_address + job->count * 4u)
             hash = hash_bytes(hash, &address, sizeof(address));
     }
+    for (u32 i = 0; i < job->patch_count; i++) {
+        const DolLLVMPatch* patch = &job->patches[i];
+        hash = hash_bytes(hash, &patch->start, sizeof(patch->start));
+        hash = hash_bytes(hash, &patch->end, sizeof(patch->end));
+        hash = hash_bytes(hash, patch->symbol, strlen(patch->symbol));
+    }
     return hash;
 }
 
@@ -412,6 +421,266 @@ static int llvm_code_address(const LoadedCodeSection* sections,
             return 1;
     }
     return 0;
+}
+
+static int llvm_patch_range_valid(const LoadedCodeSection* sections,
+                                  u32 section_count, u32 start, u32 end) {
+    if (end <= start || ((start | end) & 3u))
+        return 0;
+    for (u32 i = 0; i < section_count; i++) {
+        const LoadedCodeSection* section = &sections[i];
+        u32 section_end = section->address + section->size;
+        if (section->data && start >= section->address && end <= section_end)
+            return 1;
+    }
+    return 0;
+}
+
+static int llvm_patch_range_hash(const LoadedCodeSection* sections,
+                                 u32 section_count, u32 start, u32 end,
+                                 u64* hash_out) {
+    if (!llvm_patch_range_valid(sections, section_count, start, end))
+        return 0;
+    for (u32 i = 0; i < section_count; i++) {
+        const LoadedCodeSection* section = &sections[i];
+        u32 section_end = section->address + section->size;
+        if (!section->data || start < section->address || end > section_end)
+            continue;
+        *hash_out = hash_bytes(UINT64_C(0xCBF29CE484222325),
+                               section->data + (start - section->address),
+                               end - start);
+        return 1;
+    }
+    return 0;
+}
+
+static int compare_patch(const void* left, const void* right) {
+    const DolLLVMPatch* a = (const DolLLVMPatch*)left;
+    const DolLLVMPatch* b = (const DolLLVMPatch*)right;
+    return a->start < b->start ? -1 : a->start > b->start;
+}
+
+static void free_patches(DolLLVMPatch* patches, u32 count) {
+    for (u32 i = 0; i < count; i++)
+        free((void*)patches[i].symbol);
+    free(patches);
+}
+
+static int load_patches(const LoadedCodeSection* sections,
+                        u32 section_count, const CliOptions* options,
+                        DolLLVMPatch** patches_out, u32* count_out) {
+    *patches_out = NULL;
+    *count_out = 0;
+    if (!options->config_path)
+        return 1;
+    DolRecompPatchConfig config;
+    char error[256];
+    if (!dolrecomp_patch_config_load(options->config_path, &config,
+                                     error, sizeof(error))) {
+        fprintf(stderr, "error: cannot load patch config '%s': %s\n",
+                options->config_path, error);
+        return 0;
+    }
+    DolLLVMPatch* patches = config.count
+        ? (DolLLVMPatch*)calloc(config.count, sizeof(*patches)) : NULL;
+    if (config.count && !patches) {
+        dolrecomp_patch_config_free(&config);
+        return 0;
+    }
+    for (u32 i = 0; i < config.count; i++) {
+        DolRecompPatchConfigEntry* entry = &config.entries[i];
+        if (!llvm_patch_range_valid(sections, section_count,
+                                    entry->start, entry->end)) {
+            fprintf(stderr, "error: patch %08X-%08X is outside executable code\n",
+                    entry->start, entry->end);
+            free_patches(patches, i);
+            dolrecomp_patch_config_free(&config);
+            return 0;
+        }
+        if (entry->has_expected_fnv64) {
+            u64 actual = 0;
+            if (!llvm_patch_range_hash(sections, section_count, entry->start,
+                                       entry->end, &actual) ||
+                actual != entry->expected_fnv64) {
+                fprintf(stderr,
+                        "error: patch hash mismatch for %08X-%08X: "
+                        "expected %016llX, found %016llX\n",
+                        entry->start, entry->end,
+                        (unsigned long long)entry->expected_fnv64,
+                        (unsigned long long)actual);
+                free_patches(patches, i);
+                dolrecomp_patch_config_free(&config);
+                return 0;
+            }
+        }
+        size_t symbol_size = strlen(entry->symbol) + 1u;
+        char* symbol = (char*)malloc(symbol_size);
+        if (!symbol) {
+            free_patches(patches, i);
+            dolrecomp_patch_config_free(&config);
+            return 0;
+        }
+        memcpy(symbol, entry->symbol, symbol_size);
+        patches[i].start = entry->start;
+        patches[i].end = entry->end;
+        patches[i].symbol = symbol;
+    }
+    u32 count = config.count;
+    dolrecomp_patch_config_free(&config);
+    qsort(patches, count, sizeof(*patches), compare_patch);
+    for (u32 i = 1; i < count; i++) {
+        if (patches[i - 1u].end > patches[i].start) {
+            fprintf(stderr, "error: overlapping patches %08X-%08X and %08X-%08X\n",
+                    patches[i - 1u].start, patches[i - 1u].end,
+                    patches[i].start, patches[i].end);
+            free_patches(patches, count);
+            return 0;
+        }
+    }
+    *patches_out = patches;
+    *count_out = count;
+    return 1;
+}
+
+static const DolLLVMPatch* llvm_patch_for_start(
+    const DolLLVMPatch* patches, u32 patch_count, u32 start) {
+    for (u32 i = 0; i < patch_count; i++)
+        if (patches[i].start == start)
+            return &patches[i];
+    return NULL;
+}
+
+static int append_patch_points(const DolLLVMPatch* patches, u32 patch_count,
+                               int include_end, u32** points, u32* count) {
+    u32 add = patch_count * (include_end ? 2u : 1u);
+    if (!add) return 1;
+    u32* resized = (u32*)realloc(*points, (size_t)(*count + add) * sizeof(**points));
+    if (!resized) return 0;
+    *points = resized;
+    for (u32 i = 0; i < patch_count; i++) {
+        (*points)[(*count)++] = patches[i].start;
+        if (include_end) (*points)[(*count)++] = patches[i].end;
+    }
+    qsort(*points, *count, sizeof(**points), compare_u32);
+    u32 unique = 0;
+    for (u32 i = 0; i < *count; i++)
+        if (!unique || (*points)[i] != (*points)[unique - 1u])
+            (*points)[unique++] = (*points)[i];
+    *count = unique;
+    return 1;
+}
+
+static int load_forced_llvm_points(const LoadedCodeSection* sections,
+                                   u32 section_count, const CliOptions* options,
+                                   u32** points_out, u32* count_out) {
+    *points_out = NULL;
+    *count_out = 0;
+    if (!options->native_entry_points_path)
+        return 1;
+
+    FILE* file = fopen(options->native_entry_points_path, "r");
+    if (!file) {
+        fprintf(stderr, "error: cannot read native entry points '%s'\n",
+                options->native_entry_points_path);
+        return 0;
+    }
+
+    u32 capacity = 32u;
+    u32 count = 0;
+    u32* points = (u32*)malloc((size_t)capacity * sizeof(*points));
+    if (!points) {
+        fclose(file);
+        return 0;
+    }
+
+    char line[256];
+    u32 line_number = 0;
+    while (fgets(line, sizeof(line), file)) {
+        line_number++;
+        char* start = line;
+        while (*start == ' ' || *start == '\t')
+            start++;
+        char* comment = strchr(start, '#');
+        if (comment)
+            *comment = '\0';
+        char* end_text = start + strlen(start);
+        while (end_text > start &&
+               (end_text[-1] == ' ' || end_text[-1] == '\t' ||
+                end_text[-1] == '\r' || end_text[-1] == '\n'))
+            *--end_text = '\0';
+        if (!*start)
+            continue;
+
+        char* end = NULL;
+        errno = 0;
+        unsigned long value = strtoul(start, &end, 16);
+        if (errno || !end || *end || value > UINT32_MAX ||
+            !llvm_code_address(sections, section_count, (u32)value)) {
+            fprintf(stderr,
+                    "error: invalid native entry point '%s' at %s:%u\n",
+                    start, options->native_entry_points_path, line_number);
+            free(points);
+            fclose(file);
+            return 0;
+        }
+        if (count == capacity) {
+            capacity *= 2u;
+            u32* resized =
+                (u32*)realloc(points, (size_t)capacity * sizeof(*points));
+            if (!resized) {
+                free(points);
+                fclose(file);
+                return 0;
+            }
+            points = resized;
+        }
+        points[count++] = (u32)value;
+    }
+    fclose(file);
+
+    qsort(points, count, sizeof(*points), compare_u32);
+    u32 unique = 0;
+    for (u32 i = 0; i < count; i++) {
+        if (!unique || points[i] != points[unique - 1u])
+            points[unique++] = points[i];
+    }
+    *points_out = points;
+    *count_out = unique;
+    return 1;
+}
+
+static int append_forced_llvm_points(
+    const LoadedCodeSection* sections, u32 section_count,
+    const CliOptions* options, u32** points, u32* count) {
+    u32* forced = NULL;
+    u32 forced_count = 0;
+    if (!load_forced_llvm_points(sections, section_count, options,
+                                 &forced, &forced_count))
+        return 0;
+    if (!forced_count) {
+        free(forced);
+        return 1;
+    }
+
+    u32* resized =
+        (u32*)realloc(*points, (size_t)(*count + forced_count) * sizeof(**points));
+    if (!resized) {
+        free(forced);
+        return 0;
+    }
+    *points = resized;
+    memcpy(*points + *count, forced, (size_t)forced_count * sizeof(*forced));
+    *count += forced_count;
+    free(forced);
+
+    qsort(*points, *count, sizeof(**points), compare_u32);
+    u32 unique = 0;
+    for (u32 i = 0; i < *count; i++) {
+        if (!unique || (*points)[i] != (*points)[unique - 1u])
+            (*points)[unique++] = (*points)[i];
+    }
+    *count = unique;
+    return 1;
 }
 
 static u32* collect_llvm_partition_points(const LoadedCodeSection* sections,
@@ -477,7 +746,8 @@ static u32 next_llvm_partition_point(const u32* points, u32 count, u32 start,
 static DolLLVMFunctionRange*
 build_llvm_ranges(const LoadedCodeSection* sections, u32 section_count,
                   u32 chunk_instructions, const u32* partition_points,
-                  u32 point_count, u32* result_count) {
+                  u32 point_count, const DolLLVMPatch* patches,
+                  u32 patch_count, u32* result_count) {
     u32 capacity = point_count;
     for (u32 i = 0; i < section_count; i++)
         capacity += ((sections[i].size / 4u) + chunk_instructions - 1u) /
@@ -491,11 +761,18 @@ build_llvm_ranges(const LoadedCodeSection* sections, u32 section_count,
         u32 start = sections[i].address;
         u32 section_end = start + (sections[i].size & ~3u);
         while (start < section_end) {
-            u32 remaining = section_end - start;
-            u32 span = chunk_instructions * 4u;
-            u32 end = remaining < span ? section_end : start + span;
-            end = next_llvm_partition_point(partition_points, point_count,
-                                            start, end);
+            const DolLLVMPatch* patch =
+                llvm_patch_for_start(patches, patch_count, start);
+            u32 end;
+            if (patch) {
+                end = patch->end;
+            } else {
+                u32 remaining = section_end - start;
+                u32 span = chunk_instructions * 4u;
+                end = remaining < span ? section_end : start + span;
+                end = next_llvm_partition_point(partition_points, point_count,
+                                                start, end);
+            }
             ranges[count].start = start;
             ranges[count].end = end;
             count++;
@@ -599,9 +876,38 @@ llvm_section_for_range(const LoadedCodeSection* sections, u32 section_count,
     return NULL;
 }
 
+static int llvm_profile_select_address(const DolLLVMFunctionRange* ranges,
+                                       u32 full_count, u32 address,
+                                       unsigned char* selected, u32* queue,
+                                       u32* queue_count) {
+    u32 target = llvm_range_index_for(ranges, full_count, address);
+    if (target == UINT32_MAX || selected[target])
+        return 0;
+    selected[target] = 1;
+    queue[(*queue_count)++] = target;
+    return 1;
+}
+
+static int llvm_profile_instruction_has_fallthrough(const PPCInst* inst) {
+    switch (inst->op) {
+    case PPC_OP_B:
+        return 0;
+    case PPC_OP_BC:
+    case PPC_OP_BCLR:
+    case PPC_OP_BCCTR:
+        return (inst->bo & 0x14u) != 0x14u;
+    case PPC_OP_SC:
+    case PPC_OP_RFI:
+        return 0;
+    default:
+        return 1;
+    }
+}
+
 static int select_profiled_llvm_ranges(
     const LoadedCodeSection* sections, u32 section_count,
-    DolLLVMFunctionRange* ranges, u32* range_count, const CliOptions* options) {
+    DolLLVMFunctionRange* ranges, u32* range_count, const CliOptions* options,
+    const DolLLVMPatch* patches, u32 patch_count) {
     if (!options->range_profile_path)
         return 1;
 
@@ -741,7 +1047,41 @@ static int select_profiled_llvm_ranges(
             profile_entry_added++;
         }
     }
-    const u32 pre_closure_count = queue_count;
+    u32 forced_entry_ranges = 0;
+    u32 forced_entry_added = 0;
+    u32* forced_points = NULL;
+    u32 forced_point_count = 0;
+    if (!load_forced_llvm_points(sections, section_count, options,
+                                 &forced_points, &forced_point_count)) {
+        free(weights);
+        free(entry_weights);
+        free(hot);
+        free(selected);
+        free(queue);
+        return 0;
+    }
+    for (u32 i = 0; i < forced_point_count; i++) {
+        u32 index = llvm_range_index_for(ranges, full_count, forced_points[i]);
+        if (index == UINT32_MAX)
+            continue;
+        forced_entry_ranges++;
+        if (!selected[index]) {
+            selected[index] = 1;
+            queue[queue_count++] = index;
+            forced_entry_added++;
+        }
+    }
+    free(forced_points);
+
+    for (u32 i = 0; i < patch_count; i++) {
+        u32 index = llvm_range_index_for(ranges, full_count, patches[i].start);
+        if (index != UINT32_MAX && !selected[index]) {
+            selected[index] = 1;
+            queue[queue_count++] = index;
+        }
+    }
+
+    const u32 pre_call_closure_count = queue_count;
     u32 closure_begin = 0;
     u32 closure_end = queue_count;
     for (u32 depth = 0;
@@ -751,6 +1091,8 @@ static int select_profiled_llvm_ranges(
         for (u32 cursor = closure_begin; cursor < closure_end; cursor++) {
             u32 index = queue[cursor];
             const DolLLVMFunctionRange* range = &ranges[index];
+            if (llvm_patch_for_start(patches, patch_count, range->start))
+                continue;
             const LoadedCodeSection* section =
                 llvm_section_for_range(sections, section_count, range);
             if (!section)
@@ -760,17 +1102,63 @@ static int select_profiled_llvm_ranges(
                 PPCInst inst = ppc_decode(read_be32(section->data + offset), address);
                 if ((inst.op != PPC_OP_B && inst.op != PPC_OP_BC) || !inst.lk)
                     continue;
-                u32 target = llvm_range_index_for(ranges, full_count,
-                                                  inst.branch_target);
-                if (target == UINT32_MAX || selected[target])
-                    continue;
-                selected[target] = 1;
-                queue[queue_count++] = target;
+                llvm_profile_select_address(ranges, full_count,
+                                            inst.branch_target, selected,
+                                            queue, &queue_count);
             }
         }
         closure_begin = closure_end;
         closure_end = queue_count;
     }
+    const u32 call_closure_count = queue_count - pre_call_closure_count;
+
+    const u32 pre_successor_closure_count = queue_count;
+    closure_begin = 0;
+    closure_end = queue_count;
+    for (u32 depth = 0;
+         depth < options->range_profile_successor_closure_depth &&
+         closure_begin < closure_end;
+         depth++) {
+        for (u32 cursor = closure_begin; cursor < closure_end; cursor++) {
+            u32 index = queue[cursor];
+            const DolLLVMFunctionRange* range = &ranges[index];
+            if (llvm_patch_for_start(patches, patch_count, range->start))
+                continue;
+            const LoadedCodeSection* section =
+                llvm_section_for_range(sections, section_count, range);
+            if (!section)
+                continue;
+
+            for (u32 address = range->start; address < range->end; address += 4u) {
+                u32 offset = address - section->address;
+                PPCInst inst =
+                    ppc_decode(read_be32(section->data + offset), address);
+                if ((inst.op == PPC_OP_B || inst.op == PPC_OP_BC) && !inst.lk)
+                    llvm_profile_select_address(ranges, full_count,
+                                                inst.branch_target, selected,
+                                                queue, &queue_count);
+                if ((inst.op == PPC_OP_BC || inst.op == PPC_OP_BCLR ||
+                     inst.op == PPC_OP_BCCTR) &&
+                    llvm_profile_instruction_has_fallthrough(&inst))
+                    llvm_profile_select_address(ranges, full_count, address + 4u,
+                                                selected, queue, &queue_count);
+            }
+
+            u32 section_end = section->address + (section->size & ~3u);
+            if (range->end > range->start && range->end < section_end) {
+                PPCInst last;
+                if (llvm_decode_at(sections, section_count, range->end - 4u,
+                                   &last) &&
+                    llvm_profile_instruction_has_fallthrough(&last))
+                    llvm_profile_select_address(ranges, full_count, range->end,
+                                                selected, queue, &queue_count);
+            }
+        }
+        closure_begin = closure_end;
+        closure_end = queue_count;
+    }
+    const u32 successor_closure_count =
+        queue_count - pre_successor_closure_count;
 
     u32 compacted = 0;
     for (u32 i = 0; i < full_count; i++)
@@ -778,12 +1166,15 @@ static int select_profiled_llvm_ranges(
             ranges[compacted++] = ranges[i];
     *range_count = compacted;
     printf("range profile: %u/%u ranges selected; %u hot seeds, %u neighbors, "
-           "%u profile-entry ranges (%u added), %u call-closure; "
+           "%u profile-entry ranges (%u added), %u forced-entry ranges (%u added), "
+           "%u call-closure, "
+           "%u successor-closure; "
            "%.3Lf%% eligible native cycles covered"
            " (%llu/%llu total samples)\n",
            compacted, full_count, seed_count, neighbor_count,
            profile_entry_ranges, profile_entry_added,
-           queue_count - pre_closure_count,
+           forced_entry_ranges, forced_entry_added,
+           call_closure_count, successor_closure_count,
            eligible_samples
                ? (long double)covered * 100.0L / (long double)eligible_samples
                : 0.0L,
@@ -1344,6 +1735,8 @@ static int emit_llvm_chunk_job(const void* data, void* user) {
     options.function_range_count = job->range_count;
     options.entry_points = job->entry_points;
     options.entry_point_count = job->entry_point_count;
+    options.patches = job->patches;
+    options.patch_count = job->patch_count;
     const char* write_journal = getenv("DOLRECOMP_LLVM_WRITE_JOURNAL");
     if (write_journal && !strcmp(write_journal, "1"))
         options.instrumentation = DOLLLVM_INSTRUMENTATION_LOCKSTEP;
@@ -1647,11 +2040,16 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
     u32* entry_points = NULL;
     u32* partition_points = NULL;
     u32* native_entries = NULL;
+    DolLLVMPatch* patches = NULL;
     LLVMNativeEntryCandidate* native_entry_candidates = NULL;
     u32 entry_point_count = 0;
+    u32 patch_count = 0;
     u32 native_entry_count = 0;
     u32 native_entry_candidate_count = 0;
     u32 native_entry_candidate_capacity = 0;
+    if (!load_patches(sections, section_count, options,
+                             &patches, &patch_count))
+        goto fail;
     entry_points = collect_llvm_entry_points(
         sections, section_count, entry_point, symbols, &entry_point_count);
     if (!entry_points)
@@ -1659,6 +2057,12 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
     if (!append_profiled_llvm_points(sections, section_count, options,
                                      "entry PCs", &entry_points,
                                      &entry_point_count))
+        goto fail;
+    if (!append_forced_llvm_points(sections, section_count, options,
+                                   &entry_points, &entry_point_count))
+        goto fail;
+    if (!append_patch_points(patches, patch_count, 0,
+                             &entry_points, &entry_point_count))
         goto fail;
     u32 partition_point_count = 0;
     partition_points = collect_llvm_partition_points(
@@ -1669,6 +2073,12 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                                      "partition PCs", &partition_points,
                                      &partition_point_count))
         goto fail;
+    if (!append_forced_llvm_points(sections, section_count, options,
+                                   &partition_points, &partition_point_count))
+        goto fail;
+    if (!append_patch_points(patches, patch_count, 1,
+                             &partition_points, &partition_point_count))
+        goto fail;
     u32 file_count = 0;
     u32 range_count = 0;
     const u32 chunk_instructions = options->partition_instructions
@@ -1676,11 +2086,13 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                                        : llvm_chunk_instructions();
     ranges = build_llvm_ranges(sections, section_count, chunk_instructions,
                                partition_points, partition_point_count,
+                               patches, patch_count,
                                &range_count);
     if (!ranges)
         goto fail;
     if (!select_profiled_llvm_ranges(sections, section_count, ranges,
-                                     &range_count, options))
+                                     &range_count, options, patches,
+                                     patch_count))
         goto fail;
     char cache_dir[1100] = "";
     if (!llvm_cache_dir(cache_dir, sizeof(cache_dir)))
@@ -1697,19 +2109,41 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
 #endif
     dolllvm_apply_native_abi_policy(
         ranges, range_count, (DolLLVMNativeABIPolicy)options->llvm_native_abi);
+    for (u32 i = 0; i < patch_count; i++) {
+        const DolLLVMFunctionRange* range =
+            llvm_range_for(ranges, range_count, patches[i].start);
+        if (!range || range->start != patches[i].start ||
+            range->end != patches[i].end) {
+            fprintf(stderr,
+                    "error: patch %08X-%08X did not form an exact LLVM range\n",
+                    patches[i].start, patches[i].end);
+            goto fail;
+        }
+    }
     if (modern_runtime) {
         native_entries = (u32*)malloc(
-            (size_t)(native_entry_candidate_count ? native_entry_candidate_count : 1u) *
+            (size_t)(native_entry_candidate_count + patch_count
+                         ? native_entry_candidate_count + patch_count
+                         : 1u) *
             sizeof(*native_entries));
         if (!native_entries)
             goto fail;
         for (u32 i = 0; i < native_entry_candidate_count; i++) {
             LLVMNativeEntryCandidate candidate = native_entry_candidates[i];
+            const DolLLVMPatch* patch =
+                candidate.range_index < range_count
+                    ? llvm_patch_for_start(patches, patch_count,
+                                           ranges[candidate.range_index].start)
+                    : NULL;
+            if (patch && candidate.pc != patch->start)
+                continue;
             if (candidate.range_index < range_count &&
                 (ranges[candidate.range_index].abi_flags &
                  DOLLLVM_FUNCTION_ABI_NATIVE))
                 native_entries[native_entry_count++] = candidate.pc;
         }
+        for (u32 i = 0; i < patch_count; i++)
+            native_entries[native_entry_count++] = patches[i].start;
     }
     if (getenv("DOLRECOMP_LLVM_ABI_STATS")) {
         for (u32 variant = 0; variant < profile_count; variant++) {
@@ -1880,6 +2314,8 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                 target_job->range_count = range_count;
                 target_job->entry_points = entry_points;
                 target_job->entry_point_count = entry_point_count;
+                target_job->patches = patches;
+                target_job->patch_count = patch_count;
                 target_job->target_profile = profiles[variant];
                 target_job->semantics = options->fast_semantics
                                             ? DOLLLVM_SEMANTICS_FAST
@@ -1926,13 +2362,17 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
             u32 output_index = first_range + chunk_index;
             const DolLLVMFunctionRange* range = &ranges[output_index];
             u32 function_address = range->start;
+            const DolLLVMPatch* patch =
+                llvm_patch_for_start(patches, patch_count,
+                                     function_address);
             u32 start = (function_address - section->address) / 4u;
             u32 chunk_count = (range->end - range->start) / 4u;
             if (modern_runtime) {
-                if (range->abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE) {
+                if ((range->abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE) || patch) {
                     fprintf(header,
                             "MGNativeExit func_%08X(const MGNativeRuntime*, "
-                            "const MGNativeState*, uint32_t, uint32_t);\n",
+                            "const MGNativeState*, uint64_t*, uint64_t*, "
+                            "uint64_t*, uint32_t, uint32_t, uint32_t);\n",
                             function_address);
                     u64 native_hash = hash_bytes(UINT64_C(0xCBF29CE484222325),
                                                  section->data + start * 4u,
@@ -2007,8 +2447,10 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                    report);
     }
     if (modern_runtime) {
-        if (!emit_native_module(header, &funcs, options->game_id,
-                                native_entries, native_entry_count))
+        if (!emit_native_module(header, &funcs, ranges, range_count,
+                                options->game_id,
+                                native_entries, native_entry_count,
+                                patches, patch_count))
             goto fail;
     } else {
     emit_dispatch_helpers(header, &funcs, entry_point);
@@ -2026,6 +2468,7 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
     free(entry_points);
     free(partition_points);
     free(native_entries);
+    free_patches(patches, patch_count);
     free(native_entry_candidates);
     printf("done!\n  header: %s\n  objects: %s (%u files)\n", header_path,
            chunks_dir, file_count);
@@ -2038,6 +2481,7 @@ fail:
     free(entry_points);
     free(partition_points);
     free(native_entries);
+    free_patches(patches, patch_count);
     free(native_entry_candidates);
     fclose(header);
     fclose(manifest);

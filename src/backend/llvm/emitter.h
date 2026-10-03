@@ -25,14 +25,11 @@ class Value;
 class raw_ostream;
 } // namespace llvm
 namespace dolllvm {
-
 class FunctionEmitter final {
 public:
   FunctionEmitter(llvm::LLVMContext &context, llvm::Module &module,
                   const DolIRFunction &source, const DolLLVMOptions &options);
-
   bool emit(llvm::raw_ostream &diagnostics);
-
 private:
   enum class FPRepresentation : u8 {
     Raw,
@@ -41,7 +38,6 @@ private:
     PairF64,
     PairF32,
   };
-
   enum class FPValueClass : u8 {
     Unknown,
     NoNaN,
@@ -87,6 +83,10 @@ private:
   void emitTimebaseWrite(const DolIRInstruction &inst);
   void stageStateMask(const u64 *mask); void syncDirtyState();
   void commitModernState(); void reloadModernState();
+  bool modernStateCacheable(DolIRStateSlot slot) const;
+  llvm::Value *modernStateValues(); llvm::Value *modernStateDirtyMask();
+  llvm::Value *modernStateValidMask(); void invalidateModernStateCache();
+  void retainModernPersistentDirty();
   void settleCycles();
   void flushCallCounters(bool force_cycles = false);
   void reloadCallCounters();
@@ -100,8 +100,8 @@ private:
   bool nativeCyclesInResult(const DolLLVMFunctionRange *range);
   u32 nativeResultLaneCount(const DolLLVMFunctionRange *range);
   llvm::Value *nativeCycleValue(llvm::Value *result, const DolLLVMFunctionRange *range);
-  llvm::Value *nativeOutputValue(llvm::Value *result,
-                                 const DolLLVMFunctionRange *range, DolIRStateSlot slot);
+  llvm::Value *nativeOutputValue(llvm::Value *result, const DolLLVMFunctionRange *range,
+                                 DolIRStateSlot slot);
   llvm::Value *nativeResultPC(llvm::Value *result);
   llvm::Value *nativeResultContinues(llvm::Value *result);
   void acceptNativeResult(llvm::Value *result, const DolLLVMFunctionRange *range);
@@ -205,7 +205,7 @@ private:
 
   llvm::BasicBlock *directDestination(const DolIRTerminator &terminator,
                                       u32 slot);
-  const DolLLVMFunctionRange *rangeFor(u32 address) const;
+  const DolLLVMFunctionRange *rangeFor(u32 address) const; const DolLLVMPatch *patchFor(u32 address) const;
   const DolLLVMCallEdge *callEdge(const DolIRTerminator &terminator, u32 slot) const;
   llvm::BasicBlock *externalDestination(const DolIRTerminator &terminator,
                                         u32 slot);
@@ -278,7 +278,7 @@ private:
   std::vector<llvm::Value *> values_;
   std::vector<u32> continuations_;
   const DolLLVMFunctionRange *ranges_ = nullptr; u32 range_count_ = 0;
-  const DolLLVMCallEdge *call_edges_ = nullptr; u32 call_edge_count_ = 0;
+  const DolLLVMCallEdge *call_edges_ = nullptr; u32 call_edge_count_ = 0; const DolLLVMPatch *patches_ = nullptr; u32 patch_count_ = 0;
   const DolLLVMFunctionRange *abi_range_ = nullptr;
   bool native_abi_ = false;
   bool cold_escapes_ = false;
@@ -293,8 +293,8 @@ private:
   bool modern_runtime_ = false;
   u32 expected_ram_size_ = 0, expected_mem2_size_ = 0;
   u32 current_pc_ = 0;
-  llvm::Value *service_yield_ = nullptr; bool service_yield_used_ = false, fp_available_checked_ = false;
+  llvm::Value *service_yield_ = nullptr;
+  bool service_yield_used_ = false, fp_available_checked_ = false;
 };
 } // namespace dolllvm
-
 #endif

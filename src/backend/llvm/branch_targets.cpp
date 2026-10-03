@@ -7,9 +7,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Support/Format.h>
 #include <llvm/Support/raw_ostream.h>
-
-namespace dolllvm {
-using namespace llvm;
+namespace dolllvm { using namespace llvm;
 BasicBlock *FunctionEmitter::directDestination(const DolIRTerminator &term,
                                                u32 slot) {
   if (term.targets[slot] != DOLIR_NO_BLOCK) {
@@ -49,6 +47,7 @@ const DolLLVMCallEdge *FunctionEmitter::callEdge(const DolIRTerminator &term,
 BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
                                                  u32 slot) {
   u32 target = term.target_addresses[slot];
+  if (modern_runtime_ && patchFor(target)) return nullptr;
   const DolLLVMFunctionRange *range = rangeFor(target);
   if (!range)
     return nullptr;
@@ -65,8 +64,8 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
         return nullptr;
     }
   }
-  BasicBlock *callBlock = BasicBlock::Create(
-      context_, term.linked ? "direct_call" : "direct_tail", function_);
+  BasicBlock *callBlock = BasicBlock::Create(context_,
+      term.linked ? "direct_call" : "direct_tail", function_);
   IRBuilderBase::InsertPoint saved = builder_.saveIP();
   builder_.SetInsertPoint(callBlock);
   emitBudgetGuard(target);
@@ -171,6 +170,8 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
     if (!cyclesInResult)
       reloadCallCounters();
     acceptNativeResult(nativeCall, range);
+    if (modern_runtime_)
+      retainModernPersistentDirty();
     if (cold_escapes_) {
       if (!term.linked) {
         if (native_abi_) {
@@ -296,5 +297,4 @@ BasicBlock *FunctionEmitter::fallbackEdge(u32 pc) {
   builder_.restoreIP(saved);
   return edge;
 }
-
 } // namespace dolllvm

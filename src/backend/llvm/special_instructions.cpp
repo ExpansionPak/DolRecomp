@@ -24,8 +24,22 @@ void FunctionEmitter::emitStateWrite(const DolIRInstruction &inst) {
       builder_.CreateLoad(Type::getInt32Ty(context_), state_[inst.aux]);
   builder_.CreateStore(value, state_[inst.aux]);
   noteStateWrite(slot, value);
-  Value *serviced = builder_.getFalse();
+  Value *enabled = builder_.CreateAnd(builder_.CreateNot(old), value);
+  enabled = builder_.CreateICmpNE(
+      builder_.CreateAnd(enabled, builder_.getInt32(0x8000)),
+      builder_.getInt32(0));
+  BasicBlock *exit = BasicBlock::Create(context_, "msr_ee_exit", function_);
+  BasicBlock *resume = BasicBlock::Create(context_, "msr_ee_resume", function_);
   if (modern_runtime_) {
+    Value *eeChanged = builder_.CreateICmpNE(
+        builder_.CreateAnd(builder_.CreateXor(old, value),
+                           builder_.getInt32(0x8000)),
+        builder_.getInt32(0));
+    BasicBlock *serviceBlock =
+        BasicBlock::Create(context_, "msr_ee_service", function_);
+    builder_.CreateCondBr(eeChanged, serviceBlock, resume);
+    builder_.SetInsertPoint(serviceBlock);
+
     Type *i32 = Type::getInt32Ty(context_);
     Type *i64 = Type::getInt64Ty(context_);
     Type *pointer = PointerType::getUnqual(context_);
@@ -37,17 +51,13 @@ void FunctionEmitter::emitStateWrite(const DolIRInstruction &inst) {
         builder_.CreateLoad(i64, cycles_));
     CallInst *accepted = builder_.CreateCall(service, {ctx_, old, value, elapsed});
     accepted->addFnAttr(Attribute::NoUnwind);
-    serviced = builder_.CreateICmpNE(accepted, builder_.getInt32(0));
+    Value *serviced =
+        builder_.CreateICmpNE(accepted, builder_.getInt32(0));
+    Value *mustExit = builder_.CreateAnd(enabled, builder_.CreateNot(serviced));
+    builder_.CreateCondBr(mustExit, exit, resume);
+  } else {
+    builder_.CreateCondBr(enabled, exit, resume);
   }
-  Value *enabled = builder_.CreateAnd(builder_.CreateNot(old), value);
-  enabled = builder_.CreateICmpNE(
-      builder_.CreateAnd(enabled, builder_.getInt32(0x8000)),
-      builder_.getInt32(0));
-  Value *mustExit = modern_runtime_ ? builder_.CreateAnd(enabled, builder_.CreateNot(serviced))
-                                    : enabled;
-  BasicBlock *exit = BasicBlock::Create(context_, "msr_ee_exit", function_);
-  BasicBlock *resume = BasicBlock::Create(context_, "msr_ee_resume", function_);
-  builder_.CreateCondBr(mustExit, exit, resume);
   builder_.SetInsertPoint(exit);
   sideExit(modern_runtime_ ? inst.guest_pc : inst.guest_pc + 4u,
            modern_runtime_ ? 6u : 0u);

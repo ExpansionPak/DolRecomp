@@ -26,11 +26,14 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  --profile-generate <path>      Emit counters for a later profile run\n");
     fprintf(stderr, "  --profile-use <path>           Optimize with an existing profile\n");
     fprintf(stderr, "  --range-profile <path>         Emit only hot LLVM ranges from runtime CSV\n");
+    fprintf(stderr, "  --native-entry-points <path>   Force hex guest PCs as prepared AOT entries\n");
+    fprintf(stderr, "  --config <path>                 Load patch configuration from TOML\n");
     fprintf(stderr, "  --range-profile-coverage <pct> Native-cycle coverage target (default: 99)\n");
     fprintf(stderr, "  --range-profile-min-samples <n> Ignore colder ranges below N samples\n");
     fprintf(stderr, "  --range-profile-miss-min-samples <n> Ignore colder module misses below N samples (default: range min)\n");
     fprintf(stderr, "  --range-profile-neighbors <n>  Include N adjacent ranges on each side\n");
     fprintf(stderr, "  --range-profile-call-closure-depth <n>  Follow direct calls to depth N (default: unlimited)\n");
+    fprintf(stderr, "  --range-profile-successor-closure-depth <n>  Follow static CFG successors to depth N (default: 0)\n");
     fprintf(stderr, "  --partition-instructions <n>   Reproducible object partition size\n");
     fprintf(stderr, "  --partition-seed <n>           Stable partition naming seed\n");
     fprintf(stderr, "  --gamecube                     GameCube mode (no title ID required)\n");
@@ -188,6 +191,7 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
     opts->range_profile_miss_min_samples = 1u;
     opts->range_profile_neighbors = 1u;
     opts->range_profile_call_closure_depth = UINT32_MAX;
+    opts->range_profile_successor_closure_depth = 0u;
 
     for (int i = 1; i < argc; i++) {
         const char* arg = argv[i];
@@ -398,6 +402,42 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             continue;
         }
 
+        if (strcmp(arg, "--native-entry-points") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --native-entry-points needs a path\n");
+                return 0;
+            }
+            opts->native_entry_points_path = argv[++i];
+            continue;
+        }
+
+        if (strncmp(arg, "--native-entry-points=", 22) == 0) {
+            if (!arg[22]) {
+                fprintf(stderr, "error: --native-entry-points needs a path\n");
+                return 0;
+            }
+            opts->native_entry_points_path = arg + 22;
+            continue;
+        }
+
+        if (strcmp(arg, "--config") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --config needs a path\n");
+                return 0;
+            }
+            opts->config_path = argv[++i];
+            continue;
+        }
+
+        if (strncmp(arg, "--config=", 9) == 0) {
+            if (!arg[9]) {
+                fprintf(stderr, "error: --config needs a path\n");
+                return 0;
+            }
+            opts->config_path = arg + 9;
+            continue;
+        }
+
         if (strcmp(arg, "--range-profile-coverage") == 0 ||
             strncmp(arg, "--range-profile-coverage=", 25) == 0) {
             const char* value = arg[24] == '=' ? arg + 25
@@ -461,6 +501,17 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             if (!value ||
                 !parse_u32_arg(value, "--range-profile-call-closure-depth",
                                &opts->range_profile_call_closure_depth))
+                return 0;
+            continue;
+        }
+
+        if (strcmp(arg, "--range-profile-successor-closure-depth") == 0 ||
+            strncmp(arg, "--range-profile-successor-closure-depth=", 40) == 0) {
+            const char* value = arg[39] == '=' ? arg + 40
+                                                : (i + 1 < argc ? argv[++i] : NULL);
+            if (!value ||
+                !parse_u32_arg(value, "--range-profile-successor-closure-depth",
+                               &opts->range_profile_successor_closure_depth))
                 return 0;
             continue;
         }
@@ -662,6 +713,24 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
          opts->llvm_runtime != DOLLLVM_RUNTIME_MODERNGEKKO)) {
         fprintf(stderr,
                 "error: --range-profile requires --backend=llvm "
+                "--runtime=moderngekko\n");
+        return 0;
+    }
+
+    if (opts->native_entry_points_path &&
+        (opts->backend != DOLRECOMP_BACKEND_LLVM ||
+         opts->llvm_runtime != DOLLLVM_RUNTIME_MODERNGEKKO)) {
+        fprintf(stderr,
+                "error: --native-entry-points requires --backend=llvm "
+                "--runtime=moderngekko\n");
+        return 0;
+    }
+
+    if (opts->config_path &&
+        (opts->backend != DOLRECOMP_BACKEND_LLVM ||
+         opts->llvm_runtime != DOLLLVM_RUNTIME_MODERNGEKKO)) {
+        fprintf(stderr,
+                "error: --config requires --backend=llvm "
                 "--runtime=moderngekko\n");
         return 0;
     }

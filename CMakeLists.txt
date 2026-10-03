@@ -60,6 +60,15 @@ endif()
 
 set(DOLRECOMP_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extern/tomlc17/src/tomlc17.c")
+    message(FATAL_ERROR
+        "tomlc17 submodule is missing; run: git submodule update --init --recursive")
+endif()
+add_library(tomlc17 STATIC extern/tomlc17/src/tomlc17.c)
+target_include_directories(tomlc17 PUBLIC extern/tomlc17/src)
+set_property(TARGET tomlc17 PROPERTY C_STANDARD 17)
+set_property(TARGET tomlc17 PROPERTY C_STANDARD_REQUIRED ON)
+
 add_library(dr_cpu STATIC src/cpu/cpu.c)
 target_include_directories(dr_cpu PUBLIC ${DOLRECOMP_SRC})
 if(NOT WIN32)
@@ -257,11 +266,13 @@ endif()
 add_library(dr_app STATIC
     src/app/cli.c
     src/app/database.c
+    src/app/patch_config.c
     src/app/setup.c
     src/app/paths.c
     src/app/pipeline.c
 )
 target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
+target_link_libraries(dr_app PUBLIC tomlc17)
 # The generated-object cache must invalidate when the code that generates those
 # objects changes. A hand-edited version string cannot do that -- it only
 # invalidates when somebody remembers to bump it. Hash the sources that decide
@@ -271,6 +282,8 @@ target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
 file(GLOB DOLRECOMP_CODEGEN_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/app/cli.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/app/cli.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app/patch_config.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app/patch_config.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/app/pipeline.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/app/pipeline.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/*.c"
@@ -313,12 +326,19 @@ if(DOLRECOMP_ENABLE_LLVM)
     set_property(TARGET test_cli PROPERTY LINKER_LANGUAGE CXX)
 endif()
 
+add_executable(test_patch_config tests/test_patch_config.c)
+target_link_libraries(test_patch_config PRIVATE dr_app)
+if(DOLRECOMP_ENABLE_LLVM)
+    set_property(TARGET test_patch_config PROPERTY LINKER_LANGUAGE CXX)
+endif()
+
 add_executable(dolir_stats tools/dolir_stats.c)
 target_link_libraries(dolir_stats PRIVATE dr_ir dr_frontend dr_analysis)
 
 enable_testing()
 
 add_test(NAME cli COMMAND test_cli)
+add_test(NAME patch_config COMMAND test_patch_config)
 
 add_test(NAME source_policy
     COMMAND ${CMAKE_COMMAND}

@@ -2,6 +2,7 @@
 #include "backend/llvm/native_abi.h"
 
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/Support/Format.h>
 #include <llvm/Support/raw_ostream.h>
@@ -64,6 +65,42 @@ bool FunctionEmitter::emitRegion(u32 index, raw_ostream &diagnostics) {
   fp_available_checked_ = false;
   pending_fprf_ = nullptr;
   builder_.SetInsertPoint(blocks_[index]);
+  if (modern_runtime_ && native_abi_) {
+    Type *pointer = PointerType::getUnqual(context_);
+    Type *i32 = Type::getInt32Ty(context_);
+    Value *callback = runtimeField(12);
+    BasicBlock *query =
+        BasicBlock::Create(context_, "mod_intercept_query", function_);
+    BasicBlock *run =
+        BasicBlock::Create(context_, "mod_intercept_continue", function_);
+    Function *expect = Intrinsic::getDeclaration(&module_, Intrinsic::expect,
+                                                 {Type::getInt1Ty(context_)});
+    Value *noCallback = builder_.CreateCall(
+        expect, {builder_.CreateIsNull(callback), builder_.getTrue()});
+    builder_.CreateCondBr(noCallback, run, query);
+
+    builder_.SetInsertPoint(query);
+    Value *runtimeContext = runtimeField(2);
+    Value *intercept = builder_.CreateCall(
+        FunctionType::get(i32, {pointer, i32}, false), callback,
+        {runtimeContext,
+         builder_.getInt32(source_.blocks[index].guest_address)});
+    Value *shouldIntercept = builder_.CreateCall(
+        expect, {builder_.CreateICmpNE(intercept, builder_.getInt32(0)),
+                 builder_.getFalse()});
+    BasicBlock *exit =
+        BasicBlock::Create(context_, "mod_intercept_exit", function_);
+    builder_.CreateCondBr(shouldIntercept, exit, run,
+                          MDBuilder(context_).createBranchWeights(1, 2000));
+
+    builder_.SetInsertPoint(exit);
+    builder_.CreateStore(builder_.getInt32(3),
+                         builder_.CreateStructGEP(chainType(), chain_, 7));
+    materialize(source_.blocks[index].guest_address);
+    returnFromBody();
+
+    builder_.SetInsertPoint(run);
+  }
   for (u32 current = index; current < source_.block_count; current++) {
     const DolIRBlock &block = source_.blocks[current];
     service_yield_used_ = false;

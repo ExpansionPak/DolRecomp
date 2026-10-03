@@ -12,8 +12,9 @@ using namespace llvm;
 StructType *FunctionEmitter::runtimeType() {
   Type *i32 = Type::getInt32Ty(context_);
   Type *pointer = PointerType::getUnqual(context_);
-  return StructType::get(context_, {i32, i32, pointer, pointer, i32, i32,
-                                    pointer, i32, i32, pointer, i32, pointer});
+  return StructType::get(context_,
+                         {i32, i32, pointer, pointer, i32, i32, pointer, i32,
+                          i32, pointer, i32, pointer, pointer});
 }
 
 StructType *FunctionEmitter::stateInterfaceType() {

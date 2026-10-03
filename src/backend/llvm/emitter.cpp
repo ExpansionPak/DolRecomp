@@ -25,6 +25,7 @@ FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
       ranges_(options.function_ranges),
       range_count_(options.function_range_count),
       call_edges_(options.call_edges), call_edge_count_(options.call_edge_count),
+      patches_(options.patches), patch_count_(options.patch_count),
       entry_points_(options.entry_points),
       entry_point_count_(options.entry_point_count),
       write_journal_(options.instrumentation ==
@@ -55,7 +56,16 @@ FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
   }
 }
 
+const DolLLVMPatch *FunctionEmitter::patchFor(u32 address) const {
+  for (u32 index = 0; index < patch_count_; index++)
+    if (address >= patches_[index].start && address < patches_[index].end)
+      return &patches_[index];
+  return nullptr;
+}
+
 bool FunctionEmitter::emit(raw_ostream &diagnostics) {
+  if (modern_runtime_ && patchFor(source_.guest_start))
+    return true;
   if (modern_runtime_ && !native_abi_)
     return true;
   auto *type = bodyFunctionType(abi_range_);

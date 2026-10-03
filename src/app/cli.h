@@ -20,6 +20,8 @@ typedef struct {
     const char* profile_generate_path;
     const char* profile_use_path;
     const char* range_profile_path;
+    const char* native_entry_points_path;
+    const char* config_path;
     const char* game_id;
     DolRecompCPU cpu;
     DolRecompBackend backend;
@@ -32,6 +34,7 @@ typedef struct {
     u32 range_profile_miss_min_samples;
     u32 range_profile_neighbors;
     u32 range_profile_call_closure_depth;
+    u32 range_profile_successor_closure_depth;
     DolLLVMNativeABIPolicy llvm_native_abi;
     DolLLVMRuntime llvm_runtime;
     int gamecube_mode;

@@ -8,10 +8,11 @@
     __FILE__, __LINE__, #x); return 1; } } while (0)
 
 enum {
-    MG_NATIVE_ABI_VERSION = 8,
+    MG_NATIVE_ABI_VERSION = 9,
     MG_NATIVE_EXIT_BUDGET = 0,
     MG_NATIVE_EXIT_EXCEPTION = 1,
     MG_NATIVE_EXIT_FALLBACK = 2,
+    MG_NATIVE_EXIT_INTERCEPT = 3,
     MG_NATIVE_EXIT_INVALIDATED_CODE = 4,
     MG_NATIVE_EXIT_STOP = 5,
     MG_NATIVE_SERVICE_CONTINUE = 0,
@@ -105,6 +106,7 @@ typedef struct MGNativeRuntime {
     uint8_t* locked_cache;
     uint32_t locked_cache_size;
     const MGNativeServices* services;
+    uint32_t (*should_intercept)(void*, uint32_t);
 } MGNativeRuntime;
 
 typedef struct TestContext {
@@ -112,6 +114,7 @@ typedef struct TestContext {
     uint64_t ps[32][2];
     uint32_t lr;
     uint32_t gpr_read_calls;
+    uint32_t gpr3_read_calls;
     uint32_t gpr_write_calls;
     uint32_t fpr_read_calls;
     uint32_t fpr_write_calls;
@@ -146,34 +149,133 @@ typedef struct TestContext {
     uint64_t last_value;
     uint64_t partial_elapsed;
     uint64_t full_elapsed;
+    uint32_t intercept_pc;
+    uint32_t intercept_calls;
 } TestContext;
 
-MGNativeExit func_80003120(const MGNativeRuntime*, const MGNativeState*,
-                           uint32_t, uint32_t);
-MGNativeExit func_80003140(const MGNativeRuntime*, const MGNativeState*,
-                           uint32_t, uint32_t);
-MGNativeExit func_80003500(const MGNativeRuntime*, const MGNativeState*,
-                           uint32_t, uint32_t);
-MGNativeExit func_80003D40(const MGNativeRuntime*, const MGNativeState*,
-                           uint32_t, uint32_t);
-MGNativeExit func_80003DA0(const MGNativeRuntime*, const MGNativeState*,
-                           uint32_t, uint32_t);
-MGNativeExit func_80004A00(const MGNativeRuntime*, const MGNativeState*,
-                           uint32_t, uint32_t);
-MGNativeExit func_80004E00(const MGNativeRuntime*, const MGNativeState*,
-                           uint32_t, uint32_t);
-MGNativeExit func_80005000(const MGNativeRuntime*, const MGNativeState*,
-                           uint32_t, uint32_t);
-MGNativeExit func_80004D00(const MGNativeRuntime*, const MGNativeState*,
-                           uint32_t, uint32_t);
-MGNativeExit func_80004D20(const MGNativeRuntime*, const MGNativeState*,
-                           uint32_t, uint32_t);
-MGNativeExit func_80004D40(const MGNativeRuntime*, const MGNativeState*,
-                           uint32_t, uint32_t);
+static uint32_t should_intercept(void* opaque, uint32_t guest_pc)
+{
+    TestContext* context = (TestContext*)opaque;
+    context->intercept_calls++;
+    return guest_pc == context->intercept_pc;
+}
+
+MGNativeExit raw_func_80003120(const MGNativeRuntime*, const MGNativeState*,
+                           uint64_t*, uint64_t*, uint64_t*,
+                           uint32_t, uint32_t, uint32_t) __asm__("func_80003120");
+MGNativeExit raw_func_80003140(const MGNativeRuntime*, const MGNativeState*,
+                           uint64_t*, uint64_t*, uint64_t*,
+                           uint32_t, uint32_t, uint32_t) __asm__("func_80003140");
+MGNativeExit raw_func_80003500(const MGNativeRuntime*, const MGNativeState*,
+                           uint64_t*, uint64_t*, uint64_t*,
+                           uint32_t, uint32_t, uint32_t) __asm__("func_80003500");
+MGNativeExit raw_func_80003D40(const MGNativeRuntime*, const MGNativeState*,
+                           uint64_t*, uint64_t*, uint64_t*,
+                           uint32_t, uint32_t, uint32_t) __asm__("func_80003D40");
+MGNativeExit raw_func_80003DA0(const MGNativeRuntime*, const MGNativeState*,
+                           uint64_t*, uint64_t*, uint64_t*,
+                           uint32_t, uint32_t, uint32_t) __asm__("func_80003DA0");
+MGNativeExit raw_func_80004A00(const MGNativeRuntime*, const MGNativeState*,
+                           uint64_t*, uint64_t*, uint64_t*,
+                           uint32_t, uint32_t, uint32_t) __asm__("func_80004A00");
+MGNativeExit raw_func_80004E00(const MGNativeRuntime*, const MGNativeState*,
+                           uint64_t*, uint64_t*, uint64_t*,
+                           uint32_t, uint32_t, uint32_t) __asm__("func_80004E00");
+MGNativeExit raw_func_80005000(const MGNativeRuntime*, const MGNativeState*,
+                           uint64_t*, uint64_t*, uint64_t*,
+                           uint32_t, uint32_t, uint32_t) __asm__("func_80005000");
+MGNativeExit raw_func_80004D00(const MGNativeRuntime*, const MGNativeState*,
+                           uint64_t*, uint64_t*, uint64_t*,
+                           uint32_t, uint32_t, uint32_t) __asm__("func_80004D00");
+MGNativeExit raw_func_80004D20(const MGNativeRuntime*, const MGNativeState*,
+                           uint64_t*, uint64_t*, uint64_t*,
+                           uint32_t, uint32_t, uint32_t) __asm__("func_80004D20");
+MGNativeExit raw_func_80004D40(const MGNativeRuntime*, const MGNativeState*,
+                           uint64_t*, uint64_t*, uint64_t*,
+                           uint32_t, uint32_t, uint32_t) __asm__("func_80004D40");
+
+static uint64_t staged_values[256];
+static uint64_t staged_dirty[4];
+static uint64_t staged_valid[4];
+
+void moderngekko_commit_state(const MGNativeState* state, const uint64_t* values,
+                              const uint64_t* mask);
+void moderngekko_reload_state(const MGNativeState* state, uint64_t* values,
+                              const uint64_t* mask);
+
+static void reset_staged_state(void) {
+    memset(staged_values, 0, sizeof(staged_values));
+    memset(staged_dirty, 0, sizeof(staged_dirty));
+    memset(staged_valid, 0, sizeof(staged_valid));
+}
+
+static void prepare_staged_gprs(const MGNativeState* state, uint32_t gpr_mask) {
+    uint64_t mask[4] = {gpr_mask, 0u, 0u, 0u};
+    moderngekko_reload_state(state, staged_values, mask);
+    staged_valid[0] |= gpr_mask;
+}
+
+typedef MGNativeExit (*TestNativeEntry)(const MGNativeRuntime*,
+                                       const MGNativeState*, uint64_t*,
+                                       uint64_t*, uint64_t*, uint32_t,
+                                       uint32_t, uint32_t);
+
+static MGNativeExit run_native_once(TestNativeEntry fn,
+                                    const MGNativeRuntime* runtime,
+                                    const MGNativeState* state, uint32_t pc,
+                                    uint32_t budget, uint32_t base) {
+    reset_staged_state();
+    uint32_t gpr_mask = 0u;
+    if (fn == raw_func_80003120 || fn == raw_func_80003DA0)
+        gpr_mask = 1u << 4;
+    else if (fn == raw_func_80003140)
+        gpr_mask = 1u << 3;
+    else if (fn == raw_func_80003500 || fn == raw_func_80004A00 ||
+             fn == raw_func_80005000)
+        gpr_mask = (1u << 3) | (1u << 4);
+    else if (fn == raw_func_80003D40)
+        gpr_mask = 0x1f8u;
+    else if (fn == raw_func_80004D20 || fn == raw_func_80004D40)
+        gpr_mask = 1u << 5;
+    if (gpr_mask)
+        prepare_staged_gprs(state, gpr_mask);
+    MGNativeExit exit = fn(runtime, state, staged_values, staged_dirty,
+                           staged_valid, pc, budget, base);
+    moderngekko_commit_state(state, staged_values, staged_dirty);
+    return exit;
+}
+
+#define RUN_NATIVE(fn, runtime, state, pc, budget, base) \
+    run_native_once(fn, runtime, state, pc, budget, base)
+
+#define func_80003120(runtime, state, pc, budget, base) \
+    RUN_NATIVE(raw_func_80003120, runtime, state, pc, budget, base)
+#define func_80003140(runtime, state, pc, budget, base) \
+    RUN_NATIVE(raw_func_80003140, runtime, state, pc, budget, base)
+#define func_80003500(runtime, state, pc, budget, base) \
+    RUN_NATIVE(raw_func_80003500, runtime, state, pc, budget, base)
+#define func_80003D40(runtime, state, pc, budget, base) \
+    RUN_NATIVE(raw_func_80003D40, runtime, state, pc, budget, base)
+#define func_80003DA0(runtime, state, pc, budget, base) \
+    RUN_NATIVE(raw_func_80003DA0, runtime, state, pc, budget, base)
+#define func_80004A00(runtime, state, pc, budget, base) \
+    RUN_NATIVE(raw_func_80004A00, runtime, state, pc, budget, base)
+#define func_80004E00(runtime, state, pc, budget, base) \
+    RUN_NATIVE(raw_func_80004E00, runtime, state, pc, budget, base)
+#define func_80005000(runtime, state, pc, budget, base) \
+    RUN_NATIVE(raw_func_80005000, runtime, state, pc, budget, base)
+#define func_80004D00(runtime, state, pc, budget, base) \
+    RUN_NATIVE(raw_func_80004D00, runtime, state, pc, budget, base)
+#define func_80004D20(runtime, state, pc, budget, base) \
+    RUN_NATIVE(raw_func_80004D20, runtime, state, pc, budget, base)
+#define func_80004D40(runtime, state, pc, budget, base) \
+    RUN_NATIVE(raw_func_80004D40, runtime, state, pc, budget, base)
 
 static uint32_t read_gpr(void* opaque, uint32_t index) {
     TestContext* context = (TestContext*)opaque;
     context->gpr_read_calls++;
+    if (index == 3u)
+        context->gpr3_read_calls++;
     return context->gpr[index];
 }
 
@@ -546,10 +648,11 @@ int main(void) {
         NULL, 0, 0,
         NULL, 0,
         &services,
+        NULL,
     };
     MGNativeState state = make_state(&context);
 
-    MGNativeExit exit = func_80003120(&runtime, &state, 0x80003120u, 100u);
+    MGNativeExit exit = func_80003120(&runtime, &state, 0x80003120u, 100u, 0u);
     CHECK(context.read_calls == 1u);
     CHECK(context.last_pc == 0x80003120u);
     CHECK(context.last_address == 0x70000004u);
@@ -558,6 +661,18 @@ int main(void) {
     CHECK(exit.reason == MG_NATIVE_EXIT_BUDGET);
     CHECK(exit.pc == 0x80003124u && exit.next_pc == 0x80003128u);
     CHECK(exit.cycles == 1u);
+
+    context.intercept_pc = 0x80003120u;
+    context.intercept_calls = 0u;
+    runtime.context = &context;
+    runtime.should_intercept = should_intercept;
+    exit = func_80003120(&runtime, &state, 0x80003120u, 100u, 0u);
+    CHECK(context.intercept_calls == 1u);
+    CHECK(exit.reason == MG_NATIVE_EXIT_INTERCEPT);
+    CHECK(exit.pc == 0x80003120u);
+    CHECK(exit.cycles == 0u);
+    runtime.should_intercept = NULL;
+    context.intercept_pc = 0u;
     CHECK(context.gpr[3] == 0xA1B2C3D4u);
     CHECK(context.gpr[4] == 0x70000004u);
 
@@ -568,7 +683,7 @@ int main(void) {
     context.service_status = MG_NATIVE_SERVICE_FALLBACK;
     state = make_state(&context);
 
-    exit = func_80003120(&runtime, &state, 0x80003120u, 100u);
+    exit = func_80003120(&runtime, &state, 0x80003120u, 100u, 0u);
     CHECK(context.read_calls == 1u);
     CHECK(context.last_pc == 0x80003120u);
     CHECK(context.last_address == 0x70000004u);
@@ -587,7 +702,7 @@ int main(void) {
     context.service_status = MG_NATIVE_SERVICE_YIELD;
     state = make_state(&context);
 
-    exit = func_80003120(&runtime, &state, 0x80003120u, 100u);
+    exit = func_80003120(&runtime, &state, 0x80003120u, 100u, 0u);
     CHECK(context.read_calls == 1u);
     CHECK(context.last_elapsed == 0u);
     CHECK(exit.reason == MG_NATIVE_EXIT_BUDGET);
@@ -603,7 +718,7 @@ int main(void) {
     context.service_status = MG_NATIVE_SERVICE_EXCEPTION;
     state = make_state(&context);
 
-    exit = func_80003120(&runtime, &state, 0x80003120u, 100u);
+    exit = func_80003120(&runtime, &state, 0x80003120u, 100u, 0u);
     CHECK(context.read_calls == 1u);
     CHECK(context.last_elapsed == 0u);
     CHECK(exit.reason == MG_NATIVE_EXIT_EXCEPTION);
@@ -619,7 +734,7 @@ int main(void) {
     context.service_status = MG_NATIVE_SERVICE_STOP;
     state = make_state(&context);
 
-    exit = func_80003120(&runtime, &state, 0x80003120u, 100u);
+    exit = func_80003120(&runtime, &state, 0x80003120u, 100u, 0u);
     CHECK(context.read_calls == 1u);
     CHECK(context.last_elapsed == 0u);
     CHECK(exit.reason == MG_NATIVE_EXIT_STOP);
@@ -639,7 +754,7 @@ int main(void) {
     services.struct_size = sizeof(services);
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003140(&runtime, &state, 0x80003140u, 100u);
+    exit = func_80003140(&runtime, &state, 0x80003140u, 100u, 0u);
     CHECK(context.fifo_try_calls == 1u);
     CHECK(context.fifo_partial_calls == 0u);
     CHECK(context.write_calls == 0u);
@@ -647,6 +762,34 @@ int main(void) {
     CHECK(context.last_value == 0x12345679u && context.last_size == 4u);
     CHECK(context.gpr[3] == 0x12345679u);
     CHECK(exit.reason == MG_NATIVE_EXIT_BUDGET);
+
+    // Two exported wrappers in one module.run burst must reuse staged GPR state
+    // without publishing/reloading it between ranges.
+    memset(&context, 0, sizeof(context));
+    context.lr = 0x81234564u;
+    context.gpr[3] = 0x12345678u;
+    context.fifo_try_accept = 1u;
+    services.struct_size = sizeof(services);
+    services.context = &context;
+    state = make_state(&context);
+    reset_staged_state();
+    prepare_staged_gprs(&state, 1u << 3);
+    exit = raw_func_80003140(&runtime, &state, staged_values, staged_dirty,
+                             staged_valid, 0x80003140u, 100u, 0u);
+    CHECK(exit.reason == MG_NATIVE_EXIT_BUDGET);
+    CHECK(context.gpr[3] == 0x12345678u);
+    CHECK(context.last_value == 0x12345679u);
+    const uint32_t gpr3_reads_after_first = context.gpr3_read_calls;
+    const uint32_t bulk_reads_after_first = context.bulk_read_calls;
+    exit = raw_func_80003140(&runtime, &state, staged_values, staged_dirty,
+                             staged_valid, 0x80003140u, 100u, exit.cycles);
+    CHECK(exit.reason == MG_NATIVE_EXIT_BUDGET);
+    CHECK(context.gpr[3] == 0x12345678u);
+    CHECK(context.last_value == 0x1234567Au);
+    CHECK(context.gpr3_read_calls == gpr3_reads_after_first);
+    CHECK(context.bulk_read_calls == bulk_reads_after_first);
+    moderngekko_commit_state(&state, staged_values, staged_dirty);
+    CHECK(context.gpr[3] == 0x1234567Au);
 
     memset(&context, 0, sizeof(context));
     context.lr = 0x81234564u;
@@ -657,7 +800,7 @@ int main(void) {
     services.struct_size = sizeof(services);
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003140(&runtime, &state, 0x80003140u, 100u);
+    exit = func_80003140(&runtime, &state, 0x80003140u, 100u, 0u);
     CHECK(context.fifo_try_calls == 1u);
     CHECK(context.fifo_partial_calls == 1u);
     CHECK(context.write_calls == 0u);
@@ -677,7 +820,7 @@ int main(void) {
     services.struct_size = sizeof(services);
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003140(&runtime, &state, 0x80003140u, 100u);
+    exit = func_80003140(&runtime, &state, 0x80003140u, 100u, 0u);
     CHECK(context.fifo_try_calls == 1u);
     CHECK(context.fifo_partial_calls == 1u);
     CHECK(context.write_calls == 1u);
@@ -697,7 +840,7 @@ int main(void) {
     services.struct_size = offsetof(MGNativeServices, try_write_fifo);
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003140(&runtime, &state, 0x80003140u, 100u);
+    exit = func_80003140(&runtime, &state, 0x80003140u, 100u, 0u);
     CHECK(context.fifo_try_calls == 0u);
     CHECK(context.fifo_partial_calls == 0u);
     CHECK(context.write_calls == 1u);
@@ -711,7 +854,7 @@ int main(void) {
     services.struct_size = offsetof(MGNativeServices, write_fifo_partial);
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003140(&runtime, &state, 0x80003140u, 100u);
+    exit = func_80003140(&runtime, &state, 0x80003140u, 100u, 0u);
     CHECK(context.fifo_try_calls == 1u);
     CHECK(context.fifo_partial_calls == 0u);
     CHECK(context.write_calls == 1u);
@@ -725,11 +868,11 @@ int main(void) {
     services.struct_size = sizeof(services);
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003140(&runtime, &state, 0x80003140u, 100u);
+    exit = func_80003140(&runtime, &state, 0x80003140u, 100u, 40u);
     CHECK(context.fifo_try_calls == 1u);
     CHECK(context.fifo_partial_calls == 1u);
     CHECK(context.write_calls == 0u);
-    CHECK(context.partial_elapsed == 3u);
+    CHECK(context.partial_elapsed == 43u);
     CHECK(context.gpr[3] == 0x6677889Au);
     CHECK(exit.reason == MG_NATIVE_EXIT_EXCEPTION);
     CHECK(exit.pc == 0x8000314Cu && exit.next_pc == 0x80003150u);
@@ -742,7 +885,7 @@ int main(void) {
         context.gpr[reg] = 0x1000u + reg;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003D40(&runtime, &state, 0x80003D40u, 100u);
+    exit = func_80003D40(&runtime, &state, 0x80003D40u, 100u, 0u);
     CHECK(context.bulk_read_calls == 1u);
     CHECK(context.bulk_write_calls == 1u);
     CHECK(context.bulk_read_gpr_mask == 0x1F8u);
@@ -755,11 +898,35 @@ int main(void) {
 
     memset(&context, 0, sizeof(context));
     context.lr = 0x81234564u;
+    context.bulk_accept = 1u;
+    for (uint32_t reg = 3u; reg <= 8u; reg++)
+        context.gpr[reg] = 0x1800u + reg;
+    services.context = &context;
+    state = make_state(&context);
+    reset_staged_state();
+    prepare_staged_gprs(&state, 0x1f8u);
+    exit = raw_func_80003D40(&runtime, &state, staged_values, staged_dirty,
+                             staged_valid, 0x80003D40u, 100u, 0u);
+    CHECK(context.bulk_read_calls == 1u);
+    CHECK(context.bulk_write_calls == 0u);
+    for (uint32_t reg = 3u; reg <= 8u; reg++)
+        CHECK(context.gpr[reg] == 0x1800u + reg);
+    exit = raw_func_80003D40(&runtime, &state, staged_values, staged_dirty,
+                             staged_valid, 0x80003D40u, 100u, exit.cycles);
+    CHECK(context.bulk_read_calls == 1u);
+    CHECK(context.bulk_write_calls == 0u);
+    moderngekko_commit_state(&state, staged_values, staged_dirty);
+    CHECK(context.bulk_write_calls == 1u);
+    for (uint32_t reg = 3u; reg <= 8u; reg++)
+        CHECK(context.gpr[reg] == 0x1802u + reg);
+
+    memset(&context, 0, sizeof(context));
+    context.lr = 0x81234564u;
     for (uint32_t reg = 3u; reg <= 8u; reg++)
         context.gpr[reg] = 0x2000u + reg;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003D40(&runtime, &state, 0x80003D40u, 100u);
+    exit = func_80003D40(&runtime, &state, 0x80003D40u, 100u, 0u);
     CHECK(context.bulk_read_calls == 1u && context.bulk_write_calls == 1u);
     CHECK(context.gpr_read_calls == 6u && context.gpr_write_calls == 6u);
     for (uint32_t reg = 3u; reg <= 8u; reg++)
@@ -773,7 +940,7 @@ int main(void) {
     services.context = &context;
     state = make_state(&context);
     state.struct_size = offsetof(MGNativeState, try_read_registers);
-    exit = func_80003D40(&runtime, &state, 0x80003D40u, 100u);
+    exit = func_80003D40(&runtime, &state, 0x80003D40u, 100u, 0u);
     CHECK(context.bulk_read_calls == 0u && context.bulk_write_calls == 1u);
     CHECK(context.gpr_read_calls == 6u && context.gpr_write_calls == 0u);
     for (uint32_t reg = 3u; reg <= 8u; reg++)
@@ -825,7 +992,7 @@ int main(void) {
     services.context = &context;
     services.continue_native = NULL;
     state = make_state(&context);
-    exit = func_80003500(&runtime, &state, 0x80003500u, 0u);
+    exit = func_80003500(&runtime, &state, 0x80003500u, 0u, 0u);
     CHECK(exit.reason == MG_NATIVE_EXIT_BUDGET);
     CHECK(exit.pc == 0x80003600u && exit.next_pc == 0x80003604u);
     CHECK(exit.cycles == 2u);
@@ -840,7 +1007,7 @@ int main(void) {
     context.gpr[4] = 0x22220000u;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80004A00(&runtime, &state, 0x80004A00u, 2u);
+    exit = func_80004A00(&runtime, &state, 0x80004A00u, 2u, 0u);
     CHECK(exit.reason == MG_NATIVE_EXIT_BUDGET);
     CHECK(exit.pc == 0x80004C00u && exit.next_pc == 0x80004C04u);
     CHECK(exit.cycles == 3u);
@@ -855,7 +1022,7 @@ int main(void) {
     services.context = &context;
     state = make_state(&context);
     g_unavailable_region_start = 0x80004C00u;
-    exit = func_80004A00(&runtime, &state, 0x80004A00u, 100u);
+    exit = func_80004A00(&runtime, &state, 0x80004A00u, 100u, 0u);
     g_unavailable_region_start = 0u;
     CHECK(exit.reason == MG_NATIVE_EXIT_INVALIDATED_CODE);
     CHECK(exit.pc == 0x80004C00u && exit.next_pc == 0x80004C04u);
@@ -868,7 +1035,7 @@ int main(void) {
     context.lr = 0x81234564u;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003D40(&runtime, &state, 0x80003D41u, 100u);
+    exit = func_80003D40(&runtime, &state, 0x80003D41u, 100u, 0u);
     CHECK(exit.reason == MG_NATIVE_EXIT_FALLBACK);
     CHECK(exit.pc == 0x80003D41u && exit.next_pc == 0x80003D45u);
     CHECK(exit.cycles == 0u);
@@ -878,7 +1045,7 @@ int main(void) {
     services.context = &context;
     state = make_state(&context);
     g_region_available = false;
-    exit = func_80003D40(&runtime, &state, 0x80003D40u, 100u);
+    exit = func_80003D40(&runtime, &state, 0x80003D40u, 100u, 0u);
     g_region_available = true;
     CHECK(exit.reason == MG_NATIVE_EXIT_INVALIDATED_CODE);
     CHECK(exit.pc == 0x80003D40u && exit.next_pc == 0x80003D44u);
@@ -888,7 +1055,7 @@ int main(void) {
     context.lr = 0x81234564u;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80004E00(&runtime, &state, 0x80004E00u, 100u);
+    exit = func_80004E00(&runtime, &state, 0x80004E00u, 100u, 0u);
     CHECK(exit.reason == MG_NATIVE_EXIT_BUDGET);
     CHECK(exit.pc == 0x81234000u && exit.next_pc == 0x81234004u);
     CHECK(exit.cycles == 7u);
@@ -904,7 +1071,7 @@ int main(void) {
     services.context = &context;
     services.struct_size = sizeof(services);
     state = make_state(&context);
-    exit = func_80005000(&runtime, &state, 0x80005000u, 100u);
+    exit = func_80005000(&runtime, &state, 0x80005000u, 100u, 0u);
     CHECK(context.instruction_calls == 1u);
     CHECK(exit.reason == MG_NATIVE_EXIT_FALLBACK);
     CHECK(exit.pc == 0x80005100u && exit.next_pc == 0x80005104u);
@@ -921,7 +1088,7 @@ int main(void) {
     services.context = &context;
     services.struct_size = sizeof(services);
     state = make_state(&context);
-    exit = func_80003DA0(&runtime, &state, 0x80003DA0u, 100u);
+    exit = func_80003DA0(&runtime, &state, 0x80003DA0u, 100u, 0u);
     CHECK(context.instruction_calls == 1u);
     CHECK(context.last_pc == 0x80003DA0u);
     CHECK(context.gpr[4] == 22u);
@@ -936,7 +1103,7 @@ int main(void) {
     context.instruction_status = MG_NATIVE_SERVICE_YIELD;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003DA0(&runtime, &state, 0x80003DA0u, 100u);
+    exit = func_80003DA0(&runtime, &state, 0x80003DA0u, 100u, 0u);
     CHECK(context.instruction_calls == 1u);
     CHECK(context.gpr[4] == 25u);
     CHECK(exit.reason == MG_NATIVE_EXIT_BUDGET);
@@ -950,7 +1117,7 @@ int main(void) {
     context.instruction_status = MG_NATIVE_SERVICE_FALLBACK;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003DA0(&runtime, &state, 0x80003DA0u, 100u);
+    exit = func_80003DA0(&runtime, &state, 0x80003DA0u, 100u, 0u);
     CHECK(context.instruction_calls == 1u);
     CHECK(context.gpr[4] == 30u);
     CHECK(exit.reason == MG_NATIVE_EXIT_FALLBACK);
@@ -964,7 +1131,7 @@ int main(void) {
     context.instruction_status = MG_NATIVE_SERVICE_EXCEPTION;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003DA0(&runtime, &state, 0x80003DA0u, 100u);
+    exit = func_80003DA0(&runtime, &state, 0x80003DA0u, 100u, 0u);
     CHECK(context.instruction_calls == 1u);
     CHECK(context.gpr[4] == 45u);
     CHECK(exit.reason == MG_NATIVE_EXIT_EXCEPTION);
@@ -978,7 +1145,7 @@ int main(void) {
     context.instruction_status = MG_NATIVE_SERVICE_STOP;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003DA0(&runtime, &state, 0x80003DA0u, 100u);
+    exit = func_80003DA0(&runtime, &state, 0x80003DA0u, 100u, 0u);
     CHECK(context.instruction_calls == 1u);
     CHECK(context.gpr[4] == 55u);
     CHECK(exit.reason == MG_NATIVE_EXIT_STOP);
@@ -992,7 +1159,7 @@ int main(void) {
     context.instruction_status = MG_NATIVE_SERVICE_CONTINUE;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80003DA0(&runtime, &state, 0x80003DA0u, 100u);
+    exit = func_80003DA0(&runtime, &state, 0x80003DA0u, 100u, 0u);
     CHECK(context.instruction_calls == 0u);
     CHECK(context.gpr[4] == 60u);
     CHECK(exit.reason == MG_NATIVE_EXIT_FALLBACK);
@@ -1018,7 +1185,7 @@ int main(void) {
     mem2[0x603] = 0x44u;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80004D00(&runtime, &state, 0x80004D00u, 100u);
+    exit = func_80004D00(&runtime, &state, 0x80004D00u, 100u, 0u);
     CHECK(context.read_calls == 0u && context.write_calls == 0u);
     CHECK(context.gpr[3] == 0x11223344u);
     CHECK(memcmp(mem2 + 0x600, mem2 + 0x604, 4u) == 0);
@@ -1034,7 +1201,7 @@ int main(void) {
     services.context = &context;
     runtime.mem2 = NULL;
     state = make_state(&context);
-    exit = func_80004D00(&runtime, &state, 0x80004D00u, 100u);
+    exit = func_80004D00(&runtime, &state, 0x80004D00u, 100u, 0u);
     CHECK(context.read_calls == 1u && context.write_calls == 1u);
     CHECK(context.last_address == 0x90000604u);
     CHECK(context.last_value == 0xA1B2C3D4u);
@@ -1051,7 +1218,7 @@ int main(void) {
     mem1[0x23] = 0xD4u;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80004D20(&runtime, &state, 0x80004D20u, 100u);
+    exit = func_80004D20(&runtime, &state, 0x80004D20u, 100u, 0u);
     CHECK(context.read_calls == 0u && context.write_calls == 0u);
     CHECK(context.gpr[3] == 0xA1B2C3D4u);
     CHECK(memcmp(mem1 + 0x20, mem1 + 0x24, 4u) == 0);
@@ -1067,7 +1234,7 @@ int main(void) {
     mem2[0x33] = 0xEFu;
     services.context = &context;
     state = make_state(&context);
-    exit = func_80004D40(&runtime, &state, 0x80004D40u, 100u);
+    exit = func_80004D40(&runtime, &state, 0x80004D40u, 100u, 0u);
     CHECK(context.read_calls == 0u && context.write_calls == 0u);
     CHECK(context.gpr[3] == 0xDEADBEEFu);
     CHECK(memcmp(mem2 + 0x30, mem2 + 0x34, 4u) == 0);

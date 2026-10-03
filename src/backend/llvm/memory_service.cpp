@@ -142,7 +142,10 @@ void FunctionEmitter::emitMemoryServiceFailure() {
   builder_.SetInsertPoint(memory_service_failure_);
   builder_.CreateStore(memory_service_failure_reason_,
                        builder_.CreateStructGEP(chainType(), chain_, 7));
-  builder_.CreateStore(memory_service_failure_elapsed_, pending_cycles_);
+  Value *localElapsed = builder_.CreateSub(
+      memory_service_failure_elapsed_,
+      builder_.CreateLoad(Type::getInt64Ty(context_), guard_cycles_local_));
+  builder_.CreateStore(localElapsed, pending_cycles_);
 
   u64 registerDirty[DOLIR_STATE_MASK_WORDS]{};
   for (u32 slot = DOLIR_STATE_GPR0; slot <= DOLIR_STATE_PS1_31; slot++) {

@@ -69,18 +69,32 @@ int main(int argc, char **argv) {
   CHECK(chainAlloca != nullptr);
   auto *chainStruct =
       llvm::dyn_cast<llvm::StructType>(chainAlloca->getAllocatedType());
-  CHECK(chainStruct != nullptr && chainStruct->getNumElements() == 10);
+  CHECK(chainStruct != nullptr && chainStruct->getNumElements() == 11);
   const llvm::StructLayout *chainLayout =
       module->getDataLayout().getStructLayout(chainStruct);
   const uint64_t budgetOffset = chainLayout->getElementOffset(4);
   const uint64_t pcOffset = chainLayout->getElementOffset(5);
   const uint64_t npcOffset = chainLayout->getElementOffset(6);
   const uint64_t reasonOffset = chainLayout->getElementOffset(7);
-  const uint64_t valuesOffset = chainLayout->getElementOffset(8);
-  const uint64_t maskOffset = chainLayout->getElementOffset(9);
-  CHECK(maskOffset - valuesOffset ==
-        static_cast<uint64_t>(DOLIR_STATE_COUNT) * sizeof(uint64_t));
+  CHECK(chainStruct->getElementType(8)->isPointerTy());
+  CHECK(chainStruct->getElementType(9)->isPointerTy());
+  CHECK(chainStruct->getElementType(10)->isPointerTy());
   CHECK(mtmsr != nullptr);
+  const llvm::BasicBlock *mtmsrService = nullptr;
+  for (const llvm::BasicBlock &block : *mtmsr)
+    if (block.getName() == "msr_ee_service")
+      mtmsrService = &block;
+  CHECK(mtmsrService != nullptr);
+  bool mtmsrConditionalService = false;
+  for (const llvm::BasicBlock &block : *mtmsr)
+  {
+    const auto *branch = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator());
+    if (!branch || !branch->isConditional())
+      continue;
+    for (unsigned successor = 0; successor < branch->getNumSuccessors(); ++successor)
+      mtmsrConditionalService |= branch->getSuccessor(successor) == mtmsrService;
+  }
+  CHECK(mtmsrConditionalService);
   CHECK(timebase != nullptr);
   CHECK(wideWrapper != nullptr && wide != nullptr);
   CHECK(resume != nullptr);
@@ -94,7 +108,11 @@ int main(int argc, char **argv) {
   CHECK(cache != nullptr);
   CHECK(systemCall != nullptr);
   CHECK(rfi == nullptr);
-  CHECK(wrapper->arg_size() == 5);
+  CHECK(wrapper->arg_size() == 9);
+  CHECK(wrapper->getArg(3)->getName() == "state_values");
+  CHECK(wrapper->getArg(4)->getName() == "dirty_mask");
+  CHECK(wrapper->getArg(5)->getName() == "valid_mask");
+  CHECK(wrapper->getArg(8)->getName() == "cycle_base");
   CHECK(wrapper->getReturnType()->isVoidTy());
   CHECK(wrapper->getArg(0)->hasStructRetAttr());
   auto *wrapperExitType = llvm::dyn_cast<llvm::StructType>(
@@ -132,11 +150,9 @@ int main(int argc, char **argv) {
   bool fallback_service_yield = false;
   bool fallback_service_continue = false;
   bool control_fallback_service = false;
-  bool wrapper_mask_zero = false;
-  bool dynamic_commit_mask = false;
-  bool dynamic_mask_clear = false;
-  bool callsite_value_stage = false;
-  bool callsite_mask_stage = false;
+  bool wrapper_reload_guard = false;
+  bool wrapper_dirty_stage = false;
+  bool wrapper_valid_stage = false;
   bool memory_read_bridge = false;
   bool memory_write_bridge = false;
   bool memory_budget_compare = false;
@@ -168,6 +184,9 @@ int main(int argc, char **argv) {
         if (&function == wrapper &&
             block.getName().starts_with("structured_return"))
           wrapper_structured_return = true;
+        if (&function == wrapper &&
+            block.getName().starts_with("reload_persistent_state"))
+          wrapper_reload_guard = true;
         if (&function == structuredOuter &&
             block.getName().starts_with("native_call_structured_exit"))
           native_structured_propagation = true;
@@ -191,7 +210,16 @@ int main(int argc, char **argv) {
         if (&function == exactService) {
           exact_service_resume |=
               block.getName().starts_with("guest_80003D84");
-          if (block.getName().starts_with("guest_80003D80"))
+          bool serviceCallBlock = false;
+          if (const auto *branch =
+                  llvm::dyn_cast<llvm::BranchInst>(block.getTerminator())) {
+            for (unsigned successor = 0;
+                 successor < branch->getNumSuccessors(); ++successor)
+              serviceCallBlock |=
+                  branch->getSuccessor(successor)->getName().starts_with(
+                      "instruction_service_resume");
+          }
+          if (serviceCallBlock)
             if (auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction))
               exact_service_call |= call->getCalledFunction() == nullptr;
         }
@@ -262,12 +290,12 @@ int main(int argc, char **argv) {
           const llvm::Value *base =
               store->getPointerOperand()->stripAndAccumulateConstantOffsets(
                   module->getDataLayout(), offset, false);
+          if (&function == wrapper) {
+            wrapper_dirty_stage |= base == wrapper->getArg(4);
+            wrapper_valid_stage |= base == wrapper->getArg(5);
+          }
           if (&function == body && base == body->getArg(2)) {
             const uint64_t raw = offset.getZExtValue();
-            callsite_value_stage |= raw >= valuesOffset && raw < maskOffset;
-            callsite_mask_stage |=
-                raw >= maskOffset &&
-                raw < maskOffset + DOLIR_STATE_MASK_WORDS * sizeof(uint64_t);
             auto *constant =
                 llvm::dyn_cast<llvm::ConstantInt>(store->getValueOperand());
             structured_budget_marker |=
@@ -322,35 +350,7 @@ int main(int argc, char **argv) {
                 memory_budget_compare |= compare->getOperand(0) == budget ||
                                          compare->getOperand(1) == budget;
         if (call && call->getCalledFunction() &&
-            call->getCalledFunction()->getName().starts_with("llvm.memset")) {
-          llvm::APInt offset(64, 0);
-          const llvm::Value *base =
-              call->getArgOperand(0)->stripAndAccumulateConstantOffsets(
-                  module->getDataLayout(), offset, false);
-          auto *length = llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(2));
-          const bool clearsMask =
-              length && length->getZExtValue() ==
-                            DOLIR_STATE_MASK_WORDS * sizeof(uint64_t);
-          wrapper_mask_zero |= &function == wrapper && base == chainAlloca &&
-                               offset.getZExtValue() == maskOffset && clearsMask;
-          dynamic_mask_clear |= &function == body && base == body->getArg(2) &&
-                                offset.getZExtValue() == maskOffset && clearsMask;
-        }
-        if (call && call->getCalledFunction() &&
             call->getCalledFunction()->getName() == "moderngekko_commit_state") {
-          llvm::APInt values(64, 0);
-          llvm::APInt mask(64, 0);
-          const llvm::Value *valuesBase =
-              call->getArgOperand(1)->stripAndAccumulateConstantOffsets(
-                  module->getDataLayout(), values, false);
-          const llvm::Value *maskBase =
-              call->getArgOperand(2)->stripAndAccumulateConstantOffsets(
-                  module->getDataLayout(), mask, false);
-          dynamic_commit_mask |=
-              &function == body && valuesBase == body->getArg(2) &&
-              maskBase == body->getArg(2) &&
-              values.getZExtValue() == valuesOffset &&
-              mask.getZExtValue() == maskOffset;
           wrapper_structured_commit |=
               &function == wrapper && block.getName() == "structured_return";
         }
@@ -436,11 +436,9 @@ int main(int argc, char **argv) {
   CHECK(fallback_service_yield);
   CHECK(fallback_service_continue);
   CHECK(!control_fallback_service);
-  CHECK(wrapper_mask_zero);
-  CHECK(dynamic_commit_mask);
-  CHECK(dynamic_mask_clear);
-  CHECK(callsite_value_stage);
-  CHECK(callsite_mask_stage);
+  CHECK(!wrapper_reload_guard);
+  CHECK(wrapper_dirty_stage);
+  CHECK(wrapper_valid_stage);
   CHECK(memory_read_bridge);
   CHECK(memory_write_bridge);
   CHECK(memory_budget_add);
@@ -451,8 +449,8 @@ int main(int argc, char **argv) {
   CHECK(fifo_try_path);
   CHECK(fifo_partial_path);
   CHECK(fifo_full_bridge);
-  CHECK(wide_wrapper_reload);
-  CHECK(wide_wrapper_commit);
+  CHECK(!wide_wrapper_reload);
+  CHECK(!wide_wrapper_commit);
   CHECK(structured_budget_marker);
   CHECK(!structured_budget_longjmp);
   CHECK(native_structured_propagation);
@@ -461,6 +459,5 @@ int main(int argc, char **argv) {
   CHECK(!cold_service_longjmp);
   CHECK(structured_return_mismatch);
   CHECK(wide_wrapper_indirect_calls == 1);
-  CHECK(body_indirect_calls <= 2);
   return 0;
 }

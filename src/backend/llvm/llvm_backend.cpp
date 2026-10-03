@@ -284,6 +284,7 @@ extern "C" bool dolllvm_codegen_fingerprint(const DolLLVMOptions *options,
       "runtime=%u|"
       "mask-words=%u|"
       "state-count=%u|calling=fastcc|control=pc32x2|return=i64-lanes|"
+      "native-entry=staged-registers-v1|"
       "escape=structured-cold-v2|memory=proven-ram-domain-v2|cycles=return-or-chain|"
       "x86-return-registers=3|"
       "aarch64-return-registers=8|reloc=pic|pipeline=default-per-module|"

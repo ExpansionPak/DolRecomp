@@ -1,26 +1,112 @@
 #include "backend/native_module.h"
 #include "backend/native_state.h"
+#include "ir/dolir.h"
 #include <stdlib.h>
 
-static void emit_ranges(FILE* out, const FunctionList* functions) {
+static u64 persistent_state_mask(u32 word) {
+    u64 mask = 0;
+    for (u32 slot = DOLIR_STATE_GPR0; slot <= DOLIR_STATE_PS1_31; slot++)
+        if (slot / 64u == word)
+            mask |= UINT64_C(1) << (slot & 63u);
+    return mask;
+}
+
+static const DolLLVMFunctionRange* find_llvm_range(
+    const DolLLVMFunctionRange* ranges, u32 range_count, u32 start) {
+    u32 first = 0, last = range_count;
+    while (first < last) {
+        u32 middle = first + (last - first) / 2u;
+        if (ranges[middle].start < start)
+            first = middle + 1u;
+        else
+            last = middle;
+    }
+    return first < range_count && ranges[first].start == start ? &ranges[first] : NULL;
+}
+
+static const DolLLVMPatch* find_patch(const DolLLVMPatch* patches,
+                                             u32 patch_count, u32 start) {
+    for (u32 i = 0; i < patch_count; i++)
+        if (patches[i].start == start)
+            return &patches[i];
+    return NULL;
+}
+
+static void emit_patch_adapters(FILE* out, const DolLLVMPatch* patches,
+                                u32 patch_count) {
+    if (!patch_count)
+        return;
+    fprintf(out,
+            "typedef MGNativeExit (*DolRecompPatchFn)(\n"
+            "    const MGNativeRuntime*, const MGNativeState*, uint32_t, uint32_t, uint32_t);\n\n");
+    for (u32 i = 0; i < patch_count; i++) {
+        const DolLLVMPatch* patch = &patches[i];
+        fprintf(out,
+                "extern MGNativeExit %s(const MGNativeRuntime*, const MGNativeState*, "
+                "uint32_t, uint32_t, uint32_t);\n"
+                "MGNativeExit func_%08X(const MGNativeRuntime* runtime, "
+                "const MGNativeState* state, uint64_t* values, uint64_t* dirty, "
+                "uint64_t* valid, uint32_t entry_pc, uint32_t cycle_budget, "
+                "uint32_t cycle_base) {\n"
+                "    if (entry_pc != 0x%08Xu) {\n"
+                "        MGNativeExit miss = {MG_NATIVE_EXIT_FALLBACK, entry_pc, "
+                "entry_pc + 4u, 0u, 0u, 0u, 0u};\n"
+                "        return miss;\n"
+                "    }\n"
+                "    int staged_dirty = 0;\n"
+                "    for (uint32_t word = 0; word < MODERNGEKKO_NATIVE_STATE_MASK_WORDS; word++)\n"
+                "        staged_dirty |= dirty[word] != 0u;\n"
+                "    if (staged_dirty) moderngekko_commit_state(state, values, dirty);\n"
+                "    for (uint32_t word = 0; word < MODERNGEKKO_NATIVE_STATE_MASK_WORDS; word++) {\n"
+                "        dirty[word] = 0u; valid[word] = 0u;\n"
+                "    }\n"
+                "    if (runtime->should_intercept &&\n"
+                "        runtime->should_intercept(runtime->context, entry_pc)) {\n"
+                "        MGNativeExit intercepted = {MG_NATIVE_EXIT_INTERCEPT, entry_pc,\n"
+                "            entry_pc + 4u, 0u, 0u, 0u, 0u};\n"
+                "        return intercepted;\n"
+                "    }\n"
+                "    return %s(runtime, state, entry_pc, cycle_budget, cycle_base);\n"
+                "}\n\n",
+                patch->symbol, patch->start, patch->start, patch->symbol);
+    }
+}
+
+static int emit_ranges(FILE* out, const FunctionList* functions,
+                       const DolLLVMFunctionRange* ranges, u32 range_count,
+                       const DolLLVMPatch* patches, u32 patch_count) {
     fprintf(out,
             "\ntypedef MGNativeExit (*ModernGekkoNativeEntry)(\n"
-            "    const MGNativeRuntime*, const MGNativeState*, uint32_t, uint32_t);\n"
+            "    const MGNativeRuntime*, const MGNativeState*, uint64_t*, uint64_t*,\n"
+            "    uint64_t*, uint32_t, uint32_t, uint32_t);\n"
             "typedef struct {\n"
             "    uint32_t start;\n"
             "    uint32_t end;\n"
             "    uint64_t hash;\n"
+            "    uint64_t input_mask[MODERNGEKKO_NATIVE_STATE_MASK_WORDS];\n"
             "    ModernGekkoNativeEntry entry;\n"
             "} ModernGekkoNativeRange;\n\n"
             "static const ModernGekkoNativeRange moderngekko_native_ranges[] = {\n");
     for (u32 i = 0; i < functions->count; i++) {
         const FunctionRange* range = &functions->ranges[i];
-        fprintf(out, "    {0x%08Xu, 0x%08Xu, UINT64_C(0x%016llX), func_%08X},\n",
-                range->start, range->end, (unsigned long long)range->hash,
-                range->start);
+        const DolLLVMFunctionRange* llvm_range =
+            find_llvm_range(ranges, range_count, range->start);
+        const DolLLVMPatch* patch =
+            find_patch(patches, patch_count, range->start);
+        if (!llvm_range)
+            return 0;
+        fprintf(out, "    {0x%08Xu, 0x%08Xu, UINT64_C(0x%016llX), {",
+                range->start, range->end, (unsigned long long)range->hash);
+        for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++) {
+            u64 input = patch ? 0u :
+                (llvm_range->input_state[word] & persistent_state_mask(word));
+            fprintf(out, "UINT64_C(0x%016llX)%s", (unsigned long long)input,
+                    word + 1u == DOLIR_STATE_MASK_WORDS ? "" : ", ");
+        }
+        fprintf(out, "}, func_%08X},\n", range->start);
     }
     if (!functions->count)
-        fprintf(out, "    {0u, 0u, 0u, 0},\n");
+        fprintf(out, "    {0u, 0u, 0u, {0}, 0},\n");
     fprintf(out,
             "};\n"
             "enum { MODERNGEKKO_NATIVE_DIRTY, MODERNGEKKO_NATIVE_VALID, "
@@ -29,6 +115,21 @@ static void emit_ranges(FILE* out, const FunctionList* functions) {
             "static _Atomic uint32_t moderngekko_native_unavailable;\n"
             "static _Atomic uint32_t moderngekko_native_needs_validation;\n\n",
             functions->count ? functions->count : 1u);
+    return 1;
+}
+
+static void emit_staged_state_layout(FILE* out) {
+    fprintf(out,
+            "enum {\n"
+            "    MODERNGEKKO_NATIVE_STATE_COUNT = %uu,\n"
+            "    MODERNGEKKO_NATIVE_STATE_MASK_WORDS = %uu\n"
+            "};\n\n",
+            DOLIR_STATE_COUNT, DOLIR_STATE_MASK_WORDS);
+    fprintf(out, "static const uint64_t moderngekko_native_persistent_mask[] = {");
+    for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++)
+        fprintf(out, "%sUINT64_C(0x%016llX)", word ? ", " : "",
+                (unsigned long long)persistent_state_mask(word));
+    fprintf(out, "};\n\n");
 }
 
 static void emit_lookup(FILE* out, u32 count) {
@@ -208,6 +309,24 @@ static void emit_entry(FILE* out, u32 count) {
             "static uint32_t moderngekko_native_add_sat(uint32_t a, uint32_t b) {\n"
             "    return UINT32_MAX - a < b ? UINT32_MAX : a + b;\n"
             "}\n\n"
+            "static void moderngekko_native_prepare_state(\n"
+            "    const MGNativeState* state, uint64_t* values, uint64_t* dirty,\n"
+            "    uint64_t* valid, const uint64_t* required) {\n"
+            "    uint64_t missing[MODERNGEKKO_NATIVE_STATE_MASK_WORDS];\n"
+            "    int any_missing = 0;\n"
+            "    for (uint32_t word = 0; word < MODERNGEKKO_NATIVE_STATE_MASK_WORDS; word++) {\n"
+            "        missing[word] = required[word] & ~(dirty[word] | valid[word]);\n"
+            "        any_missing |= missing[word] != 0u;\n"
+            "    }\n"
+            "    if (!any_missing) return;\n"
+            "    moderngekko_reload_state(state, values, missing);\n"
+            "    for (uint32_t word = 0; word < MODERNGEKKO_NATIVE_STATE_MASK_WORDS; word++)\n"
+            "        valid[word] |= missing[word];\n"
+            "}\n\n"
+            "static void moderngekko_native_retain_persistent_dirty(uint64_t* dirty) {\n"
+            "    for (uint32_t word = 0; word < MODERNGEKKO_NATIVE_STATE_MASK_WORDS; word++)\n"
+            "        dirty[word] &= moderngekko_native_persistent_mask[word];\n"
+            "}\n\n"
             "static MGNativeExit moderngekko_native_run(\n"
             "    const MGNativeRuntime* runtime, const MGNativeState* state,\n"
             "    uint32_t entry_pc, uint32_t cycle_budget) {\n"
@@ -218,21 +337,24 @@ static void emit_entry(FILE* out, u32 count) {
             "            entry_pc + 4u, 0u, 0u, 0u, 0u};\n"
             "        return exit;\n"
             "    }\n"
-            "    const MGNativeServices* services = runtime->services;\n"
-            "    int can_chain = services &&\n"
-            "        services->struct_size >= offsetof(MGNativeServices, begin_native_segment) +\n"
-            "                                 sizeof(services->begin_native_segment) &&\n"
-            "        services->begin_native_segment;\n"
             "    uint32_t prior_cycles = 0u;\n"
             "    uint32_t prior_instructions = 0u;\n"
             "    uint32_t prior_load_store = 0u;\n"
             "    uint32_t prior_fp = 0u;\n"
             "    uint32_t remaining = cycle_budget;\n"
+            "    uint64_t state_values[MODERNGEKKO_NATIVE_STATE_COUNT] = {0};\n"
+            "    uint64_t dirty_mask[MODERNGEKKO_NATIVE_STATE_MASK_WORDS] = {0};\n"
+            "    uint64_t valid_mask[MODERNGEKKO_NATIVE_STATE_MASK_WORDS] = {0};\n"
             "    for (;;) {\n"
-            "        MGNativeExit exit = moderngekko_native_ranges[index].entry(\n"
-            "            runtime, state, entry_pc, remaining);\n"
+            "        const ModernGekkoNativeRange* range = &moderngekko_native_ranges[index];\n"
+            "        moderngekko_native_prepare_state(\n"
+            "            state, state_values, dirty_mask, valid_mask, range->input_mask);\n"
+            "        MGNativeExit exit = range->entry(\n"
+            "            runtime, state, state_values, dirty_mask, valid_mask,\n"
+            "            entry_pc, remaining, prior_cycles);\n"
+            "        moderngekko_native_retain_persistent_dirty(dirty_mask);\n"
             "        uint32_t local_cycles = exit.cycles;\n"
-            "        int chain = can_chain && exit.reason == MG_NATIVE_EXIT_BUDGET &&\n"
+            "        int chain = exit.reason == MG_NATIVE_EXIT_BUDGET &&\n"
             "            local_cycles < remaining && (local_cycles || exit.instructions);\n"
             "        uint32_t next_index = chain ? moderngekko_native_find(exit.pc) : UINT32_MAX;\n"
             "        if (next_index == UINT32_MAX ||\n"
@@ -240,6 +362,12 @@ static void emit_entry(FILE* out, u32 count) {
             "            !moderngekko_native_validate_index(runtime, next_index))\n"
             "            chain = 0;\n"
             "        if (!chain) {\n"
+            "            int staged_dirty = 0;\n"
+            "            for (uint32_t word = 0;\n"
+            "                 word < MODERNGEKKO_NATIVE_STATE_MASK_WORDS; word++)\n"
+            "                staged_dirty |= dirty_mask[word] != 0u;\n"
+            "            if (staged_dirty)\n"
+            "                moderngekko_commit_state(state, state_values, dirty_mask);\n"
             "            exit.cycles = moderngekko_native_add_sat(prior_cycles, exit.cycles);\n"
             "            exit.instructions = moderngekko_native_add_sat(\n"
             "                prior_instructions, exit.instructions);\n"
@@ -256,13 +384,7 @@ static void emit_entry(FILE* out, u32 count) {
             "            prior_load_store, exit.load_store_instructions);\n"
             "        prior_fp = moderngekko_native_add_sat(prior_fp, exit.fp_instructions);\n"
             "        remaining -= local_cycles;\n"
-            "        if (!services->begin_native_segment(services->context, prior_cycles)) {\n"
-            "            exit.cycles = prior_cycles;\n"
-            "            exit.instructions = prior_instructions;\n"
-            "            exit.load_store_instructions = prior_load_store;\n"
-            "            exit.fp_instructions = prior_fp;\n"
-            "            return exit;\n"
-            "        }\n"
+
             "        entry_pc = exit.pc;\n"
             "        index = next_index;\n"
             "    }\n"
@@ -312,10 +434,15 @@ static void emit_invalidation(FILE* out, u32 count) {
 }
 
 int emit_native_module(FILE* out, const FunctionList* functions,
+                       const DolLLVMFunctionRange* ranges, u32 range_count,
                        const char* game_id, const u32* entries,
-                       u32 entry_count) {
+                       u32 entry_count, const DolLLVMPatch* patches,
+                       u32 patch_count) {
     emit_native_state_commit(out);
-    emit_ranges(out, functions);
+    emit_staged_state_layout(out);
+    emit_patch_adapters(out, patches, patch_count);
+    if (!emit_ranges(out, functions, ranges, range_count, patches, patch_count))
+        return 0;
     emit_lookup(out, functions->count);
     if (!emit_entry_map(out, functions, entries, entry_count))
         return 0;
