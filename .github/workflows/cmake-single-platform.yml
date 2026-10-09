@@ -34,6 +34,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Configure (non-macOS)
         if: matrix.os != 'macos-latest'
@@ -76,6 +78,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install LLVM (Linux)
         if: matrix.toolchain == 'gcc'
