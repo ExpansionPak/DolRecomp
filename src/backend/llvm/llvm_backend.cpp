@@ -130,8 +130,8 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
     } else {
       ranges.assign(options.function_ranges, options.function_ranges + options.function_range_count);
       dolllvm::prepareModuleABIs(*source, ranges, options.runtime, &callEdges);
-      dolllvm_apply_native_abi_policy(ranges.data(), static_cast<u32>(ranges.size()),
-                                      options.native_abi_policy);
+      dolllvm_finish_function_abis(ranges.data(), static_cast<u32>(ranges.size()), options.native_abi_policy,
+                                   options.runtime, callEdges.data(), static_cast<u32>(callEdges.size()));
       options.function_ranges = ranges.data();
     }
     options.call_edges = callEdges.data();
