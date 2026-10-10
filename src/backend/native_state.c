@@ -245,6 +245,16 @@ void emit_native_state_commit(FILE* out) {
         "    *remaining = result.remaining_cycles;\n"
         "    return result.status;\n"
         "}\n"
+        "DOLRECOMP_COLD uint32_t moderngekko_write_fifo_partial(\n"
+        "    const MGNativeRuntime* runtime, uint32_t pc, uint32_t address,\n"
+        "    uint64_t value, uint32_t size, uint64_t elapsed,\n"
+        "    uint32_t* remaining) {\n"
+        "    const MGNativeServices* services = runtime->services;\n"
+        "    MGNativeMemoryResult result = services->write_fifo_partial(\n"
+        "        services->context, pc, address, value, size, elapsed);\n"
+        "    *remaining = result.remaining_cycles;\n"
+        "    return result.status;\n"
+        "}\n"
         "#undef DOLRECOMP_COLD\n",
         out);
 }
