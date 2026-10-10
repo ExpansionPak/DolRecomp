@@ -159,6 +159,12 @@ void dolllvm_enable_native_services(DolLLVMFunctionRange *ranges,
 void dolllvm_apply_native_abi_policy(DolLLVMFunctionRange *ranges,
                                      u32 range_count,
                                      DolLLVMNativeABIPolicy policy);
+void dolllvm_finish_function_abis(DolLLVMFunctionRange *ranges,
+                                  u32 range_count,
+                                  DolLLVMNativeABIPolicy policy,
+                                  DolLLVMRuntime runtime,
+                                  const DolLLVMCallEdge *edges,
+                                  u32 edge_count);
 void dolllvm_report_abi_stats(const DolLLVMFunctionRange *ranges,
                               u32 range_count, const char *target_triple,
                               FILE *output);

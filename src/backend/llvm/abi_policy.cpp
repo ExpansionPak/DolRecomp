@@ -43,6 +43,47 @@ u32 packedReturnLanes(const u64 *mask) {
   return lanes + static_cast<u32>(bits != 0);
 }
 
+// Plain callers can't call native ranges directly, so keep their callees plain.
+void demotePlainCallerTargets(DolLLVMFunctionRange *ranges, u32 rangeCount,
+                              const DolLLVMCallEdge *edges, u32 edgeCount) {
+  if (!ranges || (!edges && edgeCount))
+    return;
+  std::unordered_map<u32, u32> starts;
+  std::vector<u32> order(rangeCount);
+  for (u32 index = 0; index < rangeCount; index++) {
+    starts.emplace(ranges[index].start, index);
+    order[index] = index;
+  }
+  std::sort(order.begin(), order.end(), [&](u32 left, u32 right) {
+    return ranges[left].start < ranges[right].start;
+  });
+  auto containing = [&](u32 address) -> u32 {
+    auto position = std::upper_bound(
+        order.begin(), order.end(), address,
+        [&](u32 value, u32 index) { return value < ranges[index].start; });
+    if (position == order.begin())
+      return rangeCount;
+    const u32 index = *--position;
+    return address < ranges[index].end ? index : rangeCount;
+  };
+  const u32 native =
+      DOLLLVM_FUNCTION_ABI_NATIVE | DOLLLVM_FUNCTION_ABI_NATIVE_MEMORY;
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (u32 edgeIndex = 0; edgeIndex < edgeCount; edgeIndex++) {
+      auto caller = starts.find(edges[edgeIndex].caller_start);
+      const u32 callee = containing(edges[edgeIndex].callee_address);
+      if (caller == starts.end() || callee == rangeCount ||
+          caller->second == callee ||
+          (ranges[caller->second].abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE) ||
+          !(ranges[callee].abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE))
+        continue;
+      ranges[callee].abi_flags &= ~native;
+      changed = true;
+    }
+  }
+}
+
 } // namespace
 
 extern "C" bool dolllvm_propagate_function_abis(DolLLVMFunctionRange *ranges,
@@ -212,4 +253,15 @@ extern "C" void dolllvm_apply_native_abi_policy(DolLLVMFunctionRange *ranges,
       range.abi_flags &=
           ~(DOLLLVM_FUNCTION_ABI_NATIVE | DOLLLVM_FUNCTION_ABI_NATIVE_MEMORY);
   }
+}
+
+extern "C" void dolllvm_finish_function_abis(DolLLVMFunctionRange *ranges,
+                                             u32 rangeCount,
+                                             DolLLVMNativeABIPolicy policy,
+                                             DolLLVMRuntime runtime,
+                                             const DolLLVMCallEdge *edges,
+                                             u32 edgeCount) {
+  dolllvm_apply_native_abi_policy(ranges, rangeCount, policy);
+  if (runtime != DOLLLVM_RUNTIME_MODERNGEKKO)
+    demotePlainCallerTargets(ranges, rangeCount, edges, edgeCount);
 }

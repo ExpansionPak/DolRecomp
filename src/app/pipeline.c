@@ -1256,6 +1256,7 @@ static int prepare_llvm_function_abis(const LoadedCodeSection* sections,
                                       u32 section_count,
                                       DolLLVMFunctionRange* ranges,
                                       u32 range_count, DolLLVMRuntime runtime,
+                                      DolLLVMNativeABIPolicy policy,
                                       const u32* entry_points,
                                       u32 entry_point_count,
                                       FILE* fallback_report,
@@ -1483,6 +1484,8 @@ static int prepare_llvm_function_abis(const LoadedCodeSection* sections,
         !dolllvm_propagate_function_abis(ranges, range_count, edges,
                                          edge_count))
         goto fail;
+    dolllvm_finish_function_abis(ranges, range_count, policy, runtime, edges,
+                                 edge_count);
     if (runtime == DOLLLVM_RUNTIME_MODERNGEKKO)
         for (u32 range_index = 0; range_index < range_count; range_index++)
             memset(ranges[range_index].escape_state, 0,
@@ -2099,7 +2102,8 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
         cache_dir[0] = '\0';
     if (!prepare_llvm_function_abis(
             sections, section_count, ranges, range_count,
-            (DolLLVMRuntime)options->llvm_runtime, entry_points,
+            (DolLLVMRuntime)options->llvm_runtime,
+            (DolLLVMNativeABIPolicy)options->llvm_native_abi, entry_points,
             entry_point_count, fallback_report, &native_entry_candidates,
             &native_entry_candidate_count, &native_entry_candidate_capacity))
         goto fail;
@@ -2107,8 +2111,6 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
     if (!llvm_fast_iteration())
         malloc_trim(0);
 #endif
-    dolllvm_apply_native_abi_policy(
-        ranges, range_count, (DolLLVMNativeABIPolicy)options->llvm_native_abi);
     for (u32 i = 0; i < patch_count; i++) {
         const DolLLVMFunctionRange* range =
             llvm_range_for(ranges, range_count, patches[i].start);
