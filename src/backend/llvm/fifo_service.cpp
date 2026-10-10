@@ -129,18 +129,17 @@ Value *FunctionEmitter::externalFifoWrite(Value *address, Value *value,
   builder_.CreateBr(partialInvoke);
 
   builder_.SetInsertPoint(partialInvoke);
-  Value *partialContext = builder_.CreateLoad(
-      pointer, builder_.CreateStructGEP(servicesType, services, 2));
-  StructType *resultType = StructType::get(context_, {i64, i32, i32});
-  CallInst *partialResult = builder_.CreateCall(
-      FunctionType::get(resultType, {pointer, i32, i32, i64, i32, i64}, false),
-      partialCallback,
-      {partialContext, builder_.getInt32(current_pc_), address,
-       builder_.CreateZExtOrTrunc(value, i64), builder_.getInt32(width), elapsed});
-  partialResult->addFnAttr(Attribute::NoUnwind);
-  Value *partialStatus = builder_.CreateExtractValue(partialResult, 1);
-  Value *partialRemaining = builder_.CreateExtractValue(partialResult, 2);
-  builder_.CreateStore(partialRemaining, remainingOut);
+  // The service returns a 16-byte struct, which the C ABI returns in registers
+  // on SysV but through a hidden pointer on Win64. Call it through C.
+  FunctionCallee partialService = module_.getOrInsertFunction(
+      "moderngekko_write_fifo_partial",
+      FunctionType::get(i32, {pointer, i32, i32, i64, i32, i64, pointer}, false));
+  CallInst *partialStatus = builder_.CreateCall(
+      partialService,
+      {ctx_, builder_.getInt32(current_pc_), address,
+       builder_.CreateZExtOrTrunc(value, i64), builder_.getInt32(width), elapsed,
+       remainingOut});
+  partialStatus->addFnAttr(Attribute::NoUnwind);
   builder_.CreateCondBr(
       builder_.CreateICmpEQ(partialStatus, builder_.getInt32(ServiceFallback)),
       fullInvoke, partialClassify, MDBuilder(context_).createBranchWeights(1, 2000));

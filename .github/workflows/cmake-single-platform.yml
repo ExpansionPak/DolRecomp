@@ -199,7 +199,12 @@ jobs:
       - name: Test (MSVC)
         if: matrix.toolchain == 'msvc'
         shell: pwsh
-        run: ctest --test-dir build --build-config Release --output-on-failure
+        # llvm_generated_compile runs cl directly, so it needs the dev shell env.
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          ctest --test-dir build --build-config Release --output-on-failure
 
       # Serial: these tests share artifacts in the build directory and report
       # an inconsistent subset of failures when run in parallel.

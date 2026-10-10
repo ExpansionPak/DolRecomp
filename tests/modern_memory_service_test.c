@@ -160,39 +160,38 @@ static uint32_t should_intercept(void* opaque, uint32_t guest_pc)
     return guest_pc == context->intercept_pc;
 }
 
-MGNativeExit raw_func_80003120(const MGNativeRuntime*, const MGNativeState*,
-                           uint64_t*, uint64_t*, uint64_t*,
-                           uint32_t, uint32_t, uint32_t) __asm__("func_80003120");
-MGNativeExit raw_func_80003140(const MGNativeRuntime*, const MGNativeState*,
-                           uint64_t*, uint64_t*, uint64_t*,
-                           uint32_t, uint32_t, uint32_t) __asm__("func_80003140");
-MGNativeExit raw_func_80003500(const MGNativeRuntime*, const MGNativeState*,
-                           uint64_t*, uint64_t*, uint64_t*,
-                           uint32_t, uint32_t, uint32_t) __asm__("func_80003500");
-MGNativeExit raw_func_80003D40(const MGNativeRuntime*, const MGNativeState*,
-                           uint64_t*, uint64_t*, uint64_t*,
-                           uint32_t, uint32_t, uint32_t) __asm__("func_80003D40");
-MGNativeExit raw_func_80003DA0(const MGNativeRuntime*, const MGNativeState*,
-                           uint64_t*, uint64_t*, uint64_t*,
-                           uint32_t, uint32_t, uint32_t) __asm__("func_80003DA0");
-MGNativeExit raw_func_80004A00(const MGNativeRuntime*, const MGNativeState*,
-                           uint64_t*, uint64_t*, uint64_t*,
-                           uint32_t, uint32_t, uint32_t) __asm__("func_80004A00");
-MGNativeExit raw_func_80004E00(const MGNativeRuntime*, const MGNativeState*,
-                           uint64_t*, uint64_t*, uint64_t*,
-                           uint32_t, uint32_t, uint32_t) __asm__("func_80004E00");
-MGNativeExit raw_func_80005000(const MGNativeRuntime*, const MGNativeState*,
-                           uint64_t*, uint64_t*, uint64_t*,
-                           uint32_t, uint32_t, uint32_t) __asm__("func_80005000");
-MGNativeExit raw_func_80004D00(const MGNativeRuntime*, const MGNativeState*,
-                           uint64_t*, uint64_t*, uint64_t*,
-                           uint32_t, uint32_t, uint32_t) __asm__("func_80004D00");
-MGNativeExit raw_func_80004D20(const MGNativeRuntime*, const MGNativeState*,
-                           uint64_t*, uint64_t*, uint64_t*,
-                           uint32_t, uint32_t, uint32_t) __asm__("func_80004D20");
-MGNativeExit raw_func_80004D40(const MGNativeRuntime*, const MGNativeState*,
-                           uint64_t*, uint64_t*, uint64_t*,
-                           uint32_t, uint32_t, uint32_t) __asm__("func_80004D40");
+// Bind raw_func_X to the generated func_X symbol. GNU compilers take an asm
+// label, which needs the platform symbol prefix; MSVC has no asm labels, so it
+// gets a linker alias instead.
+#define MG_STRINGIFY2(x) #x
+#define MG_STRINGIFY(x) MG_STRINGIFY2(x)
+#if defined(_MSC_VER) && !defined(__clang__)
+#define MG_RAW_LABEL(addr)
+#define MG_RAW_ALIAS(addr) \
+    __pragma(comment(linker, "/alternatename:raw_func_" #addr "=func_" #addr))
+#else
+#define MG_RAW_LABEL(addr) \
+    __asm__(MG_STRINGIFY(__USER_LABEL_PREFIX__) "func_" #addr)
+#define MG_RAW_ALIAS(addr)
+#endif
+#define MG_DECLARE_RAW(addr) \
+    MGNativeExit raw_func_##addr(const MGNativeRuntime*, const MGNativeState*, \
+                                 uint64_t*, uint64_t*, uint64_t*, \
+                                 uint32_t, uint32_t, uint32_t) \
+        MG_RAW_LABEL(addr); \
+    MG_RAW_ALIAS(addr)
+
+MG_DECLARE_RAW(80003120)
+MG_DECLARE_RAW(80003140)
+MG_DECLARE_RAW(80003500)
+MG_DECLARE_RAW(80003D40)
+MG_DECLARE_RAW(80003DA0)
+MG_DECLARE_RAW(80004A00)
+MG_DECLARE_RAW(80004E00)
+MG_DECLARE_RAW(80005000)
+MG_DECLARE_RAW(80004D00)
+MG_DECLARE_RAW(80004D20)
+MG_DECLARE_RAW(80004D40)
 
 static uint64_t staged_values[256];
 static uint64_t staged_dirty[4];
@@ -586,6 +585,17 @@ uint32_t moderngekko_write_memory(const MGNativeRuntime* runtime, uint32_t pc,
                                   uint32_t size, uint64_t elapsed,
                                   uint32_t* remaining) {
     MGNativeMemoryResult result = runtime->services->write_memory(
+        runtime->services->context, pc, address, value, size, elapsed);
+    *remaining = result.remaining_cycles;
+    return result.status;
+}
+
+uint32_t moderngekko_write_fifo_partial(const MGNativeRuntime* runtime,
+                                        uint32_t pc, uint32_t address,
+                                        uint64_t value, uint32_t size,
+                                        uint64_t elapsed,
+                                        uint32_t* remaining) {
+    MGNativeMemoryResult result = runtime->services->write_fifo_partial(
         runtime->services->context, pc, address, value, size, elapsed);
     *remaining = result.remaining_cycles;
     return result.status;
