@@ -306,12 +306,91 @@ static int emit_lookup_indexed(FILE* out, const FunctionList* funcs) {
     return 1;
 }
 
+// Past a few uniform runs, binary search beats a linear chain of range checks.
+#define DISPATCH_LINEAR_MAX_RUNS 16u
+
+static int emit_lookup_search(FILE* out, const FunctionList* funcs,
+                              const char* symbol_suffix) {
+    FunctionRange* sorted =
+        (FunctionRange*)malloc(funcs->count * sizeof(*sorted));
+    if (!sorted)
+        return 0;
+    u32 count = 0;
+    for (u32 i = 0; i < funcs->count; i++) {
+        if (funcs->ranges[i].start < funcs->ranges[i].end)
+            sorted[count++] = funcs->ranges[i];
+    }
+    if (count == 0) {
+        free(sorted);
+        return 0;
+    }
+    qsort(sorted, count, sizeof(*sorted), range_compare);
+    // Overlapping ranges keep the linear form to preserve first-match order.
+    for (u32 i = 1; i < count; i++) {
+        if (sorted[i - 1u].end > sorted[i].start) {
+            free(sorted);
+            return 0;
+        }
+    }
+
+    // Coverage guard; module-table generators scrape this form.
+    fprintf(out, "    if (!(");
+    for (u32 i = 0; i < count;) {
+        u32 span_end = i + 1u;
+        while (span_end < count && sorted[span_end - 1u].end == sorted[span_end].start)
+            span_end++;
+        fprintf(out, "%s\n          (address >= 0x%08Xu && address < 0x%08Xu)",
+                i ? " ||" : "", sorted[i].start, sorted[span_end - 1u].end);
+        i = span_end;
+    }
+    fprintf(out, "))\n        return NULL;\n");
+    fprintf(out, "    static const u32 range_start[%u] = {\n", count);
+    for (u32 i = 0; i < count; i++)
+        fprintf(out, "        0x%08Xu,\n", sorted[i].start);
+    fprintf(out, "    };\n");
+    fprintf(out, "    static const u32 range_end[%u] = {\n", count);
+    for (u32 i = 0; i < count; i++)
+        fprintf(out, "        0x%08Xu,\n", sorted[i].end);
+    fprintf(out, "    };\n");
+    fprintf(out, "    static const DolRecompFunction range_function[%u] = {\n",
+            count);
+    for (u32 i = 0; i < count; i++)
+        fprintf(out, "        func_%08X%s,\n", sorted[i].start, symbol_suffix);
+    fprintf(out, "    };\n");
+    fprintf(out, "    u32 low = 0u;\n");
+    fprintf(out, "    u32 high = %uu;\n", count);
+    fprintf(out, "    while (low < high) {\n");
+    fprintf(out, "        u32 middle = low + ((high - low) >> 1);\n");
+    fprintf(out, "        if (range_start[middle] <= address)\n");
+    fprintf(out, "            low = middle + 1u;\n");
+    fprintf(out, "        else\n");
+    fprintf(out, "            high = middle;\n");
+    fprintf(out, "    }\n");
+    fprintf(out, "    if (low == 0u)\n");
+    fprintf(out, "        return NULL;\n");
+    fprintf(out, "    low--;\n");
+    fprintf(out,
+            "    if (address < range_end[low] && "
+            "((address - range_start[low]) & 3u) == 0u)\n");
+    fprintf(out, "        return range_function[low];\n");
+    fprintf(out, "    return NULL;\n");
+    fprintf(out, "}\n");
+    free(sorted);
+    return 1;
+}
+
 void emit_function_lookup(FILE* out, const FunctionList* funcs,
                           const char* symbol_suffix) {
     fprintf(out,
             "\nstatic inline DolRecompFunction "
             "dolrecomp_find_original%s(u32 address) {\n",
             symbol_suffix);
+    u32 run_count = 0;
+    for (u32 first = 0; first < funcs->count; run_count++)
+        first = uniform_run_end(funcs, first);
+    if (run_count > DISPATCH_LINEAR_MAX_RUNS &&
+        emit_lookup_search(out, funcs, symbol_suffix))
+        return;
     for (u32 first = 0; first < funcs->count;) {
         u32 end = uniform_run_end(funcs, first);
         emit_lookup_run(out, funcs, first, end, symbol_suffix);

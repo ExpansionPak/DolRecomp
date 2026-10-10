@@ -81,7 +81,71 @@ static char* emit_dispatch_to_string(void) {
     return buf;
 }
 
+// Many irregular ranges in two gapped spans, as function partitioning emits.
+static char* emit_irregular_lookup_to_string(void) {
+    FunctionList funcs = {0};
+    FILE* f = NULL;
+    char* buf = NULL;
+    u32 start = BASE;
+
+    for (u32 i = 0; i < 40u; i++) {
+        u32 width = 0x10u + (i % 5u) * 0x8u;
+        if (i == 20u)
+            start = BASE + 0x2000u;
+        if (!function_list_add(&funcs, start, start + width)) {
+            function_list_free(&funcs);
+            return NULL;
+        }
+        start += width;
+    }
+
+    f = tmpfile();
+    if (!f) {
+        function_list_free(&funcs);
+        return NULL;
+    }
+    emit_function_lookup(f, &funcs, "");
+    function_list_free(&funcs);
+    fflush(f);
+
+    long size = ftell(f);
+    if (size < 0) {
+        fclose(f);
+        return NULL;
+    }
+    rewind(f);
+    buf = (char*)malloc((size_t)size + 1u);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    size_t got = fread(buf, 1, (size_t)size, f);
+    buf[got] = '\0';
+    fclose(f);
+    return buf;
+}
+
 int main(void) {
+    char* irregular = emit_irregular_lookup_to_string();
+    if (!irregular) {
+        check(0, "irregular: emit lookup");
+    } else {
+        check(strstr(irregular, "static const u32 range_start[40]") != NULL &&
+              strstr(irregular, "static const DolRecompFunction range_function[40]") != NULL &&
+              strstr(irregular, "if (range_start[middle] <= address)") != NULL,
+              "irregular: many ranges use a sorted search");
+        check(strstr(irregular, "return func_") == NULL &&
+              strstr(irregular, "chunk_functions") == NULL,
+              "irregular: no linear range-test chain remains");
+        check(strstr(irregular, "(address >= 0x80003000u && address < 0x80003280u)") != NULL &&
+              strstr(irregular, "(address >= 0x80005000u && address < 0x80005280u)") != NULL,
+              "irregular: coverage guard lists each contiguous span");
+        check(strstr(irregular, "func_80003000,") != NULL &&
+              strstr(irregular, "func_80005000,") != NULL,
+              "irregular: table covers both spans");
+        free(irregular);
+    }
+
     char* code = emit_dispatch_to_string();
     if (!code) {
         check(0, "emit dispatch helpers");
