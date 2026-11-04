@@ -388,6 +388,34 @@ bool rel_load_image(RELFile* rel, const char* path, u32 base_address) {
     rel->unresolved_offset = read_be32(h + 0x3C);
     u32 section_alignment = rel->file_size >= 0x44 ? read_be32(h + 0x40) : 4;
     u32 bss_alignment = rel->file_size >= 0x48 ? read_be32(h + 0x44) : 4;
+
+    /* Align the assigned code address, not just the REL image base. */
+    if (section_alignment > 1) {
+        if ((section_alignment & (section_alignment - 1u)) != 0) {
+            fputs("error: invalid REL section alignment", stderr);
+            rel_free(rel);
+            return false;
+        }
+        for (u32 i = 0; i < rel->section_count; i++) {
+            const u8* entry = rel->file_data + section_info_offset +
+                              i * REL_SECTION_ENTRY_SIZE;
+            u32 raw = read_be32(entry);
+            u32 size = read_be32(entry + 4);
+            if ((raw & 1u) && size) {
+                u32 offset = raw & ~1u;
+                u64 target = (u64)base_address + offset;
+                u64 aligned = ((target + section_alignment - 1u) /
+                               section_alignment) * section_alignment;
+                if (aligned > 0xFFFFFFFFu || aligned < offset) {
+                    fputs("error: REL base alignment overflow", stderr);
+                    rel_free(rel);
+                    return false;
+                }
+                base_address = (u32)(aligned - offset);
+                break;
+            }
+        }
+    }
     rel->base_address = base_address;
 
     if (rel->section_count == 0 ||
