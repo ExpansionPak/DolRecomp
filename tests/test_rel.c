@@ -176,6 +176,42 @@ static int test_unaligned_text_rejected(void) {
     return 1;
 }
 
+
+static int test_aligned_rel_base(void) {
+    const char* path = "test_aligned_base.rel";
+    CHECK(write_sample_rel(path, 1, R_PPC_ADDR32, 2, 0, 8),
+          "failed to write sample REL");
+
+    u8 file[0x120];
+    FILE* f = fopen(path, "r+b");
+    CHECK(f != NULL, "failed to open sample REL");
+    CHECK(fread(file, 1, sizeof(file), f) == sizeof(file),
+          "failed to read sample REL");
+
+    memmove(file + 0xFC, file + 0x100, 8);
+    write_be32(file + 0x58, 0xFDu);
+    write_be32(file + 0x40, 8);
+
+    rewind(f);
+    CHECK(fwrite(file, 1, sizeof(file), f) == sizeof(file),
+          "failed to update sample REL");
+    CHECK(fclose(f) == 0, "failed to close sample REL");
+
+    RELFile rel;
+    CHECK(rel_load(&rel, path, 0x80500000u),
+          "failed to load REL requiring base adjustment");
+    CHECK(rel.base_address == 0x80500004u,
+          "incorrect aligned REL base");
+    CHECK(rel.sections[1].address == 0x80500100u,
+          "incorrect executable section address");
+    CHECK(read_be32(rel.sections[1].data) == rel.sections[2].address,
+          "relocation incorrect after base adjustment");
+
+    rel_free(&rel);
+    remove(path);
+    return 1;
+}
+
 int main(void) {
     int ok = 1;
     ok &= test_self_relocation();
@@ -183,6 +219,7 @@ int main(void) {
     ok &= test_external_import_rejected();
     ok &= test_external_import_with_map();
     ok &= test_unaligned_text_rejected();
+    ok &= test_aligned_rel_base();
 
     if (!ok)
         return 1;
